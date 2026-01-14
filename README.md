@@ -2,111 +2,127 @@
 
 MCP server for continuous discussion sessions with OpenCode. Collaborate with GPT-5, Claude, Gemini, and other models through Claude Code.
 
+## Quick Start
+
+```bash
+# 1. Install
+uv pip install git+https://github.com/genomewalker/opencode-bridge.git
+
+# 2. Register with Claude Code
+opencode-bridge-install
+
+# 3. Use in Claude Code
+# The tools are now available - Claude will use them automatically
+```
+
 ## Features
 
 - **Continuous sessions**: Conversation history persists across messages
-- **Multiple models**: Access all OpenCode models (GPT-5.x, Claude Opus 4.5, Gemini 3, etc.)
-- **Agent support**: Use plan, build, explore, or general agents
+- **Multiple models**: Access all OpenCode models (GPT-5.x, Claude, Gemini, etc.)
+- **Agent support**: plan, build, explore, general agents
+- **Variant control**: Set reasoning effort (minimal → max)
 - **File attachment**: Share code files for review
-- **Persistent config**: Set your preferred defaults
+- **Session continuity**: Conversations continue across tool calls
 
 ## Installation
 
+### With uv (recommended)
+
 ```bash
-# With uv (recommended)
 uv pip install git+https://github.com/genomewalker/opencode-bridge.git
+```
 
-# With pip
+### With pip
+
+```bash
 pip install git+https://github.com/genomewalker/opencode-bridge.git
+```
 
-# From source
+### From source
+
+```bash
+git clone https://github.com/genomewalker/opencode-bridge.git
 cd opencode-bridge
 pip install -e .
 ```
 
-## Configuration
-
-### Set default model
+## Register with Claude Code
 
 ```bash
-# Via environment variable
-export OPENCODE_MODEL="openai/gpt-5.2-codex"
-export OPENCODE_AGENT="plan"
-
-# Via config file (~/.opencode-bridge/config.json)
-{
-  "model": "openai/gpt-5.2-codex",
-  "agent": "plan"
-}
-```
-
-### Available models
-
-```
-openai/gpt-5.2-codex          # Best for code
-openai/gpt-5.1-codex-max      # Longer context
-github-copilot/claude-opus-4.5 # Claude via Copilot
-github-copilot/gpt-5.2        # GPT-5.2 via Copilot
-```
-
-Run `opencode models` to see all available models.
-
-## Usage with Claude Code
-
-### Register as MCP server
-
-```bash
-# Automatic (recommended)
+# Install (registers MCP server)
 opencode-bridge-install
-
-# Manual
-claude mcp add --transport stdio --scope user opencode-bridge -- opencode-bridge
 
 # Verify
 claude mcp list
-```
 
-To uninstall:
-```bash
+# Uninstall
 opencode-bridge-uninstall
 ```
 
-### Use the skill
+## Available Models
 
-```
-/opencode                     Start a session
-/opencode plan <task>         Plan something
-/opencode ask <question>      Ask anything
-/opencode review <file>       Review code
-/opencode model <name>        Switch model
-/opencode end                 End session
-```
+| Provider | Models |
+|----------|--------|
+| openai | gpt-5.2-codex, gpt-5.1-codex-max, gpt-5.1-codex-mini |
+| github-copilot | claude-opus-4.5, claude-sonnet-4.5, gpt-5, gemini-2.5-pro |
+| opencode | gpt-5-nano (free), glm-4.7-free, grok-code |
 
-### MCP Tools
+Run `opencode models` to see all available models.
+
+## MCP Tools
 
 | Tool | Description |
 |------|-------------|
-| `opencode_models` | List available models |
-| `opencode_agents` | List available agents |
 | `opencode_start` | Start a new session |
 | `opencode_discuss` | Send a message |
-| `opencode_plan` | Start planning with plan agent |
+| `opencode_plan` | Start planning discussion |
 | `opencode_brainstorm` | Open-ended brainstorming |
 | `opencode_review` | Review code |
-| `opencode_model` | Change model for session |
-| `opencode_agent` | Change agent for session |
+| `opencode_models` | List available models |
+| `opencode_agents` | List available agents |
+| `opencode_model` | Change session model |
+| `opencode_agent` | Change session agent |
+| `opencode_variant` | Change reasoning effort |
 | `opencode_config` | Show current configuration |
-| `opencode_configure` | Set default model/agent |
+| `opencode_configure` | Set defaults (persisted) |
 | `opencode_history` | Show conversation history |
 | `opencode_sessions` | List all sessions |
 | `opencode_switch` | Switch to another session |
 | `opencode_end` | End current session |
+| `opencode_health` | Server health check |
+
+## Configuration
+
+### Environment variables
+
+```bash
+export OPENCODE_MODEL="openai/gpt-5.2-codex"
+export OPENCODE_AGENT="plan"
+export OPENCODE_VARIANT="medium"
+```
+
+### Config file
+
+`~/.opencode-bridge/config.json`:
+```json
+{
+  "model": "openai/gpt-5.2-codex",
+  "agent": "plan",
+  "variant": "medium"
+}
+```
+
+### Variants (reasoning effort)
+
+`minimal` → `low` → `medium` → `high` → `xhigh` → `max`
+
+Higher variants use more reasoning tokens for complex tasks.
 
 ## Requirements
 
 - Python 3.10+
-- OpenCode CLI installed (`~/.opencode/bin/opencode`)
-- mcp>=1.0.0
+- [OpenCode CLI](https://opencode.ai) installed
+- Claude Code
 
 ## License
 
