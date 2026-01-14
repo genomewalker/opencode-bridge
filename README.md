@@ -55,16 +55,20 @@ Run `opencode models` to see all available models.
 
 ### Register as MCP server
 
-Add to `~/.claude/settings.json`:
+```bash
+# Automatic (recommended)
+opencode-bridge-install
 
-```json
-{
-  "mcpServers": {
-    "opencode-bridge": {
-      "command": "opencode-bridge"
-    }
-  }
-}
+# Manual
+claude mcp add --transport stdio --scope user opencode-bridge -- opencode-bridge
+
+# Verify
+claude mcp list
+```
+
+To uninstall:
+```bash
+opencode-bridge-uninstall
 ```
 
 ### Use the skill

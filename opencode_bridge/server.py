@@ -17,27 +17,29 @@ Configuration:
 
 import os
 import json
-import subprocess
+import asyncio
 import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass, field, asdict
 
-from mcp.server import Server
+from mcp.server import Server, InitializationOptions
 from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent
+from mcp.types import Tool, TextContent, ServerCapabilities, ToolsCapability
 
 
 # Default configuration
 DEFAULT_MODEL = "openai/gpt-5.2-codex"
 DEFAULT_AGENT = "plan"
+DEFAULT_VARIANT = "medium"
 
 
 @dataclass
 class Config:
     model: str = DEFAULT_MODEL
     agent: str = DEFAULT_AGENT
+    variant: str = DEFAULT_VARIANT
 
     @classmethod
     def load(cls) -> "Config":
@@ -50,12 +52,14 @@ class Config:
                 data = json.loads(config_path.read_text())
                 config.model = data.get("model", config.model)
                 config.agent = data.get("agent", config.agent)
+                config.variant = data.get("variant", config.variant)
             except Exception:
                 pass
 
         # Environment variables override config file
         config.model = os.environ.get("OPENCODE_MODEL", config.model)
         config.agent = os.environ.get("OPENCODE_AGENT", config.agent)
+        config.variant = os.environ.get("OPENCODE_VARIANT") or config.variant
 
         return config
 
@@ -63,10 +67,8 @@ class Config:
         config_dir = Path.home() / ".opencode-bridge"
         config_dir.mkdir(parents=True, exist_ok=True)
         config_path = config_dir / "config.json"
-        config_path.write_text(json.dumps({
-            "model": self.model,
-            "agent": self.agent
-        }, indent=2))
+        data = {"model": self.model, "agent": self.agent, "variant": self.variant}
+        config_path.write_text(json.dumps(data, indent=2))
 
 
 def find_opencode() -> Optional[Path]:
@@ -102,6 +104,7 @@ class Session:
     id: str
     model: str
     agent: str
+    variant: str = DEFAULT_VARIANT
     opencode_session_id: Optional[str] = None
     messages: list[Message] = field(default_factory=list)
     created: str = field(default_factory=lambda: datetime.now().isoformat())
@@ -114,6 +117,7 @@ class Session:
             "id": self.id,
             "model": self.model,
             "agent": self.agent,
+            "variant": self.variant,
             "opencode_session_id": self.opencode_session_id,
             "created": self.created,
             "messages": [asdict(m) for m in self.messages]
@@ -126,7 +130,8 @@ class Session:
         session = cls(
             id=data["id"],
             model=data["model"],
-            agent=data.get("agent", "build"),
+            agent=data.get("agent", DEFAULT_AGENT),
+            variant=data.get("variant", DEFAULT_VARIANT),
             opencode_session_id=data.get("opencode_session_id"),
             created=data.get("created", datetime.now().isoformat())
         )
@@ -137,6 +142,7 @@ class Session:
 
 class OpenCodeBridge:
     def __init__(self):
+        self.start_time = datetime.now()
         self.config = Config.load()
         self.sessions: dict[str, Session] = {}
         self.active_session: Optional[str] = None
@@ -154,22 +160,27 @@ class OpenCodeBridge:
             except Exception:
                 pass
 
-    def _run_opencode(self, *args, timeout: int = 300) -> tuple[str, int]:
-        """Run opencode CLI command and return output."""
+    async def _run_opencode(self, *args, timeout: int = 300) -> tuple[str, int]:
+        """Run opencode CLI command and return output (async)."""
         if not OPENCODE_BIN:
             return "OpenCode not installed. Install from: https://opencode.ai", 1
 
-        cmd = [str(OPENCODE_BIN)] + list(args)
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
+            proc = await asyncio.create_subprocess_exec(
+                str(OPENCODE_BIN), *args,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(input=b''),
                 timeout=timeout
             )
-            output = result.stdout or result.stderr
-            return output.strip(), result.returncode
-        except subprocess.TimeoutExpired:
+            output = stdout.decode() or stderr.decode()
+            return output.strip(), proc.returncode or 0
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
             return "Command timed out", 1
         except Exception as e:
             return f"Error: {e}", 1
@@ -180,7 +191,7 @@ class OpenCodeBridge:
         if provider:
             args.append(provider)
 
-        output, code = self._run_opencode(*args)
+        output, code = await self._run_opencode(*args)
         if code != 0:
             return f"Error listing models: {output}"
 
@@ -206,7 +217,7 @@ class OpenCodeBridge:
 
     async def list_agents(self) -> str:
         """List available agents from OpenCode."""
-        output, code = self._run_opencode("agent", "list")
+        output, code = await self._run_opencode("agent", "list")
         if code != 0:
             return f"Error listing agents: {output}"
 
@@ -225,35 +236,42 @@ class OpenCodeBridge:
         self,
         session_id: str,
         model: Optional[str] = None,
-        agent: Optional[str] = None
+        agent: Optional[str] = None,
+        variant: Optional[str] = None
     ) -> str:
         # Use config defaults if not specified
         model = model or self.config.model
         agent = agent or self.config.agent
+        variant = variant or self.config.variant
 
         session = Session(
             id=session_id,
             model=model,
-            agent=agent
+            agent=agent,
+            variant=variant
         )
         self.sessions[session_id] = session
         self.active_session = session_id
         session.save(self.sessions_dir / f"{session_id}.json")
 
-        return f"Session '{session_id}' started\n  Model: {model}\n  Agent: {agent}"
+        result = f"Session '{session_id}' started\n  Model: {model}\n  Agent: {agent}"
+        if variant:
+            result += f"\n  Variant: {variant}"
+        return result
 
     def get_config(self) -> str:
         """Get current configuration."""
         return f"""Current configuration:
   Model: {self.config.model}
   Agent: {self.config.agent}
+  Variant: {self.config.variant}
 
 Set via:
   - ~/.opencode-bridge/config.json
-  - OPENCODE_MODEL and OPENCODE_AGENT env vars
+  - OPENCODE_MODEL, OPENCODE_AGENT, OPENCODE_VARIANT env vars
   - opencode_configure tool"""
 
-    def set_config(self, model: Optional[str] = None, agent: Optional[str] = None) -> str:
+    def set_config(self, model: Optional[str] = None, agent: Optional[str] = None, variant: Optional[str] = None) -> str:
         """Update and persist configuration."""
         changes = []
         if model:
@@ -262,6 +280,9 @@ Set via:
         if agent:
             self.config.agent = agent
             changes.append(f"agent: {agent}")
+        if variant:
+            self.config.variant = variant
+            changes.append(f"variant: {variant}")
 
         if changes:
             self.config.save()
@@ -281,10 +302,14 @@ Set via:
         session = self.sessions[sid]
         session.add_message("user", message)
 
-        # Build command
-        args = ["run"]
+        # Build command - message must come right after "run" as positional arg
+        args = ["run", message]
         args.extend(["--model", session.model])
         args.extend(["--agent", session.agent])
+
+        # Add variant if specified
+        if session.variant:
+            args.extend(["--variant", session.variant])
 
         # Continue session if we have an opencode session ID
         if session.opencode_session_id:
@@ -295,19 +320,36 @@ Set via:
             for f in files:
                 args.extend(["--file", f])
 
-        # Add the message
-        args.append(message)
+        # Use JSON format to get session ID
+        args.extend(["--format", "json"])
 
-        output, code = self._run_opencode(*args)
+        output, code = await self._run_opencode(*args)
 
         if code != 0:
             return f"Error: {output}"
 
-        # Try to extract session ID from output for continuation
-        # OpenCode outputs session info that we can parse
-        reply = output.strip()
+        # Parse JSON events for session ID and text
+        reply_parts = []
+        for line in output.split("\n"):
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+                if not session.opencode_session_id and "sessionID" in event:
+                    session.opencode_session_id = event["sessionID"]
+                if event.get("type") == "text":
+                    text = event.get("part", {}).get("text", "")
+                    if text:
+                        reply_parts.append(text)
+            except json.JSONDecodeError:
+                continue
+
+        reply = "".join(reply_parts)
         if reply:
             session.add_message("assistant", reply)
+
+        # Save if we got a reply or captured a new session ID
+        if reply or session.opencode_session_id:
             session.save(self.sessions_dir / f"{sid}.json")
 
         return reply or "No response received"
@@ -371,7 +413,7 @@ Please provide:
 
         # Check if it's a file path
         files = None
-        if Path(code_or_file).exists():
+        if Path(code_or_file).is_file():
             files = [code_or_file]
             prompt = f"Please review the attached code file, focusing on: {focus}"
         else:
@@ -391,7 +433,8 @@ Please provide:
         for sid, session in self.sessions.items():
             active = " (active)" if sid == self.active_session else ""
             msg_count = len(session.messages)
-            lines.append(f"  - {sid}: {session.model} [{session.agent}], {msg_count} messages{active}")
+            variant_str = f", variant={session.variant}" if session.variant else ""
+            lines.append(f"  - {sid}: {session.model} [{session.agent}{variant_str}], {msg_count} messages{active}")
         return "\n".join(lines)
 
     def get_history(self, session_id: Optional[str] = None, last_n: int = 20) -> str:
@@ -400,7 +443,8 @@ Please provide:
             return "No active session."
 
         session = self.sessions[sid]
-        lines = [f"Session: {sid}", f"Model: {session.model}, Agent: {session.agent}", "---"]
+        variant_str = f", Variant: {session.variant}" if session.variant else ""
+        lines = [f"Session: {sid}", f"Model: {session.model}, Agent: {session.agent}{variant_str}", "---"]
 
         for msg in session.messages[-last_n:]:
             role = "You" if msg.role == "user" else "OpenCode"
@@ -413,7 +457,8 @@ Please provide:
             return f"Session '{session_id}' not found."
         self.active_session = session_id
         session = self.sessions[session_id]
-        return f"Active session: '{session_id}' ({session.model}, {session.agent})"
+        variant_str = f", variant={session.variant}" if session.variant else ""
+        return f"Active session: '{session_id}' ({session.model}, {session.agent}{variant_str})"
 
     def set_model(self, model: str, session_id: Optional[str] = None) -> str:
         sid = session_id or self.active_session
@@ -439,6 +484,19 @@ Please provide:
 
         return f"Agent changed: {old_agent} -> {agent}"
 
+    def set_variant(self, variant: Optional[str], session_id: Optional[str] = None) -> str:
+        sid = session_id or self.active_session
+        if not sid or sid not in self.sessions:
+            return "No active session."
+
+        session = self.sessions[sid]
+        old_variant = session.variant or "none"
+        session.variant = variant
+        session.save(self.sessions_dir / f"{sid}.json")
+
+        new_variant = variant or "none"
+        return f"Variant changed: {old_variant} -> {new_variant}"
+
     def end_session(self, session_id: Optional[str] = None) -> str:
         sid = session_id or self.active_session
         if not sid or sid not in self.sessions:
@@ -453,6 +511,15 @@ Please provide:
             self.active_session = None
 
         return f"Session '{sid}' ended."
+
+    def health_check(self) -> dict:
+        """Return server health status."""
+        uptime_seconds = int((datetime.now() - self.start_time).total_seconds())
+        return {
+            "status": "ok",
+            "sessions": len(self.sessions),
+            "uptime": uptime_seconds
+        }
 
 
 # MCP Server setup
@@ -498,6 +565,10 @@ async def list_tools():
                     "agent": {
                         "type": "string",
                         "description": "Agent to use: plan, build, explore, general (default: plan)"
+                    },
+                    "variant": {
+                        "type": "string",
+                        "description": "Model variant for reasoning effort: minimal, low, medium, high, xhigh, max (default: medium)"
                     }
                 },
                 "required": ["session_id"]
@@ -596,6 +667,17 @@ async def list_tools():
             }
         ),
         Tool(
+            name="opencode_variant",
+            description="Change the model variant (reasoning effort) for the current session",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "variant": {"type": "string", "description": "New variant: minimal, low, medium, high, xhigh, max"}
+                },
+                "required": ["variant"]
+            }
+        ),
+        Tool(
             name="opencode_history",
             description="Get conversation history",
             inputSchema={
@@ -628,19 +710,25 @@ async def list_tools():
         ),
         Tool(
             name="opencode_config",
-            description="Get current configuration (default model and agent)",
+            description="Get current configuration (default model, agent, variant)",
             inputSchema={"type": "object", "properties": {}}
         ),
         Tool(
             name="opencode_configure",
-            description="Set default model and/or agent (persisted)",
+            description="Set default model, agent, and/or variant (persisted)",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "model": {"type": "string", "description": "Default model"},
-                    "agent": {"type": "string", "description": "Default agent"}
+                    "agent": {"type": "string", "description": "Default agent"},
+                    "variant": {"type": "string", "description": "Default variant: minimal, low, medium, high, xhigh, max"}
                 }
             }
+        ),
+        Tool(
+            name="opencode_health",
+            description="Health check: returns server status, session count, and uptime",
+            inputSchema={"type": "object", "properties": {}}
         )
     ]
 
@@ -655,8 +743,9 @@ async def call_tool(name: str, arguments: dict):
         elif name == "opencode_start":
             result = await bridge.start_session(
                 session_id=arguments["session_id"],
-                model=arguments.get("model", "openai/gpt-5.2-codex"),
-                agent=arguments.get("agent", "plan")
+                model=arguments.get("model"),
+                agent=arguments.get("agent"),
+                variant=arguments.get("variant")
             )
         elif name == "opencode_discuss":
             result = await bridge.send_message(
@@ -679,6 +768,8 @@ async def call_tool(name: str, arguments: dict):
             result = bridge.set_model(arguments["model"])
         elif name == "opencode_agent":
             result = bridge.set_agent(arguments["agent"])
+        elif name == "opencode_variant":
+            result = bridge.set_variant(arguments["variant"])
         elif name == "opencode_history":
             result = bridge.get_history(last_n=arguments.get("last_n", 20))
         elif name == "opencode_sessions":
@@ -692,8 +783,12 @@ async def call_tool(name: str, arguments: dict):
         elif name == "opencode_configure":
             result = bridge.set_config(
                 model=arguments.get("model"),
-                agent=arguments.get("agent")
+                agent=arguments.get("agent"),
+                variant=arguments.get("variant")
             )
+        elif name == "opencode_health":
+            health = bridge.health_check()
+            result = f"Status: {health['status']}\nSessions: {health['sessions']}\nUptime: {health['uptime']}s"
         else:
             result = f"Unknown tool: {name}"
 
@@ -707,8 +802,13 @@ def main():
     import asyncio
 
     async def run():
+        init_options = InitializationOptions(
+            server_name="opencode-bridge",
+            server_version="0.1.0",
+            capabilities=ServerCapabilities(tools=ToolsCapability())
+        )
         async with stdio_server() as (read_stream, write_stream):
-            await server.run(read_stream, write_stream)
+            await server.run(read_stream, write_stream, init_options)
 
     asyncio.run(run())
 

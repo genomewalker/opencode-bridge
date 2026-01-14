@@ -31,6 +31,8 @@ Repository = "https://github.com/genomewalker/opencode-bridge"
 
 [project.scripts]
 opencode-bridge = "opencode_bridge.server:main"
+opencode-bridge-install = "opencode_bridge.install:install"
+opencode-bridge-uninstall = "opencode_bridge.install:uninstall"
 
 [tool.hatch.build.targets.wheel]
 packages = ["opencode_bridge"]
