@@ -1,0 +1,22 @@
+{
+  "name": "opencode-bridge",
+  "version": "0.1.0",
+  "description": "Continuous discussion sessions with OpenCode (GPT-5, Claude, Gemini)",
+  "author": "Antonio Fernandez-Guerra",
+  "repository": "https://github.com/genomewalker/opencode-bridge",
+  "license": "MIT",
+  "keywords": ["opencode", "gpt", "discussion", "code-review", "mcp"],
+  "mcpServers": {
+    "opencode-bridge": {
+      "command": "opencode-bridge",
+      "description": "Continuous OpenCode discussion sessions"
+    }
+  },
+  "skills": [
+    {
+      "name": "opencode",
+      "file": "skills/opencode.md",
+      "description": "Start continuous discussion with OpenCode"
+    }
+  ]
+}
