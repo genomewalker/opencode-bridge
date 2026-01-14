@@ -303,18 +303,14 @@ Set via:
         session = self.sessions[sid]
         session.add_message("user", message)
 
-        # For long messages, write to temp file to avoid shell escaping issues
-        temp_file = None
-        if len(message) > 500:
-            temp_file = tempfile.NamedTemporaryFile(
-                mode='w', suffix='.txt', delete=False, prefix='opencode_msg_'
-            )
-            temp_file.write(message)
-            temp_file.close()
-            args = ["run", "Respond to the message in the attached file."]
-            files = (files or []) + [temp_file.name]
-        else:
-            args = ["run", message]
+        # Always write message to temp file to avoid shell escaping issues
+        temp_file = tempfile.NamedTemporaryFile(
+            mode='w', suffix='.md', delete=False, prefix='opencode_msg_'
+        )
+        temp_file.write(message)
+        temp_file.close()
+        args = ["run", "Respond to the request in the attached message file."]
+        files = (files or []) + [temp_file.name]
 
         args.extend(["--model", session.model])
         args.extend(["--agent", session.agent])
