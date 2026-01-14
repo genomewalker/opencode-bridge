@@ -19,6 +19,7 @@ import os
 import json
 import asyncio
 import shutil
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -302,8 +303,19 @@ Set via:
         session = self.sessions[sid]
         session.add_message("user", message)
 
-        # Build command - message must come right after "run" as positional arg
-        args = ["run", message]
+        # For long messages, write to temp file to avoid shell escaping issues
+        temp_file = None
+        if len(message) > 500:
+            temp_file = tempfile.NamedTemporaryFile(
+                mode='w', suffix='.txt', delete=False, prefix='opencode_msg_'
+            )
+            temp_file.write(message)
+            temp_file.close()
+            args = ["run", "Respond to the message in the attached file."]
+            files = (files or []) + [temp_file.name]
+        else:
+            args = ["run", message]
+
         args.extend(["--model", session.model])
         args.extend(["--agent", session.agent])
 
@@ -324,6 +336,13 @@ Set via:
         args.extend(["--format", "json"])
 
         output, code = await self._run_opencode(*args)
+
+        # Cleanup temp file
+        if temp_file:
+            try:
+                os.unlink(temp_file.name)
+            except OSError:
+                pass
 
         if code != 0:
             return f"Error: {output}"
