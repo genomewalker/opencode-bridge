@@ -286,7 +286,7 @@ Set via:
 
         if changes:
             self.config.save()
-            return f"Configuration updated:\n  " + "\n  ".join(changes)
+            return "Configuration updated:\n  " + "\n  ".join(changes)
         return "No changes made."
 
     async def send_message(
