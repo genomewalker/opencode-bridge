@@ -450,7 +450,7 @@ def build_synthesis_prompt(
         "## Original Request",
         user_prompt,
         "",
-        f"## Files Analyzed",
+        "## Files Analyzed",
         file_desc,
         "",
         "## Chunk Analyses",
@@ -808,7 +808,7 @@ class OpenCodeBridge:
 
         if code != 0:
             # Fallback: concatenate raw chunk results
-            parts = [f"*Synthesis failed — showing raw chunk analyses:*\n"]
+            parts = ["*Synthesis failed — showing raw chunk analyses:*\n"]
             for cr in sorted(chunk_results, key=lambda c: c.get("chunk_index", 0)):
                 idx = cr.get("chunk_index", 0) + 1
                 fp = Path(cr.get("file", "")).name
