@@ -16,6 +16,7 @@ Configuration:
 """
 
 import os
+import re
 import json
 import asyncio
 import shutil
@@ -34,6 +35,13 @@ from mcp.types import Tool, TextContent, ServerCapabilities, ToolsCapability
 SMALL_FILE = 500        # lines
 MEDIUM_FILE = 1500      # lines
 LARGE_FILE = 5000       # lines
+
+# Chunked processing thresholds
+CHUNK_THRESHOLD = 2000   # lines — files above this get chunked
+CHUNK_SIZE = 800         # lines per chunk
+CHUNK_OVERLAP = 20       # overlap between adjacent chunks
+MAX_PARALLEL_CHUNKS = 6  # concurrency limit
+MAX_TOTAL_CHUNKS = 20    # safety cap
 
 # Language detection by extension
 LANG_MAP = {
@@ -304,6 +312,174 @@ def build_companion_prompt(
     return "\n".join(parts)
 
 
+# ---------------------------------------------------------------------------
+# Chunked Processing — map-reduce for large files
+# ---------------------------------------------------------------------------
+
+# Regex for natural code boundaries (language-agnostic)
+_BOUNDARY_RE = re.compile(
+    r"^(?:\s*$"                     # blank line
+    r"|(?:def |class |function |func |fn |pub fn |impl |module |package )"  # definitions
+    r"|(?:})\s*$"                   # closing brace on its own line
+    r"|(?://|#|/\*|\*/).{0,80}$"   # comment lines
+    r")",
+    re.MULTILINE,
+)
+
+
+def chunk_file(
+    filepath: str,
+    chunk_size: int = CHUNK_SIZE,
+    overlap: int = CHUNK_OVERLAP,
+) -> list[dict]:
+    """Split a file into overlapping chunks with boundary snapping.
+
+    Returns a list of dicts with keys:
+        chunk_index, total_chunks, start_line, end_line, content, filepath
+    """
+    p = Path(filepath)
+    try:
+        lines = p.read_text(errors="replace").splitlines(keepends=True)
+    except Exception:
+        return []
+
+    total = len(lines)
+    if total == 0:
+        return []
+    if total <= chunk_size:
+        return [{
+            "chunk_index": 0,
+            "total_chunks": 1,
+            "start_line": 1,
+            "end_line": total,
+            "content": "".join(lines),
+            "filepath": str(p),
+        }]
+
+    chunks: list[dict] = []
+    pos = 0
+    while pos < total:
+        end = min(pos + chunk_size, total)
+
+        # Snap to a natural boundary within ±50 lines of the cut point
+        if end < total:
+            best = end
+            scan_start = max(end - 50, pos + chunk_size // 2)
+            scan_end = min(end + 50, total)
+            for i in range(scan_start, scan_end):
+                if _BOUNDARY_RE.match(lines[i]):
+                    best = i + 1  # include the boundary line in this chunk
+                    break
+            end = best
+
+        chunk_content = "".join(lines[pos:end])
+        chunks.append({
+            "chunk_index": len(chunks),
+            "total_chunks": -1,  # filled in below
+            "start_line": pos + 1,  # 1-indexed
+            "end_line": end,
+            "content": chunk_content,
+            "filepath": str(p),
+        })
+
+        # Advance: overlap with previous chunk, but stop if we've reached the end
+        if end >= total:
+            break
+        pos = max(end - overlap, pos + 1)
+
+    # Fill in total_chunks
+    for c in chunks:
+        c["total_chunks"] = len(chunks)
+
+    return chunks
+
+
+def build_chunk_prompt(
+    user_prompt: str,
+    chunk_info: dict,
+    file_info: dict,
+    mode: str = "discuss",
+) -> str:
+    """Build a focused prompt for analyzing a single file chunk."""
+    name = file_info.get("name", Path(chunk_info["filepath"]).name)
+    language = file_info.get("language", "Unknown")
+    total_lines = file_info.get("lines", "?")
+    idx = chunk_info["chunk_index"] + 1
+    total = chunk_info["total_chunks"]
+    start = chunk_info["start_line"]
+    end = chunk_info["end_line"]
+
+    parts = [
+        f"You are analyzing **chunk {idx} of {total}** from `{name}` "
+        f"({language}, {total_lines} total lines).",
+        f"This chunk covers **lines {start}–{end}**.",
+        "",
+        "## Task",
+        user_prompt,
+        "",
+        "## Instructions",
+        "- Focus ONLY on the code in this chunk",
+        "- Note any references to code that might exist outside this chunk",
+        "- Be concise — your output will be combined with analyses of other chunks",
+        "- Include line numbers for any issues found",
+    ]
+
+    if mode == "review":
+        parts.append("- Categorize findings as: bug, security, design, performance, or style")
+
+    return "\n".join(parts)
+
+
+def build_synthesis_prompt(
+    user_prompt: str,
+    chunk_results: list[dict],
+    file_infos: list[dict],
+    mode: str = "discuss",
+) -> str:
+    """Build a prompt that merges chunk analyses into one coherent response."""
+    file_desc = ", ".join(
+        f"`{i.get('name', '?')}` ({i.get('lines', '?')} lines)"
+        for i in file_infos
+    )
+    n = len(chunk_results)
+
+    parts = [
+        f"You analyzed a large file in **{n} chunks**. "
+        "Synthesize the chunk analyses below into one coherent response.",
+        "",
+        "## Original Request",
+        user_prompt,
+        "",
+        f"## Files Analyzed",
+        file_desc,
+        "",
+        "## Chunk Analyses",
+    ]
+
+    for cr in sorted(chunk_results, key=lambda c: c.get("chunk_index", 0)):
+        idx = cr.get("chunk_index", 0) + 1
+        fp = Path(cr.get("file", "")).name
+        response = cr.get("response", "[analysis failed]")
+        if cr.get("error"):
+            response = f"[analysis failed: {cr['error']}]"
+        parts.append(f"\n### Chunk {idx} — `{fp}`")
+        parts.append(response)
+
+    parts.extend([
+        "",
+        "## Instructions",
+        "- Combine findings and remove duplicates (chunks overlap slightly)",
+        "- Organize by importance, not by chunk order",
+        "- Preserve line number references from the original analyses",
+        "- Provide an overall assessment at the top",
+    ])
+
+    if mode == "review":
+        parts.append("- Group findings by category: bugs, security, design, performance, style")
+
+    return "\n".join(parts)
+
+
 # Default configuration
 DEFAULT_MODEL = "openai/gpt-5.2-codex"
 DEFAULT_AGENT = "plan"
@@ -470,6 +646,182 @@ class OpenCodeBridge:
         except Exception as e:
             return f"Error: {e}", 1
 
+    @staticmethod
+    def _parse_opencode_response(output: str) -> tuple[str, Optional[str]]:
+        """Parse JSON-lines output from opencode CLI.
+
+        Returns (reply_text, session_id).
+        """
+        reply_parts: list[str] = []
+        session_id: Optional[str] = None
+        for line in output.split("\n"):
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+                if not session_id and "sessionID" in event:
+                    session_id = event["sessionID"]
+                if event.get("type") == "text":
+                    text = event.get("part", {}).get("text", "")
+                    if text:
+                        reply_parts.append(text)
+            except json.JSONDecodeError:
+                continue
+        return "".join(reply_parts), session_id
+
+    async def _run_chunk(
+        self,
+        chunk_info: dict,
+        file_info: dict,
+        user_prompt: str,
+        session: "Session",
+        mode: str = "discuss",
+    ) -> dict:
+        """Process a single file chunk through OpenCode (stateless)."""
+        result = {
+            "chunk_index": chunk_info["chunk_index"],
+            "file": chunk_info["filepath"],
+            "response": "",
+            "error": None,
+        }
+
+        # Write chunk to a temp file preserving the original extension
+        ext = Path(chunk_info["filepath"]).suffix or ".txt"
+        tmp = None
+        try:
+            tmp = tempfile.NamedTemporaryFile(
+                mode="w", suffix=ext, delete=False, prefix="opencode_chunk_"
+            )
+            tmp.write(chunk_info["content"])
+            tmp.close()
+
+            prompt = build_chunk_prompt(user_prompt, chunk_info, file_info, mode)
+
+            args = [
+                "run", prompt,
+                "--model", session.model,
+                "--agent", session.agent,
+                "--file", tmp.name,
+                "--format", "json",
+            ]
+            if session.variant:
+                args.extend(["--variant", session.variant])
+
+            output, code = await self._run_opencode(*args, timeout=300)
+
+            if code != 0:
+                result["error"] = output[:500]
+                return result
+
+            reply, _ = self._parse_opencode_response(output)
+            result["response"] = reply or "[no response]"
+
+        except Exception as e:
+            result["error"] = str(e)
+        finally:
+            if tmp:
+                try:
+                    os.unlink(tmp.name)
+                except OSError:
+                    pass
+        return result
+
+    async def _run_chunked(
+        self,
+        user_prompt: str,
+        files: list[str],
+        session: "Session",
+        mode: str = "discuss",
+    ) -> str:
+        """Map-reduce orchestrator: chunk large files, process in parallel, synthesize."""
+        small_files: list[str] = []
+        all_chunks: list[tuple[dict, dict]] = []  # (chunk_info, file_info)
+
+        for f in files:
+            info = get_file_info(f)
+            line_count = info.get("lines", 0)
+            if line_count > CHUNK_THRESHOLD:
+                chunks = chunk_file(f, CHUNK_SIZE, CHUNK_OVERLAP)
+                for c in chunks:
+                    all_chunks.append((c, info))
+            else:
+                small_files.append(f)
+
+        # Safety: if too many chunks, increase chunk size and re-chunk
+        if len(all_chunks) > MAX_TOTAL_CHUNKS:
+            all_chunks = []
+            bigger = CHUNK_SIZE * 2
+            for f in files:
+                info = get_file_info(f)
+                if info.get("lines", 0) > CHUNK_THRESHOLD:
+                    chunks = chunk_file(f, bigger, CHUNK_OVERLAP)
+                    for c in chunks:
+                        all_chunks.append((c, info))
+                # small_files already collected above
+
+        if not all_chunks:
+            return "No chunks to process."
+
+        # --- Map phase: run chunks in parallel ---
+        sem = asyncio.Semaphore(MAX_PARALLEL_CHUNKS)
+
+        async def _limited(chunk_info: dict, file_info: dict) -> dict:
+            async with sem:
+                return await self._run_chunk(chunk_info, file_info, user_prompt, session, mode)
+
+        tasks = [_limited(ci, fi) for ci, fi in all_chunks]
+        chunk_results: list[dict] = await asyncio.gather(*tasks)
+
+        # Check failure rate
+        failed = sum(1 for cr in chunk_results if cr.get("error"))
+        if failed > len(chunk_results) / 2:
+            return (
+                f"Chunked analysis failed: {failed}/{len(chunk_results)} chunks errored. "
+                "Try with a smaller file or increase the chunk size."
+            )
+
+        # --- Reduce phase: synthesize ---
+        file_infos = []
+        seen_paths: set[str] = set()
+        for _, fi in all_chunks:
+            fp = fi.get("path", "")
+            if fp not in seen_paths:
+                seen_paths.add(fp)
+                file_infos.append(fi)
+
+        synthesis_prompt = build_synthesis_prompt(user_prompt, chunk_results, file_infos, mode)
+
+        # Attach small files for reference context (not the large ones)
+        args = [
+            "run", synthesis_prompt,
+            "--model", session.model,
+            "--agent", session.agent,
+            "--format", "json",
+        ]
+        if session.variant:
+            args.extend(["--variant", session.variant])
+        for sf in small_files:
+            args.extend(["--file", sf])
+
+        # Longer timeout for synthesis
+        output, code = await self._run_opencode(*args, timeout=600)
+
+        if code != 0:
+            # Fallback: concatenate raw chunk results
+            parts = [f"*Synthesis failed — showing raw chunk analyses:*\n"]
+            for cr in sorted(chunk_results, key=lambda c: c.get("chunk_index", 0)):
+                idx = cr.get("chunk_index", 0) + 1
+                fp = Path(cr.get("file", "")).name
+                parts.append(f"\n### Chunk {idx} — `{fp}`")
+                if cr.get("error"):
+                    parts.append(f"[error: {cr['error']}]")
+                else:
+                    parts.append(cr.get("response", "[no response]"))
+            return "\n".join(parts)
+
+        reply, _ = self._parse_opencode_response(output)
+        return reply or "No response from synthesis."
+
     async def list_models(self, provider: Optional[str] = None) -> str:
         """List available models from OpenCode."""
         args = ["models"]
@@ -599,6 +951,27 @@ Set via:
         temp_file.close()
         files = (files or []) + [temp_file.name]
 
+        # --- Chunking gate: large user files get map-reduce processing ---
+        user_files = [f for f in files if not Path(f).name.startswith("opencode_msg_")]
+        needs_chunking = any(
+            get_file_info(f).get("lines", 0) > CHUNK_THRESHOLD
+            for f in user_files
+        )
+
+        if needs_chunking:
+            reply = await self._run_chunked(message, user_files, session, mode="discuss")
+            # Cleanup temp file
+            try:
+                os.unlink(temp_file.name)
+            except OSError:
+                pass
+            if reply:
+                session.add_message("assistant", reply)
+                session.save(self.sessions_dir / f"{sid}.json")
+            return reply or "No response received"
+
+        # --- Normal (non-chunked) path ---
+
         # Build prompt: companion system unless _raw is set
         if _raw:
             run_prompt = build_message_prompt(message, files)
@@ -631,7 +1004,6 @@ Set via:
         args.extend(["--format", "json"])
 
         # Scale timeout based on attached file size
-        user_files = [f for f in files if not Path(f).name.startswith("opencode_msg_")]
         total_lines = sum(get_file_info(f).get("lines", 0) for f in user_files)
         # Base 300s, +60s per 1000 lines above threshold, capped at 900s
         timeout = min(900, 300 + max(0, (total_lines - MEDIUM_FILE) * 60 // 1000))
@@ -649,22 +1021,10 @@ Set via:
             return f"Error: {output}"
 
         # Parse JSON events for session ID and text
-        reply_parts = []
-        for line in output.split("\n"):
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-                if not session.opencode_session_id and "sessionID" in event:
-                    session.opencode_session_id = event["sessionID"]
-                if event.get("type") == "text":
-                    text = event.get("part", {}).get("text", "")
-                    if text:
-                        reply_parts.append(text)
-            except json.JSONDecodeError:
-                continue
+        reply, new_session_id = self._parse_opencode_response(output)
+        if new_session_id and not session.opencode_session_id:
+            session.opencode_session_id = new_session_id
 
-        reply = "".join(reply_parts)
         if reply:
             session.add_message("assistant", reply)
 
@@ -737,10 +1097,16 @@ Set via:
             files = file_paths
             file_infos = [get_file_info(f) for f in file_paths]
             file_infos = [i for i in file_infos if i]
+            total_lines = sum(i.get("lines", 0) for i in file_infos)
+
+            # Chunking gate for large reviews
+            if total_lines > CHUNK_THRESHOLD:
+                prompt = build_review_prompt(file_infos, focus)
+                return await self._run_chunked(prompt, file_paths, self.sessions[sid], mode="review")
+
             prompt = build_review_prompt(file_infos, focus)
 
             # Increase timeout for large files
-            total_lines = sum(i.get("lines", 0) for i in file_infos)
             if total_lines > LARGE_FILE:
                 # Use variant=high for large reviews if not already high+
                 session = self.sessions[sid]
