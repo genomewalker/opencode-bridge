@@ -1,0 +1,379 @@
+/* ============================================================
+   docs.css — Documentation-specific styles
+   Layered on top of styles.css base
+   ============================================================ */
+
+/* --- Override smooth scroll — instant jump for long docs page --- */
+html { scroll-behavior: auto; }
+
+/* --- Docs Header: brand separator + section label --- */
+.brand-sep {
+  color: var(--dim);
+  margin: 0 2px;
+  font-weight: 300;
+}
+.brand-section {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+/* --- Docs nav: scrollable section links inside the single header --- */
+.docs-nav {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.docs-nav::-webkit-scrollbar { display: none; }
+
+/* --- Docs Hero (compact) --- */
+.docs-hero {
+  padding: 60px 0 20px;
+  text-align: center;
+}
+.docs-title {
+  font-size: clamp(24px, 4vw, 36px);
+  font-weight: 700;
+  color: var(--text-bright);
+  letter-spacing: -0.03em;
+  margin-bottom: 6px;
+}
+.version {
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--dim);
+  vertical-align: middle;
+}
+
+/* --- Doc Sections --- */
+.doc-section {
+  padding: 48px 0 36px;
+  border-top: 1px solid var(--panel-border);
+}
+
+.doc-section h2 {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-bright);
+  margin-bottom: 16px;
+  letter-spacing: -0.02em;
+}
+
+.doc-section h3 {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  margin-top: 28px;
+  margin-bottom: 10px;
+}
+
+.doc-section p {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.6;
+  margin-bottom: 12px;
+  max-width: 720px;
+}
+
+.doc-section ul, .doc-section ol {
+  padding-left: 20px;
+  margin-bottom: 14px;
+  max-width: 720px;
+}
+.doc-section li {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text);
+  margin-bottom: 5px;
+}
+
+.doc-section code {
+  font-size: 12px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 3px;
+  padding: 1px 5px;
+  color: var(--signal-cyan);
+}
+
+/* --- Badge --- */
+.badge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--dim);
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  padding: 2px 10px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+/* --- Feature Box --- */
+.feature-box {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  padding: 20px 24px;
+  margin-top: 16px;
+  max-width: 720px;
+}
+.feature-box h3 {
+  margin-top: 0;
+  margin-bottom: 12px;
+  color: var(--signal-cyan);
+  font-size: 13px;
+}
+.feature-box ul { margin-bottom: 0; }
+
+/* --- Prerequisite List --- */
+.prereq-list {
+  list-style: none;
+  padding: 0;
+}
+.prereq-list li {
+  padding: 6px 0;
+  padding-left: 16px;
+  position: relative;
+}
+.prereq-list li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 13px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--open-green);
+  box-shadow: 0 0 6px rgba(94, 227, 139, 0.4);
+}
+
+/* --- JSON syntax highlighting in code blocks --- */
+.json-key { color: var(--signal-cyan); }
+.json-val { color: var(--open-green); }
+.comment { color: var(--dim); font-style: italic; }
+
+/* --- Step List (ordered, styled) --- */
+.step-list {
+  list-style: none;
+  padding: 0;
+  counter-reset: step;
+  max-width: 720px;
+}
+.step-list > li {
+  counter-increment: step;
+  padding-left: 32px;
+  position: relative;
+  margin-bottom: 10px;
+}
+.step-list > li::before {
+  content: counter(step);
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1px solid var(--panel-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--dim);
+  background: var(--panel);
+}
+.step-list > li ul {
+  margin-top: 6px;
+}
+
+/* --- Tool Reference Cards --- */
+.tool-section {
+  margin-bottom: 32px;
+}
+
+.tool-section-title {
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--dim) !important;
+  margin-bottom: 14px !important;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.tool-ref {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  padding: 18px 22px;
+  margin-bottom: 12px;
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity 0.35s ease, transform 0.35s ease, border-color 0.3s;
+}
+.tool-ref.in-view {
+  opacity: 1;
+  transform: translateY(0);
+}
+.tool-ref:hover {
+  border-color: rgba(102, 217, 255, 0.15);
+}
+
+.tool-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.tool-ref-name {
+  font-size: 14px !important;
+  font-weight: 600;
+  color: var(--signal-cyan) !important;
+  background: none !important;
+  border: none !important;
+  padding: 0 !important;
+}
+
+.tool-tag {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid;
+}
+.tag-core { color: var(--claude-coral); border-color: rgba(255, 122, 107, 0.3); }
+.tag-session { color: var(--open-teal); border-color: rgba(51, 195, 185, 0.3); }
+.tag-config { color: var(--violet); border-color: rgba(155, 123, 255, 0.3); }
+
+.tool-summary {
+  font-size: 13px;
+  color: var(--text);
+  margin-bottom: 12px;
+  max-width: none;
+}
+
+.tool-notes {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--panel-border);
+}
+.tool-notes p {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 8px;
+  max-width: none;
+}
+
+/* --- Parameter Tables --- */
+.params {
+  margin-top: 12px;
+}
+.params h4 {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--dim);
+  margin-bottom: 8px;
+}
+
+.param-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin-bottom: 12px;
+}
+.param-table th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--dim);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--panel-border);
+  background: rgba(255, 255, 255, 0.015);
+}
+.param-table td {
+  padding: 7px 10px;
+  border-bottom: 1px solid rgba(20, 30, 39, 0.5);
+  color: var(--text);
+  vertical-align: top;
+}
+.param-table td:first-child {
+  white-space: nowrap;
+}
+.param-table td code {
+  font-size: 11px;
+}
+
+/* --- Strategy Cards --- */
+.strategy-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 10px;
+  margin-top: 16px;
+  margin-bottom: 24px;
+}
+
+.strategy-card {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity 0.35s ease, transform 0.35s ease;
+}
+.strategy-card.in-view {
+  opacity: 1;
+  transform: translateY(0);
+}
+.strategy-card p {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 0;
+  max-width: none;
+}
+
+.strat-header {
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--panel-border);
+}
+.strat-small { color: var(--open-green); }
+.strat-medium { color: var(--signal-cyan); }
+.strat-large { color: var(--claude-amber); }
+.strat-xlarge { color: var(--claude-coral); }
+
+/* --- Language Chips --- */
+.lang-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+.lang-chips .chip {
+  font-size: 10px;
+  padding: 3px 10px;
+}
+
+/* --- Responsive --- */
+@media (max-width: 768px) {
+  .docs-nav {
+    gap: 12px;
+  }
+  .param-table {
+    font-size: 11px;
+  }
+  .strategy-grid {
+    grid-template-columns: 1fr;
+  }
+}

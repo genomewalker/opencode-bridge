@@ -1,0 +1,665 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Docs — opencode-bridge</title>
+  <meta name="description" content="Full documentation for opencode-bridge MCP tools, auto-framing, chunked processing, and configuration." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300;0,400;0,600;0,700;1,400&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="docs.css" />
+</head>
+<body>
+  <div class="scanlines" aria-hidden="true"></div>
+
+  <header class="site-header docs-header">
+    <div class="wrap header-inner">
+      <a href="index.html" class="brand">
+        <span class="brand-icon" aria-hidden="true">&lt;/&gt;</span>
+        <span>opencode-bridge</span>
+        <span class="brand-sep">/</span>
+        <span class="brand-section">docs</span>
+      </a>
+      <nav class="nav docs-nav" aria-label="Documentation">
+        <a href="#overview">Overview</a>
+        <a href="#installation">Install</a>
+        <a href="#tools-ref">Tools</a>
+        <a href="#auto-framing">Framing</a>
+        <a href="#chunking">Chunking</a>
+        <a href="#review">Review</a>
+        <a href="#sessions">Sessions</a>
+        <a href="#config">Config</a>
+        <a href="#env">Env</a>
+      </nav>
+      <a href="https://github.com/genomewalker/opencode-bridge" class="nav-github" aria-label="GitHub repository">
+        <svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      </a>
+    </div>
+  </header>
+
+  <main>
+    <!-- ===== Page Header ===== -->
+    <section class="docs-hero">
+      <div class="wrap">
+        <div class="hero-eyebrow">DOCUMENTATION</div>
+        <h1 class="docs-title">opencode-bridge <span class="version">v0.4.1</span></h1>
+        <p class="hero-subtitle">MCP server for multi-model consultation</p>
+      </div>
+    </section>
+
+    <!-- ===== Overview ===== -->
+    <section id="overview" class="doc-section">
+      <div class="wrap">
+        <h2>Overview</h2>
+        <p>opencode-bridge is an <a href="https://modelcontextprotocol.io">MCP</a> server that gives Claude Code access to OpenCode's models (GPT-5, Gemini, and others) as a companion brain. It exposes 18 tools through the Model Context Protocol, enabling multi-model consultation, code review, planning, and brainstorming directly from Claude Code sessions.</p>
+
+        <div class="feature-box">
+          <h3>Key Features</h3>
+          <ul>
+            <li><strong>Multi-model access</strong> &mdash; consult GPT-5, Gemini, and other models via OpenCode CLI</li>
+            <li><strong>Auto-framing</strong> &mdash; automatically detects the domain and frames OpenCode as a specialized expert</li>
+            <li><strong>Adaptive code review</strong> &mdash; review strategy adapts to file size (small/medium/large/very large)</li>
+            <li><strong>Chunked map-reduce</strong> &mdash; files over 2,000 lines are split into overlapping chunks, processed in parallel, then synthesized</li>
+            <li><strong>Session management</strong> &mdash; persistent sessions with conversation history, model/agent switching, and export</li>
+            <li><strong>50+ language support</strong> &mdash; language detection for Python, JS, TS, Go, Rust, Java, C/C++, and many more</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== Installation ===== -->
+    <section id="installation" class="doc-section">
+      <div class="wrap">
+        <h2>Installation</h2>
+
+        <h3>Prerequisites</h3>
+        <ul class="prereq-list">
+          <li>Python 3.10+</li>
+          <li><a href="https://claude.ai/code">Claude Code</a></li>
+          <li><a href="https://github.com/nicepkg/opencode">OpenCode CLI</a> installed and available in PATH</li>
+        </ul>
+
+        <h3>Install the package</h3>
+        <div class="code-block">
+          <div class="code-bar">
+            <span class="code-dot red"></span><span class="code-dot yellow"></span><span class="code-dot green"></span>
+            <span class="code-title">terminal</span>
+          </div>
+          <pre><code><span class="prompt">$</span> pip install opencode-bridge</code></pre>
+        </div>
+
+        <h3>Add to your MCP config</h3>
+        <p>Add to <code>~/.claude/settings.json</code> under <code>mcpServers</code>:</p>
+        <div class="code-block">
+          <div class="code-bar">
+            <span class="code-dot red"></span><span class="code-dot yellow"></span><span class="code-dot green"></span>
+            <span class="code-title">~/.claude/settings.json</span>
+          </div>
+          <pre><code>{
+  <span class="json-key">"mcpServers"</span>: {
+    <span class="json-key">"opencode-bridge"</span>: {
+      <span class="json-key">"command"</span>: <span class="json-val">"opencode-bridge"</span>
+    }
+  }
+}</code></pre>
+        </div>
+
+        <h3>Verify</h3>
+        <p>Restart Claude Code. You should see <code>opencode_*</code> tools available. Test with:</p>
+        <div class="code-block">
+          <pre><code><span class="comment"># In Claude Code, ask Claude to:</span>
+Use opencode_health to check the server status</code></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== MCP Tools Reference ===== -->
+    <section id="tools-ref" class="doc-section">
+      <div class="wrap">
+        <h2>MCP Tools Reference <span class="badge">18 tools</span></h2>
+
+        <!-- Core Tools -->
+        <div class="tool-section">
+          <h3 class="tool-section-title" id="tools-core">Core Tools</h3>
+
+          <article class="tool-ref" id="tool-discuss">
+            <div class="tool-header">
+              <code class="tool-ref-name">opencode_discuss</code>
+              <span class="tool-tag tag-core">core</span>
+            </div>
+            <p class="tool-summary">Send a message to OpenCode. Auto-detects the discussion domain and frames OpenCode as a specialized expert in that field.</p>
+            <div class="params">
+              <h4>Parameters</h4>
+              <table class="param-table">
+                <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+                <tbody>
+                  <tr><td><code>message</code></td><td>string</td><td>yes</td><td>Your message or question</td></tr>
+                  <tr><td><code>files</code></td><td>string[]</td><td>no</td><td>File paths to attach for context. File metadata (language, lines, size) is automatically included.</td></tr>
+                  <tr><td><code>domain</code></td><td>string</td><td>no</td><td>Override auto-detected domain. E.g., <code>"security"</code>, <code>"metagenomics"</code>, <code>"quantitative finance"</code></td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="tool-notes">
+              <p>On the first message in a session, the full auto-framing prompt is sent (domain detection, expert persona, collaborative rules). Follow-up messages use a lightweight continuation prompt.</p>
+              <p>Files over 2,000 lines trigger <a href="#chunking">chunked processing</a> automatically.</p>
+            </div>
+          </article>
+
+          <article class="tool-ref" id="tool-plan">
+            <div class="tool-header">
+              <code class="tool-ref-name">opencode_plan</code>
+              <span class="tool-tag tag-core">core</span>
+            </div>
+            <p class="tool-summary">Start a planning discussion using the dedicated plan agent. Ideal for task decomposition and implementation strategy.</p>
+            <div class="params">
+              <h4>Parameters</h4>
+              <table class="param-table">
+                <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+                <tbody>
+                  <tr><td><code>task</code></td><td>string</td><td>yes</td><td>What to plan</td></tr>
+                  <tr><td><code>files</code></td><td>string[]</td><td>no</td><td>Relevant file paths for context</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </article>
+
+          <article class="tool-ref" id="tool-brainstorm">
+            <div class="tool-header">
+              <code class="tool-ref-name">opencode_brainstorm</code>
+              <span class="tool-tag tag-core">core</span>
+            </div>
+            <p class="tool-summary">Open-ended brainstorming on any topic. Gets a fresh perspective from a different model.</p>
+            <div class="params">
+              <h4>Parameters</h4>
+              <table class="param-table">
+                <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+                <tbody>
+                  <tr><td><code>topic</code></td><td>string</td><td>yes</td><td>Topic to brainstorm about</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </article>
+
+          <article class="tool-ref" id="tool-review">
+            <div class="tool-header">
+              <code class="tool-ref-name">opencode_review</code>
+              <span class="tool-tag tag-core">core</span>
+            </div>
+            <p class="tool-summary">Review code for issues and improvements. Uses adaptive strategies based on file size. Supports multiple files and chunked processing for large codebases.</p>
+            <div class="params">
+              <h4>Parameters</h4>
+              <table class="param-table">
+                <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+                <tbody>
+                  <tr><td><code>code_or_file</code></td><td>string</td><td>yes</td><td>Code snippet, file path, or multiple file paths (space or comma separated)</td></tr>
+                  <tr><td><code>focus</code></td><td>string</td><td>no</td><td>What to focus on. Default: <code>"correctness, efficiency, bugs"</code></td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="tool-notes">
+              <p>Review strategy adapts based on total line count:</p>
+              <table class="param-table">
+                <thead><tr><th>Size</th><th>Lines</th><th>Strategy</th></tr></thead>
+                <tbody>
+                  <tr><td>Small</td><td>&le; 500</td><td>Thorough line-by-line review: correctness, edge cases, error handling, naming, security</td></tr>
+                  <tr><td>Medium</td><td>501 &ndash; 1,500</td><td>Structured review: summary, issues, design feedback, specific suggestions</td></tr>
+                  <tr><td>Large</td><td>1,501 &ndash; 5,000</td><td>Architecture-first: overview, critical issues, design concerns, complexity hotspots, top 5 recommendations</td></tr>
+                  <tr><td>Very Large</td><td>&gt; 5,000</td><td>Same as large, with note to focus on patterns over individual lines</td></tr>
+                </tbody>
+              </table>
+              <p>Files over 2,000 lines are automatically chunked. See <a href="#chunking">Chunked Processing</a>.</p>
+            </div>
+          </article>
+        </div>
+
+        <!-- Session Tools -->
+        <div class="tool-section">
+          <h3 class="tool-section-title" id="tools-session">Session Tools</h3>
+
+          <article class="tool-ref" id="tool-start">
+            <div class="tool-header">
+              <code class="tool-ref-name">opencode_start</code>
+              <span class="tool-tag tag-session">session</span>
+            </div>
+            <p class="tool-summary">Start a new discussion session with OpenCode.</p>
+            <div class="params">
+              <h4>Parameters</h4>
+              <table class="param-table">
+                <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+                <tbody>
+                  <tr><td><code>session_id</code></td><td>string</td><td>yes</td><td>Unique identifier for this session</td></tr>
+                  <tr><td><code>model</code></td><td>string</td><td>no</td><td>Model to use. Default: <code>openai/gpt-5.2-codex</code></td></tr>
+                  <tr><td><code>agent</code></td><td>string</td><td>no</td><td>Agent to use: <code>plan</code>, <code>build</code>, <code>explore</code>, <code>general</code>. Default: <code>plan</code></td></tr>
+                  <tr><td><code>variant</code></td><td>string</td><td>no</td><td>Reasoning effort: <code>minimal</code>, <code>low</code>, <code>medium</code>, <code>high</code>, <code>xhigh</code>, <code>max</code>. Default: <code>medium</code></td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="tool-notes">
+              <p>Sessions are persisted to <code>~/.opencode-bridge/sessions/</code> as JSON files. They survive server restarts.</p>
+            </div>
+          </article>
+
+          <article class="tool-ref" id="tool-end">
+            <div class="tool-header">
+              <code class="tool-ref-name">opencode_end</code>
+              <span class="tool-tag tag-session">session</span>
+            </div>
+            <p class="tool-summary">End the current active session.</p>
+          </article>
+
+          <article class="tool-ref" id="tool-switch">
+            <div class="tool-header">
+              <code class="tool-ref-name">opencode_switch</code>
+              <span class="tool-tag tag-session">session</span>
+            </div>
+            <p class="tool-summary">Switch to a different existing session.</p>
+            <div class="params">
+              <h4>Parameters</h4>
+              <table class="param-table">
+                <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+                <tbody>
+                  <tr><td><code>session_id</code></td><td>string</td><td>yes</td><td>Session to switch to</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </article>
+
+          <article class="tool-ref" id="tool-sessions">
+            <div class="tool-header">
+              <code class="tool-ref-name">opencode_sessions</code>
+              <span class="tool-tag tag-session">session</span>
+            </div>
+            <p class="tool-summary">List all sessions (active and inactive) with their model, agent, and message count.</p>
+          </article>
+
+          <article class="tool-ref" id="tool-history">
+            <div class="tool-header">
+              <code class="tool-ref-name">opencode_history</code>
+              <span class="tool-tag tag-session">session</span>
+            </div>
+            <p class="tool-summary">Get conversation history for a session.</p>
+            <div class="params">
+              <h4>Parameters</h4>
+              <table class="param-table">
+                <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+                <tbody>
+                  <tr><td><code>session_id</code></td><td>string</td><td>no</td><td>Session ID. Default: active session</td></tr>
+                  <tr><td><code>last_n</code></td><td>integer</td><td>no</td><td>Number of messages to return. Default: 20</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </article>
+
+          <article class="tool-ref" id="tool-export">
+            <div class="tool-header">
+              <code class="tool-ref-name">opencode_export</code>
+              <span class="tool-tag tag-session">session</span>
+            </div>
+            <p class="tool-summary">Export a session transcript as markdown or JSON.</p>
+            <div class="params">
+              <h4>Parameters</h4>
+              <table class="param-table">
+                <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+                <tbody>
+                  <tr><td><code>session_id</code></td><td>string</td><td>no</td><td>Session to export. Default: active session</td></tr>
+                  <tr><td><code>format</code></td><td>string</td><td>no</td><td><code>"markdown"</code> or <code>"json"</code>. Default: <code>"markdown"</code></td></tr>
+                </tbody>
+              </table>
+            </div>
+          </article>
+        </div>
+
+        <!-- Configuration Tools -->
+        <div class="tool-section">
+          <h3 class="tool-section-title" id="tools-config">Configuration Tools</h3>
+
+          <article class="tool-ref" id="tool-models">
+            <div class="tool-header">
+              <code class="tool-ref-name">opencode_models</code>
+              <span class="tool-tag tag-config">config</span>
+            </div>
+            <p class="tool-summary">List available models from OpenCode (GPT-5, Claude, Gemini, etc.).</p>
+            <div class="params">
+              <h4>Parameters</h4>
+              <table class="param-table">
+                <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+                <tbody>
+                  <tr><td><code>provider</code></td><td>string</td><td>no</td><td>Filter by provider: <code>"openai"</code>, <code>"github-copilot"</code>, <code>"anthropic"</code></td></tr>
+                </tbody>
+              </table>
+            </div>
+          </article>
+
+          <article class="tool-ref" id="tool-agents">
+            <div class="tool-header">
+              <code class="tool-ref-name">opencode_agents</code>
+              <span class="tool-tag tag-config">config</span>
+            </div>
+            <p class="tool-summary">List available agents: <code>plan</code>, <code>build</code>, <code>explore</code>, <code>general</code>.</p>
+          </article>
+
+          <article class="tool-ref" id="tool-model">
+            <div class="tool-header">
+              <code class="tool-ref-name">opencode_model</code>
+              <span class="tool-tag tag-config">config</span>
+            </div>
+            <p class="tool-summary">Change the model for the current session.</p>
+            <div class="params">
+              <h4>Parameters</h4>
+              <table class="param-table">
+                <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+                <tbody>
+                  <tr><td><code>model</code></td><td>string</td><td>yes</td><td>New model ID, e.g. <code>"openai/gpt-5.2-codex"</code></td></tr>
+                </tbody>
+              </table>
+            </div>
+          </article>
+
+          <article class="tool-ref" id="tool-agent">
+            <div class="tool-header">
+              <code class="tool-ref-name">opencode_agent</code>
+              <span class="tool-tag tag-config">config</span>
+            </div>
+            <p class="tool-summary">Change the agent for the current session.</p>
+            <div class="params">
+              <h4>Parameters</h4>
+              <table class="param-table">
+                <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+                <tbody>
+                  <tr><td><code>agent</code></td><td>string</td><td>yes</td><td><code>"plan"</code>, <code>"build"</code>, <code>"explore"</code>, or <code>"general"</code></td></tr>
+                </tbody>
+              </table>
+            </div>
+          </article>
+
+          <article class="tool-ref" id="tool-variant">
+            <div class="tool-header">
+              <code class="tool-ref-name">opencode_variant</code>
+              <span class="tool-tag tag-config">config</span>
+            </div>
+            <p class="tool-summary">Change the model variant (reasoning effort) for the current session.</p>
+            <div class="params">
+              <h4>Parameters</h4>
+              <table class="param-table">
+                <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+                <tbody>
+                  <tr><td><code>variant</code></td><td>string</td><td>yes</td><td><code>"minimal"</code>, <code>"low"</code>, <code>"medium"</code>, <code>"high"</code>, <code>"xhigh"</code>, <code>"max"</code></td></tr>
+                </tbody>
+              </table>
+            </div>
+          </article>
+
+          <article class="tool-ref" id="tool-config">
+            <div class="tool-header">
+              <code class="tool-ref-name">opencode_config</code>
+              <span class="tool-tag tag-config">config</span>
+            </div>
+            <p class="tool-summary">Get current configuration (default model, agent, variant).</p>
+          </article>
+
+          <article class="tool-ref" id="tool-configure">
+            <div class="tool-header">
+              <code class="tool-ref-name">opencode_configure</code>
+              <span class="tool-tag tag-config">config</span>
+            </div>
+            <p class="tool-summary">Set default model, agent, and/or variant. Persisted to <code>~/.opencode-bridge/config.json</code>.</p>
+            <div class="params">
+              <h4>Parameters</h4>
+              <table class="param-table">
+                <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+                <tbody>
+                  <tr><td><code>model</code></td><td>string</td><td>no</td><td>Default model</td></tr>
+                  <tr><td><code>agent</code></td><td>string</td><td>no</td><td>Default agent</td></tr>
+                  <tr><td><code>variant</code></td><td>string</td><td>no</td><td>Default variant</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </article>
+
+          <article class="tool-ref" id="tool-health">
+            <div class="tool-header">
+              <code class="tool-ref-name">opencode_health</code>
+              <span class="tool-tag tag-config">config</span>
+            </div>
+            <p class="tool-summary">Health check. Returns server status, session count, uptime, OpenCode binary path, and active session info.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== Auto-Framing ===== -->
+    <section id="auto-framing" class="doc-section">
+      <div class="wrap">
+        <h2>Auto-Framing System</h2>
+        <p>When Claude sends a message via <code>opencode_discuss</code>, the bridge automatically constructs a structured prompt that makes OpenCode adopt an expert persona in the relevant domain.</p>
+
+        <h3>How it works</h3>
+        <ol class="step-list">
+          <li>The bridge receives the message and any attached files</li>
+          <li>File metadata is extracted (language, lines, size, category) and included as context</li>
+          <li>A companion prompt is assembled that instructs OpenCode to:
+            <ul>
+              <li>Detect the specific domain of expertise</li>
+              <li>Adopt the persona of a senior practitioner</li>
+              <li>Think out loud and share reasoning</li>
+              <li>Challenge assumptions and lay out trade-offs</li>
+              <li>Propose alternatives</li>
+            </ul>
+          </li>
+          <li>OpenCode responds with domain identification and structured analysis</li>
+        </ol>
+
+        <h3>Response structure</h3>
+        <p>Each auto-framed response follows this pattern:</p>
+        <div class="code-block">
+          <pre><code>[Domain: <span class="json-val">Architecture & System Design</span>] [Confidence: <span class="json-val">99%</span>]
+
+1. Recommendation with rationale
+2. Key trade-offs
+3. Risks or blind spots
+4. Open questions worth exploring</code></pre>
+        </div>
+
+        <h3>Domain override</h3>
+        <p>You can hint a specific domain via the <code>domain</code> parameter on <code>opencode_discuss</code>. This biases the framing without forcing it. Useful for niche fields:</p>
+        <div class="code-block">
+          <pre><code><span class="comment"># Claude will call:</span>
+opencode_discuss(
+  message=<span class="json-val">"How should I handle OTU clustering at 97%?"</span>,
+  domain=<span class="json-val">"metagenomics"</span>
+)</code></pre>
+        </div>
+
+        <h3>Follow-up messages</h3>
+        <p>After the first message in a session, subsequent messages use a lightweight continuation prompt that preserves the expert context without re-sending the full framing instructions.</p>
+      </div>
+    </section>
+
+    <!-- ===== Chunked Processing ===== -->
+    <section id="chunking" class="doc-section">
+      <div class="wrap">
+        <h2>Chunked Processing</h2>
+        <p>Files over 2,000 lines are automatically processed using a map-reduce pattern: split into overlapping chunks, each analyzed independently in parallel, then results synthesized into a single coherent response.</p>
+
+        <h3>Parameters</h3>
+        <table class="param-table">
+          <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td><code>CHUNK_THRESHOLD</code></td><td>2,000 lines</td><td>Files above this trigger chunking</td></tr>
+            <tr><td><code>CHUNK_SIZE</code></td><td>800 lines</td><td>Lines per chunk</td></tr>
+            <tr><td><code>CHUNK_OVERLAP</code></td><td>20 lines</td><td>Overlap between adjacent chunks for context continuity</td></tr>
+            <tr><td><code>MAX_PARALLEL_CHUNKS</code></td><td>6</td><td>Maximum concurrent chunk processing (semaphore limit)</td></tr>
+            <tr><td><code>MAX_TOTAL_CHUNKS</code></td><td>20</td><td>Safety cap on total chunks per file</td></tr>
+          </tbody>
+        </table>
+
+        <h3>Boundary snapping</h3>
+        <p>Chunks don't cut at arbitrary line numbers. The splitter looks for natural code boundaries near the target cut point:</p>
+        <ul>
+          <li>Blank lines</li>
+          <li>Function/class/method definitions (<code>def</code>, <code>class</code>, <code>function</code>, <code>func</code>, <code>fn</code>, <code>pub fn</code>, <code>impl</code>, <code>module</code>, <code>package</code>)</li>
+          <li>Closing braces (<code>}</code>)</li>
+          <li>Comment lines (<code>//</code>, <code>#</code>, <code>/*</code>, <code>*/</code>)</li>
+        </ul>
+        <p>This is language-agnostic &mdash; it works for Python, JavaScript, Go, Rust, Java, C/C++, and more.</p>
+
+        <h3>Pipeline</h3>
+        <ol class="step-list">
+          <li><strong>Split</strong> &mdash; file is divided into overlapping chunks with boundary snapping</li>
+          <li><strong>Map</strong> &mdash; each chunk is sent to OpenCode independently (stateless, no session flag) with a focused prompt containing chunk metadata (index, line range, total chunks)</li>
+          <li><strong>Reduce</strong> &mdash; all chunk analyses are sent to a synthesis prompt that merges them into one coherent response</li>
+        </ol>
+
+        <h3>Error handling</h3>
+        <p>If some chunks fail, the synthesis still proceeds with available results. Failed chunks are marked in the synthesis prompt. If all chunks fail, raw error messages are returned. If synthesis fails, individual chunk analyses are concatenated as fallback.</p>
+
+        <h3>Supported tools</h3>
+        <p>Chunked processing is triggered by both <code>opencode_discuss</code> (when files are attached) and <code>opencode_review</code> (when file paths point to large files).</p>
+      </div>
+    </section>
+
+    <!-- ===== Code Review ===== -->
+    <section id="review" class="doc-section">
+      <div class="wrap">
+        <h2>Code Review Strategies</h2>
+        <p>The <code>opencode_review</code> tool adapts its review strategy based on the total line count of submitted files.</p>
+
+        <div class="strategy-grid">
+          <div class="strategy-card">
+            <div class="strat-header strat-small">Small &le; 500 lines</div>
+            <p>Thorough review covering correctness, edge cases, error handling, code clarity, naming, and security concerns. Concrete suggestions for improvement.</p>
+          </div>
+          <div class="strategy-card">
+            <div class="strat-header strat-medium">Medium 501&ndash;1,500 lines</div>
+            <p>Structured review: summary, issues found (bugs, security, edge cases), design feedback (structure, patterns, abstractions), specific suggestions with code examples.</p>
+          </div>
+          <div class="strategy-card">
+            <div class="strat-header strat-large">Large 1,501&ndash;5,000 lines</div>
+            <p>Architecture-first: overview of structure and data flow, critical issues, design concerns, complexity hotspots, top 5 most impactful improvements. Focus on patterns over individual lines.</p>
+          </div>
+          <div class="strategy-card">
+            <div class="strat-header strat-xlarge">Very Large &gt; 5,000 lines</div>
+            <p>Same as large strategy. Files over 2,000 lines are additionally chunked for parallel processing.</p>
+          </div>
+        </div>
+
+        <h3>Language detection</h3>
+        <p>opencode-bridge detects 50+ languages by file extension and includes language metadata in review prompts. Supported languages include:</p>
+        <div class="lang-chips">
+          <span class="chip chip-cool">Python</span>
+          <span class="chip chip-cool">JavaScript</span>
+          <span class="chip chip-cool">TypeScript</span>
+          <span class="chip chip-cool">Go</span>
+          <span class="chip chip-cool">Rust</span>
+          <span class="chip chip-cool">Java</span>
+          <span class="chip chip-cool">C/C++</span>
+          <span class="chip chip-cool">C#</span>
+          <span class="chip chip-cool">Ruby</span>
+          <span class="chip chip-cool">PHP</span>
+          <span class="chip chip-cool">Swift</span>
+          <span class="chip chip-cool">Kotlin</span>
+          <span class="chip chip-cool">Scala</span>
+          <span class="chip chip-cool">Elixir</span>
+          <span class="chip chip-cool">Haskell</span>
+          <span class="chip chip-cool">Zig</span>
+          <span class="chip chip-cool">Dart</span>
+          <span class="chip chip-cool">Vue</span>
+          <span class="chip chip-cool">Svelte</span>
+          <span class="chip chip-muted">+30 more</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== Sessions ===== -->
+    <section id="sessions" class="doc-section">
+      <div class="wrap">
+        <h2>Session Management</h2>
+        <p>Sessions provide persistent conversation context with OpenCode. Each session tracks its model, agent, variant, and full message history.</p>
+
+        <h3>Storage</h3>
+        <p>Sessions are saved as JSON files in <code>~/.opencode-bridge/sessions/</code>. They persist across server restarts.</p>
+
+        <h3>Lifecycle</h3>
+        <ol class="step-list">
+          <li><code>opencode_start</code> &mdash; creates a new session with ID, model, agent, variant</li>
+          <li><code>opencode_discuss</code> / <code>opencode_plan</code> / etc. &mdash; messages are added to the active session</li>
+          <li><code>opencode_switch</code> &mdash; switch between existing sessions</li>
+          <li><code>opencode_export</code> &mdash; export transcript as markdown or JSON</li>
+          <li><code>opencode_end</code> &mdash; end the active session</li>
+        </ol>
+
+        <h3>Auto-start</h3>
+        <p>If no session is active when <code>opencode_discuss</code> is called, a session is started automatically with default settings.</p>
+      </div>
+    </section>
+
+    <!-- ===== Configuration ===== -->
+    <section id="config" class="doc-section">
+      <div class="wrap">
+        <h2>Configuration</h2>
+        <p>Defaults are stored in <code>~/.opencode-bridge/config.json</code> and can be modified with <code>opencode_configure</code>.</p>
+
+        <div class="code-block">
+          <div class="code-bar">
+            <span class="code-dot red"></span><span class="code-dot yellow"></span><span class="code-dot green"></span>
+            <span class="code-title">~/.opencode-bridge/config.json</span>
+          </div>
+          <pre><code>{
+  <span class="json-key">"default_model"</span>: <span class="json-val">"openai/gpt-5.2-codex"</span>,
+  <span class="json-key">"default_agent"</span>: <span class="json-val">"plan"</span>,
+  <span class="json-key">"default_variant"</span>: <span class="json-val">"medium"</span>
+}</code></pre>
+        </div>
+
+        <h3>Options</h3>
+        <table class="param-table">
+          <thead><tr><th>Key</th><th>Values</th><th>Default</th></tr></thead>
+          <tbody>
+            <tr><td><code>default_model</code></td><td>Any OpenCode model ID</td><td><code>openai/gpt-5.2-codex</code></td></tr>
+            <tr><td><code>default_agent</code></td><td><code>plan</code>, <code>build</code>, <code>explore</code>, <code>general</code></td><td><code>plan</code></td></tr>
+            <tr><td><code>default_variant</code></td><td><code>minimal</code>, <code>low</code>, <code>medium</code>, <code>high</code>, <code>xhigh</code>, <code>max</code></td><td><code>medium</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ===== Environment Variables ===== -->
+    <section id="env" class="doc-section">
+      <div class="wrap">
+        <h2>Environment Variables</h2>
+        <table class="param-table">
+          <thead><tr><th>Variable</th><th>Description</th><th>Default</th></tr></thead>
+          <tbody>
+            <tr><td><code>OPENCODE_MODEL</code></td><td>Override default model</td><td><code>openai/gpt-5.2-codex</code></td></tr>
+            <tr><td><code>OPENCODE_AGENT</code></td><td>Override default agent</td><td><code>plan</code></td></tr>
+          </tbody>
+        </table>
+        <p class="section-note">Environment variables take precedence over config file values.</p>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap footer-inner">
+      <span>opencode-bridge</span>
+      <span class="footer-sep" aria-hidden="true">&middot;</span>
+      <span>v0.4.1</span>
+      <span class="footer-sep" aria-hidden="true">&middot;</span>
+      <span>MIT</span>
+    </div>
+  </footer>
+
+  <script>
+    /* --- Scroll-reveal for cards only (sections are always visible) --- */
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) entry.target.classList.add('in-view');
+      });
+    }, { threshold: 0.08, rootMargin: '0px 0px -30px 0px' });
+    document.querySelectorAll('.tool-ref, .strategy-card').forEach(el => observer.observe(el));
+  </script>
+</body>
+</html>
