@@ -230,7 +230,6 @@ class TestBuildCompanionPrompt:
         )
         # Should fall back to auto-detection, not crash
         assert det.primary.id != "nonexistent_domain"
-        assert det.primary.id in DOMAIN_REGISTRY
 
     def test_file_context_included(self):
         prompt, _ = build_companion_prompt(
@@ -265,3 +264,49 @@ class TestDomainDetection:
         d = detect_domain("Optimize the database query and add an index")
         if d.secondary:
             assert d.secondary_confidence <= d.confidence
+
+
+# ---------------------------------------------------------------------------
+# Auto-generated framing for unknown domains
+# ---------------------------------------------------------------------------
+
+class TestAutoFraming:
+    def test_unknown_domain_gets_auto_framing(self):
+        prompt, det = build_companion_prompt(
+            "Should we use co-assembly or per-sample binning for our ancient DNA metagenomes?"
+        )
+        assert "Auto-Framing" in prompt
+        assert det.primary.id == "auto"
+        assert det.primary.name == "Auto-Detected"
+
+    def test_auto_framing_has_collaborative_rules(self):
+        prompt, _ = build_companion_prompt("How do we price a barrier option with jump diffusion?")
+        assert "## Collaborative Ground Rules" in prompt
+        assert "challenge" in prompt.lower()
+
+    def test_auto_framing_has_synthesize(self):
+        prompt, _ = build_companion_prompt("What's the best way to train a GAN for medical imaging?")
+        assert "## Synthesize" in prompt
+        assert "Domain identified" in prompt
+
+    def test_auto_framing_contains_message(self):
+        msg = "How should we handle phylogenetic placement of short aDNA reads?"
+        prompt, _ = build_companion_prompt(msg)
+        assert msg in prompt
+
+    def test_auto_framing_instructs_self_identification(self):
+        prompt, _ = build_companion_prompt("What primer sets work best for ITS2 amplicon sequencing?")
+        assert "specific domain of expertise" in prompt
+        assert "senior practitioner" in prompt
+
+    def test_known_domain_does_not_get_auto_framing(self):
+        prompt, det = build_companion_prompt("Should we use event sourcing?")
+        assert "Auto-Framing" not in prompt
+        assert det.primary.id == "architecture"
+
+    def test_auto_framing_skipped_on_followup(self):
+        prompt, det = build_companion_prompt(
+            "What about the damage patterns?", is_followup=True
+        )
+        assert "Continuing Our Discussion" in prompt
+        assert "Auto-Framing" not in prompt
