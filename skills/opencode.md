@@ -24,29 +24,18 @@ Collaborative discussion with OpenCode models (GPT-5, Claude, Gemini). Sessions 
 | `/opencode set agent <name>` | Set default agent |
 | `/opencode end` | End session |
 
-## Domain Detection
+## Auto-Framing Companion
 
-When you send a message via `opencode_discuss`, the system auto-detects the discussion domain and frames OpenCode as a specialized expert:
+When you send a message via `opencode_discuss`, the system automatically frames OpenCode as a domain expert. Rather than relying on hardcoded domain lists, the companion prompt instructs the LLM to:
 
-| Domain | Example triggers |
-|--------|-----------------|
-| Architecture | "microservice", "system design", "event driven" |
-| Debugging | "bug", "root cause", "stack trace" |
-| Performance | "optimize", "bottleneck", "cache miss" |
-| Security | "vulnerability", "SQL injection", "OWASP" |
-| Testing | "unit test", "coverage", "TDD" |
-| DevOps | "deploy", "CI/CD pipeline", "kubernetes" |
-| Database | "schema", "query optimization", "migration" |
-| API Design | "REST API", "versioning", "endpoint" |
-| Frontend | "React", "component", "SSR", "accessibility" |
-| Algorithms | "dynamic programming", "time complexity" |
-| Code Quality | "refactor", "SOLID", "technical debt" |
-| Planning | "roadmap", "MVP", "user story" |
-| General | fallback when nothing else matches |
+1. **Self-identify the domain** from the question content
+2. **Adopt a senior practitioner persona** with deep, hands-on experience
+3. **Apply relevant analytical frameworks** for that domain
+4. **Engage collaboratively** — challenging assumptions, proposing alternatives, laying out trade-offs
 
-Override detection with `domain` parameter: `opencode_discuss(message="...", domain="security")`.
+This works for any domain — software architecture, metagenomics, quantitative finance, linguistics, or anything else.
 
-The response includes the detected domain and confidence: `[Domain: Architecture] [Confidence: 92%]`.
+Optionally provide a `domain` hint to steer the framing: `opencode_discuss(message="...", domain="security")`.
 
 Follow-up messages in an existing session get a lighter prompt that preserves the collaborative framing without repeating the full setup.
 
@@ -68,10 +57,9 @@ When user says `/opencode plan <task>`:
 
 When user says `/opencode ask <question>`:
 1. Call `opencode_discuss(message=<question>)`
-2. Note the detected domain in your relay
-3. Relay the response
+2. Relay the response
 
-To force a specific domain: `opencode_discuss(message=<question>, domain="security")`
+To hint a specific domain: `opencode_discuss(message=<question>, domain="security")`
 
 ### Code Review
 
@@ -119,12 +107,10 @@ Claude: Connected to OpenCode (openai/gpt-5.2-codex, plan agent). Ready.
 
 User: Should we use event sourcing for our order system?
 Claude: [calls opencode_discuss]
-       [Domain: Architecture & System Design] [Confidence: 92%]
        [OpenCode responds as a distributed systems architect]
 
 User: What about the security implications?
 Claude: [calls opencode_discuss — follow-up, lighter prompt]
-       [Domain: Security & Threat Modeling] [Confidence: 76%]
 
 User: /opencode end
 Claude: Session ended.
