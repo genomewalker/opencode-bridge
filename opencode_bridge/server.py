@@ -17,6 +17,7 @@ Configuration:
 
 import os
 import re
+import sys
 import json
 import asyncio
 import shutil
@@ -29,6 +30,20 @@ from dataclasses import dataclass, field, asdict
 from mcp.server import Server, InitializationOptions
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent, ServerCapabilities, ToolsCapability
+
+from opencode_bridge import __version__
+
+
+_SAFE_ID_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")
+
+
+def _sanitize_session_id(session_id: str) -> str:
+    """Sanitize session ID to prevent path traversal."""
+    if Path(session_id).name != session_id:
+        raise ValueError("Invalid session ID: path separators not allowed")
+    if not _SAFE_ID_RE.fullmatch(session_id):
+        raise ValueError("Invalid session ID: must be alphanumeric, hyphens, underscores only")
+    return session_id
 
 
 # File size thresholds
@@ -68,7 +83,14 @@ def get_file_info(filepath: str) -> dict:
     """Get metadata about a file: size, lines, language, etc. Results are cached per path."""
     filepath = str(Path(filepath).resolve())
     if filepath in _file_info_cache:
-        return _file_info_cache[filepath]
+        cached = _file_info_cache[filepath]
+        try:
+            st = Path(filepath).stat()
+            if st.st_mtime == cached.get("_mtime") and st.st_size == cached.get("size_bytes"):
+                return cached
+        except OSError:
+            pass
+        # Stale — fall through to re-compute
 
     p = Path(filepath)
     if not p.is_file():
@@ -102,6 +124,7 @@ def get_file_info(filepath: str) -> dict:
                 else "large" if line_count <= LARGE_FILE
                 else "very large"
             ),
+            "_mtime": stat.st_mtime,
         }
         _file_info_cache[filepath] = result
         return result
@@ -318,10 +341,11 @@ def build_companion_prompt(
 
 # Regex for natural code boundaries (language-agnostic)
 _BOUNDARY_RE = re.compile(
-    r"^(?:\s*$"                     # blank line
-    r"|(?:def |class |function |func |fn |pub fn |impl |module |package )"  # definitions
-    r"|(?:})\s*$"                   # closing brace on its own line
-    r"|(?://|#|/\*|\*/).{0,80}$"   # comment lines
+    r"^(?:\s*$"
+    r"|(?:(?:async )?def |class |(?:export )?(?:default )?function |func |fn |pub fn |impl |module |package )"
+    r"|(?:(?:export )?(?:const|let|var|interface|struct|enum|trait) )"
+    r"|(?:})\s*$"
+    r"|(?://|#|/\*|\*/).{0,80}$"
     r")",
     re.MULTILINE,
 )
@@ -608,8 +632,8 @@ class OpenCodeBridge:
             try:
                 session = Session.load(path)
                 self.sessions[session.id] = session
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Warning: skipping corrupted session {path.name}: {e}", file=sys.stderr)
 
     async def _run_opencode(self, *args, timeout: int = 300) -> tuple[str, int]:
         """Run opencode CLI command and return output (async)."""
@@ -620,6 +644,7 @@ class OpenCodeBridge:
         if not OPENCODE_BIN:
             return "OpenCode not installed. Install from: https://opencode.ai", 1
 
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 str(OPENCODE_BIN), *args,
@@ -640,8 +665,9 @@ class OpenCodeBridge:
                 output = f"{out}\n\nStderr:\n{err}"
             return output, proc.returncode or 0
         except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
+            if proc:
+                proc.kill()
+                await proc.wait()
             return f"Command timed out after {timeout}s", 1
         except Exception as e:
             return f"Error: {e}", 1
@@ -876,6 +902,11 @@ class OpenCodeBridge:
         agent: Optional[str] = None,
         variant: Optional[str] = None
     ) -> str:
+        session_id = _sanitize_session_id(session_id)
+
+        if session_id in self.sessions:
+            return f"Session '{session_id}' already exists. Use a different ID or end it first."
+
         # Use config defaults if not specified
         model = model or self.config.model
         agent = agent or self.config.agent
@@ -951,88 +982,82 @@ Set via:
         temp_file.close()
         files = (files or []) + [temp_file.name]
 
-        # --- Chunking gate: large user files get map-reduce processing ---
-        user_files = [f for f in files if not Path(f).name.startswith("opencode_msg_")]
-        needs_chunking = any(
-            get_file_info(f).get("lines", 0) > CHUNK_THRESHOLD
-            for f in user_files
-        )
-
-        if needs_chunking:
-            reply = await self._run_chunked(message, user_files, session, mode="discuss")
-            # Cleanup temp file
-            try:
-                os.unlink(temp_file.name)
-            except OSError:
-                pass
-            if reply:
-                session.add_message("assistant", reply)
-                session.save(self.sessions_dir / f"{sid}.json")
-            return reply or "No response received"
-
-        # --- Normal (non-chunked) path ---
-
-        # Build prompt: companion system unless _raw is set
-        if _raw:
-            run_prompt = build_message_prompt(message, files)
-        else:
-            is_followup = len(session.messages) > 1
-            run_prompt = build_companion_prompt(
-                message, files, domain_override=domain_override,
-                is_followup=is_followup,
+        try:
+            # --- Chunking gate: large user files get map-reduce processing ---
+            user_files = [f for f in files if not Path(f).name.startswith("opencode_msg_")]
+            needs_chunking = any(
+                get_file_info(f).get("lines", 0) > CHUNK_THRESHOLD
+                for f in user_files
             )
 
-        args = ["run", run_prompt]
+            if needs_chunking:
+                reply = await self._run_chunked(message, user_files, session, mode="discuss")
+                if reply:
+                    session.add_message("assistant", reply)
+                    session.save(self.sessions_dir / f"{sid}.json")
+                return reply or "No response received"
 
-        args.extend(["--model", session.model])
-        args.extend(["--agent", session.agent])
+            # --- Normal (non-chunked) path ---
 
-        # Add variant if specified
-        if session.variant:
-            args.extend(["--variant", session.variant])
+            # Build prompt: companion system unless _raw is set
+            if _raw:
+                run_prompt = build_message_prompt(message, files)
+            else:
+                is_followup = len(session.messages) > 1
+                run_prompt = build_companion_prompt(
+                    message, files, domain_override=domain_override,
+                    is_followup=is_followup,
+                )
 
-        # Continue session if we have an opencode session ID
-        if session.opencode_session_id:
-            args.extend(["--session", session.opencode_session_id])
+            args = ["run", run_prompt]
 
-        # Attach files
-        if files:
-            for f in files:
-                args.extend(["--file", f])
+            args.extend(["--model", session.model])
+            args.extend(["--agent", session.agent])
 
-        # Use JSON format to get session ID
-        args.extend(["--format", "json"])
+            # Add variant if specified
+            if session.variant:
+                args.extend(["--variant", session.variant])
 
-        # Scale timeout based on attached file size
-        total_lines = sum(get_file_info(f).get("lines", 0) for f in user_files)
-        # Base 300s, +60s per 1000 lines above threshold, capped at 900s
-        timeout = min(900, 300 + max(0, (total_lines - MEDIUM_FILE) * 60 // 1000))
+            # Continue session if we have an opencode session ID
+            if session.opencode_session_id:
+                args.extend(["--session", session.opencode_session_id])
 
-        output, code = await self._run_opencode(*args, timeout=timeout)
+            # Attach files
+            if files:
+                for f in files:
+                    args.extend(["--file", f])
 
-        # Cleanup temp file
-        if temp_file:
+            # Use JSON format to get session ID
+            args.extend(["--format", "json"])
+
+            # Scale timeout based on attached file size
+            total_lines = sum(get_file_info(f).get("lines", 0) for f in user_files)
+            # Base 300s, +60s per 1000 lines above threshold, capped at 900s
+            timeout = min(900, 300 + max(0, (total_lines - MEDIUM_FILE) * 60 // 1000))
+
+            output, code = await self._run_opencode(*args, timeout=timeout)
+
+            if code != 0:
+                return f"Error: {output}"
+
+            # Parse JSON events for session ID and text
+            reply, new_session_id = self._parse_opencode_response(output)
+            if new_session_id and not session.opencode_session_id:
+                session.opencode_session_id = new_session_id
+
+            if reply:
+                session.add_message("assistant", reply)
+
+            # Save if we got a reply or captured a new session ID
+            if reply or session.opencode_session_id:
+                session.save(self.sessions_dir / f"{sid}.json")
+
+            return reply or "No response received"
+        finally:
             try:
                 os.unlink(temp_file.name)
             except OSError:
                 pass
-
-        if code != 0:
-            return f"Error: {output}"
-
-        # Parse JSON events for session ID and text
-        reply, new_session_id = self._parse_opencode_response(output)
-        if new_session_id and not session.opencode_session_id:
-            session.opencode_session_id = new_session_id
-
-        if reply:
-            session.add_message("assistant", reply)
-
-        # Save if we got a reply or captured a new session ID
-        if reply or session.opencode_session_id:
-            session.save(self.sessions_dir / f"{sid}.json")
-
-        return reply or "No response received"
 
     async def plan(
         self,
@@ -1155,6 +1180,7 @@ Provide:
         return "\n".join(lines)
 
     def set_active(self, session_id: str) -> str:
+        session_id = _sanitize_session_id(session_id)
         if session_id not in self.sessions:
             return f"Session '{session_id}' not found."
         self.active_session = session_id
@@ -1201,6 +1227,8 @@ Provide:
 
     def end_session(self, session_id: Optional[str] = None) -> str:
         sid = session_id or self.active_session
+        if sid:
+            sid = _sanitize_session_id(sid)
         if not sid or sid not in self.sessions:
             return "No active session to end."
 
@@ -1214,15 +1242,20 @@ Provide:
 
         return f"Session '{sid}' ended."
 
-    def export_session(self, session_id: Optional[str] = None, format: str = "markdown") -> str:
+    def export_session(self, session_id: Optional[str] = None, export_format: str = "markdown") -> str:
         """Export a session as markdown or JSON."""
         sid = session_id or self.active_session
+        if sid:
+            sid = _sanitize_session_id(sid)
         if not sid or sid not in self.sessions:
             return "No active session to export."
 
         session = self.sessions[sid]
 
-        if format == "json":
+        if export_format not in ("markdown", "json"):
+            return f"Unsupported export format: '{export_format}'. Use 'markdown' or 'json'."
+
+        if export_format == "json":
             data = {
                 "id": session.id,
                 "model": session.model,
@@ -1453,7 +1486,12 @@ async def list_tools():
         Tool(
             name="opencode_end",
             description="End the current session",
-            inputSchema={"type": "object", "properties": {}}
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "Session to end (default: active)"}
+                }
+            }
         ),
         Tool(
             name="opencode_config",
@@ -1539,7 +1577,7 @@ async def call_tool(name: str, arguments: dict):
         elif name == "opencode_switch":
             result = bridge.set_active(arguments["session_id"])
         elif name == "opencode_end":
-            result = bridge.end_session()
+            result = bridge.end_session(session_id=arguments.get("session_id"))
         elif name == "opencode_config":
             result = bridge.get_config()
         elif name == "opencode_configure":
@@ -1551,7 +1589,7 @@ async def call_tool(name: str, arguments: dict):
         elif name == "opencode_export":
             result = bridge.export_session(
                 session_id=arguments.get("session_id"),
-                format=arguments.get("format", "markdown")
+                export_format=arguments.get("format", "markdown")
             )
         elif name == "opencode_health":
             health = bridge.health_check()
@@ -1566,12 +1604,10 @@ async def call_tool(name: str, arguments: dict):
 
 
 def main():
-    import asyncio
-
     async def run():
         init_options = InitializationOptions(
             server_name="opencode-bridge",
-            server_version="0.1.0",
+            server_version=__version__,
             capabilities=ServerCapabilities(tools=ToolsCapability())
         )
         async with stdio_server() as (read_stream, write_stream):

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "opencode-bridge"
-version = "0.4.1"
+version = "0.4.2"
 description = "MCP server for continuous OpenCode discussion sessions"
 readme = "README.md"
 license = "MIT"
@@ -21,6 +21,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
     "mcp>=1.0.0",
@@ -43,5 +44,3 @@ opencode-bridge-uninstall = "opencode_bridge.install:uninstall"
 [tool.hatch.build.targets.wheel]
 packages = ["opencode_bridge"]
 
-[tool.uv]
-dev-dependencies = []
