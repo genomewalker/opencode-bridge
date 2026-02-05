@@ -18,7 +18,6 @@ Configuration:
 import os
 import json
 import asyncio
-import re
 import shutil
 import tempfile
 from datetime import datetime
@@ -215,521 +214,8 @@ def build_message_prompt(message: str, file_paths: list[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Domain Detection & Companion System
+# Companion System — Auto-Framing
 # ---------------------------------------------------------------------------
-
-@dataclass
-class DomainProfile:
-    """Defines a domain of expertise with persona, frameworks, and approach."""
-    id: str
-    name: str
-    keywords: list[str]
-    phrases: list[str]
-    file_indicators: list[str]  # file extensions or name patterns
-    expert_persona: str
-    thinking_frameworks: list[str]
-    key_questions: list[str]
-    structured_approach: list[str]
-    agent_hint: str  # suggested opencode agent
-
-
-DOMAIN_REGISTRY: dict[str, DomainProfile] = {}
-
-
-def _register(*profiles: DomainProfile):
-    for p in profiles:
-        DOMAIN_REGISTRY[p.id] = p
-
-
-_register(
-    DomainProfile(
-        id="architecture",
-        name="Architecture & System Design",
-        keywords=["architecture", "microservice", "monolith", "scalab", "distributed",
-                  "component", "module", "layer", "decouple", "coupling", "cohesion",
-                  "event", "queue", "broker", "gateway", "proxy", "load balancer"],
-        phrases=["system design", "event driven", "event sourcing", "service mesh",
-                 "domain driven", "hexagonal architecture", "clean architecture",
-                 "micro frontend", "message bus", "data pipeline", "cqrs"],
-        file_indicators=[".proto", ".yaml", ".yml", ".tf", ".hcl"],
-        expert_persona=(
-            "a senior distributed systems architect who has designed systems serving "
-            "millions of users. You think in terms of components, boundaries, data flow, "
-            "and failure modes. You've seen both over-engineered and under-engineered "
-            "systems and know when each approach is appropriate."
-        ),
-        thinking_frameworks=["C4 model (context, containers, components, code)",
-                             "CAP theorem", "DDD (bounded contexts, aggregates)",
-                             "CQRS/Event Sourcing trade-offs",
-                             "Twelve-Factor App principles"],
-        key_questions=["What are the key quality attributes (latency, throughput, availability)?",
-                       "Where are the domain boundaries?",
-                       "What data consistency model fits here?",
-                       "What happens when a component fails?",
-                       "How will this evolve in 6-12 months?"],
-        structured_approach=["Clarify requirements and constraints",
-                             "Identify components and their responsibilities",
-                             "Define interfaces and data flow",
-                             "Analyze trade-offs and failure modes",
-                             "Recommend with rationale"],
-        agent_hint="plan",
-    ),
-    DomainProfile(
-        id="debugging",
-        name="Debugging & Troubleshooting",
-        keywords=["bug", "error", "crash", "fail", "exception", "traceback",
-                  "stacktrace", "debug", "breakpoint", "segfault", "panic",
-                  "hang", "freeze", "corrupt", "unexpected", "wrong"],
-        phrases=["root cause", "stack trace", "doesn't work", "stopped working",
-                 "race condition", "deadlock", "memory leak", "null pointer",
-                 "off by one", "regression", "flaky test", "intermittent failure"],
-        file_indicators=[".log", ".dump", ".core"],
-        expert_persona=(
-            "a seasoned debugger who has tracked down the most elusive bugs — race "
-            "conditions, heisenbugs, memory corruption, off-by-one errors hidden for "
-            "years. You are methodical, hypothesis-driven, and never jump to conclusions."
-        ),
-        thinking_frameworks=["Five Whys (root cause analysis)",
-                             "Scientific method (hypothesize, test, refine)",
-                             "Binary search / bisection for isolating changes",
-                             "Rubber duck debugging"],
-        key_questions=["When did it start happening? What changed?",
-                       "Is it reproducible? Under what conditions?",
-                       "What are the exact symptoms vs. expected behavior?",
-                       "Have we ruled out environment differences?",
-                       "What is the minimal reproduction case?"],
-        structured_approach=["Reproduce and isolate the issue",
-                             "Form hypotheses ranked by likelihood",
-                             "Gather evidence: logs, traces, state inspection",
-                             "Narrow down via elimination",
-                             "Fix, verify, and prevent regression"],
-        agent_hint="build",
-    ),
-    DomainProfile(
-        id="performance",
-        name="Performance & Optimization",
-        keywords=["performance", "optimize", "bottleneck", "latency", "throughput",
-                  "cache", "profil", "benchmark", "slow", "fast", "speed",
-                  "memory", "cpu", "io", "bandwidth", "concurren"],
-        phrases=["cache miss", "hot path", "time complexity", "space complexity",
-                 "p99 latency", "tail latency", "garbage collection", "connection pool",
-                 "query plan", "flame graph", "load test"],
-        file_indicators=[".perf", ".prof", ".bench"],
-        expert_persona=(
-            "a performance engineer who obsesses over microseconds and memory allocations. "
-            "You profile before optimizing, know that premature optimization is the root of "
-            "all evil, and always ask 'what does the data say?' before recommending changes."
-        ),
-        thinking_frameworks=["Amdahl's Law", "Little's Law",
-                             "USE method (Utilization, Saturation, Errors)",
-                             "Roofline model", "Big-O analysis with practical constants"],
-        key_questions=["What is the actual bottleneck (CPU, memory, I/O, network)?",
-                       "Do we have profiling data or benchmarks?",
-                       "What's the target performance? Current baseline?",
-                       "What are the hot paths?",
-                       "What trade-offs are acceptable (memory vs speed, complexity vs perf)?"],
-        structured_approach=["Measure current performance with profiling/benchmarks",
-                             "Identify the bottleneck — do not guess",
-                             "Propose targeted optimizations",
-                             "Estimate impact and trade-offs",
-                             "Measure again after changes"],
-        agent_hint="build",
-    ),
-    DomainProfile(
-        id="security",
-        name="Security & Threat Modeling",
-        keywords=["security", "vulnerab", "auth", "token", "encrypt", "hash",
-                  "ssl", "tls", "cors", "csrf", "xss", "injection", "sanitiz",
-                  "permission", "privilege", "secret", "credential"],
-        phrases=["sql injection", "cross site", "threat model", "attack surface",
-                 "zero trust", "defense in depth", "least privilege",
-                 "owasp top 10", "security audit", "penetration test",
-                 "access control", "input validation"],
-        file_indicators=[".pem", ".key", ".cert", ".env"],
-        expert_persona=(
-            "a senior application security engineer who thinks like an attacker but "
-            "builds like a defender. You know the OWASP Top 10 by heart, understand "
-            "cryptographic primitives, and always consider the full threat model."
-        ),
-        thinking_frameworks=["STRIDE threat modeling",
-                             "OWASP Top 10",
-                             "Defense in depth",
-                             "Zero trust architecture",
-                             "Principle of least privilege"],
-        key_questions=["What is the threat model? Who are the adversaries?",
-                       "What data is sensitive and how is it protected?",
-                       "Where are the trust boundaries?",
-                       "What authentication and authorization model is in use?",
-                       "Are there known CVEs in dependencies?"],
-        structured_approach=["Identify assets and threat actors",
-                             "Map the attack surface",
-                             "Enumerate threats (STRIDE)",
-                             "Assess risk (likelihood x impact)",
-                             "Recommend mitigations prioritized by risk"],
-        agent_hint="plan",
-    ),
-    DomainProfile(
-        id="testing",
-        name="Testing & Quality Assurance",
-        keywords=["test", "assert", "mock", "stub", "fixture", "coverage",
-                  "spec", "suite", "expect", "verify", "tdd", "bdd"],
-        phrases=["unit test", "integration test", "end to end", "test coverage",
-                 "test driven", "edge case", "boundary condition", "test pyramid",
-                 "property based", "mutation testing", "snapshot test",
-                 "regression test"],
-        file_indicators=["_test.py", "_test.go", ".test.js", ".test.ts", ".spec.js",
-                         ".spec.ts", "_spec.rb"],
-        expert_persona=(
-            "a testing specialist who believes tests are living documentation. You "
-            "understand the test pyramid, know when to mock and when not to, and "
-            "write tests that catch real bugs without being brittle."
-        ),
-        thinking_frameworks=["Test pyramid (unit → integration → e2e)",
-                             "FIRST principles (Fast, Independent, Repeatable, Self-validating, Timely)",
-                             "Arrange-Act-Assert pattern",
-                             "Equivalence partitioning & boundary value analysis"],
-        key_questions=["What behavior are we verifying?",
-                       "What are the edge cases and boundary conditions?",
-                       "Is this a unit, integration, or e2e concern?",
-                       "What should we mock vs. use real implementations?",
-                       "How will we know if this test is catching real bugs?"],
-        structured_approach=["Identify what behavior to test",
-                             "Determine test level (unit/integration/e2e)",
-                             "Design test cases covering happy path and edge cases",
-                             "Write clear, maintainable assertions",
-                             "Review for brittleness and false confidence"],
-        agent_hint="build",
-    ),
-    DomainProfile(
-        id="devops",
-        name="DevOps & Infrastructure",
-        keywords=["deploy", "pipeline", "container", "docker", "kubernetes", "k8s",
-                  "terraform", "ansible", "helm", "ci", "cd", "infra", "cloud",
-                  "aws", "gcp", "azure", "monitoring", "alert", "observ"],
-        phrases=["ci/cd pipeline", "infrastructure as code", "blue green deployment",
-                 "canary release", "rolling update", "auto scaling",
-                 "service discovery", "container orchestration",
-                 "gitops", "platform engineering"],
-        file_indicators=[".tf", ".hcl", "Dockerfile", ".yml", ".yaml",
-                         "Jenkinsfile", ".github"],
-        expert_persona=(
-            "a senior DevOps/platform engineer who has managed production infrastructure "
-            "at scale. You think in terms of reliability, repeatability, and observability. "
-            "You know that every manual step is a future incident."
-        ),
-        thinking_frameworks=["DORA metrics (deployment frequency, lead time, MTTR, change failure rate)",
-                             "Infrastructure as Code principles",
-                             "SRE golden signals (latency, traffic, errors, saturation)",
-                             "GitOps workflow"],
-        key_questions=["What is the deployment target (cloud, on-prem, hybrid)?",
-                       "What are the reliability requirements (SLOs)?",
-                       "How do we roll back if something goes wrong?",
-                       "What observability do we have?",
-                       "What is the blast radius of a bad deploy?"],
-        structured_approach=["Assess current infrastructure and deployment process",
-                             "Identify gaps in reliability and automation",
-                             "Design pipeline and infrastructure changes",
-                             "Plan rollout with rollback strategy",
-                             "Define success metrics and alerts"],
-        agent_hint="plan",
-    ),
-    DomainProfile(
-        id="database",
-        name="Database & Data Modeling",
-        keywords=["database", "schema", "table", "column", "index", "query",
-                  "sql", "nosql", "migration", "join", "foreign key", "primary key",
-                  "transaction", "acid", "normali", "partition", "shard", "replica"],
-        phrases=["query optimization", "execution plan", "database migration",
-                 "data model", "schema design", "query plan", "n+1 query",
-                 "connection pool", "read replica", "write ahead log",
-                 "eventual consistency"],
-        file_indicators=[".sql", ".prisma", ".migration"],
-        expert_persona=(
-            "a database architect with deep expertise in both relational and NoSQL systems. "
-            "You think about data access patterns first, schema second. You've tuned queries "
-            "from minutes to milliseconds and know when denormalization is the right call."
-        ),
-        thinking_frameworks=["Normal forms (1NF through BCNF) and when to denormalize",
-                             "ACID vs BASE trade-offs",
-                             "Index design (B-tree, hash, composite, covering)",
-                             "CAP theorem applied to data stores"],
-        key_questions=["What are the primary access patterns (reads vs writes)?",
-                       "What consistency guarantees are needed?",
-                       "How much data and what growth rate?",
-                       "What are the query performance requirements?",
-                       "How will the schema evolve?"],
-        structured_approach=["Understand access patterns and data relationships",
-                             "Design schema to match access patterns",
-                             "Plan indexing strategy",
-                             "Consider partitioning/sharding needs",
-                             "Design migration path from current state"],
-        agent_hint="build",
-    ),
-    DomainProfile(
-        id="api_design",
-        name="API Design",
-        keywords=["api", "endpoint", "rest", "graphql", "grpc", "webhook",
-                  "pagination", "versioning", "rate limit", "openapi", "swagger",
-                  "request", "response", "payload", "header", "status code"],
-        phrases=["rest api", "api design", "api versioning", "breaking change",
-                 "backward compatible", "content negotiation", "hateoas",
-                 "api gateway", "graphql schema", "api contract"],
-        file_indicators=[".openapi", ".swagger", ".graphql", ".gql", ".proto"],
-        expert_persona=(
-            "a senior API designer who has built APIs used by thousands of developers. "
-            "You think about developer experience, consistency, evolvability, and "
-            "backward compatibility. You know REST deeply but aren't dogmatic about it."
-        ),
-        thinking_frameworks=["REST maturity model (Richardson)",
-                             "API-first design",
-                             "Consumer-driven contracts",
-                             "Robustness principle (be liberal in what you accept)"],
-        key_questions=["Who are the API consumers (internal, external, both)?",
-                       "What operations does the API need to support?",
-                       "How will we handle versioning and breaking changes?",
-                       "What authentication and rate limiting model?",
-                       "What error format and status code conventions?"],
-        structured_approach=["Identify resources and operations",
-                             "Design URL structure and HTTP methods",
-                             "Define request/response schemas",
-                             "Plan versioning and error handling",
-                             "Document with examples"],
-        agent_hint="plan",
-    ),
-    DomainProfile(
-        id="frontend",
-        name="Frontend & UI",
-        keywords=["react", "vue", "svelte", "angular", "component", "render",
-                  "state", "hook", "prop", "css", "style", "dom", "browser",
-                  "responsive", "animation", "accessibility", "a11y", "ssr"],
-        phrases=["server side rendering", "client side rendering", "state management",
-                 "component library", "design system", "web vitals",
-                 "progressive enhancement", "single page app", "hydration",
-                 "code splitting", "lazy loading"],
-        file_indicators=[".tsx", ".jsx", ".vue", ".svelte", ".css", ".scss", ".less"],
-        expert_persona=(
-            "a senior frontend architect who cares deeply about user experience, "
-            "accessibility, and performance. You've built design systems and know "
-            "that the best code is the code that makes users productive and happy."
-        ),
-        thinking_frameworks=["Component composition patterns",
-                             "Unidirectional data flow",
-                             "Web Core Vitals (LCP, FID, CLS)",
-                             "Progressive enhancement",
-                             "WCAG accessibility guidelines"],
-        key_questions=["What is the target user experience?",
-                       "What rendering strategy fits (SSR, CSR, ISR, SSG)?",
-                       "How will we manage state (local, global, server)?",
-                       "What are the accessibility requirements?",
-                       "What are the performance budgets?"],
-        structured_approach=["Clarify UX requirements and constraints",
-                             "Choose rendering and state management strategy",
-                             "Design component hierarchy",
-                             "Plan for accessibility and performance",
-                             "Define testing approach (visual, interaction, a11y)"],
-        agent_hint="build",
-    ),
-    DomainProfile(
-        id="algorithms",
-        name="Algorithms & Data Structures",
-        keywords=["algorithm", "complexity", "sort", "search", "graph", "tree",
-                  "heap", "hash", "array", "linked list", "stack", "queue",
-                  "recursive", "dynamic", "greedy", "backtrack"],
-        phrases=["time complexity", "space complexity", "dynamic programming",
-                 "divide and conquer", "binary search", "breadth first",
-                 "depth first", "shortest path", "minimum spanning",
-                 "sliding window", "two pointer"],
-        file_indicators=[],
-        expert_persona=(
-            "a computer scientist who loves elegant solutions and rigorous analysis. "
-            "You think in terms of invariants, complexity classes, and correctness proofs. "
-            "You know that the right data structure often matters more than the algorithm."
-        ),
-        thinking_frameworks=["Big-O analysis (time and space)",
-                             "Problem reduction (what known problem does this map to?)",
-                             "Invariant-based reasoning",
-                             "Amortized analysis"],
-        key_questions=["What are the input constraints (size, range, distribution)?",
-                       "What are the performance requirements?",
-                       "Is there a known algorithm or pattern that applies?",
-                       "Can we trade space for time (or vice versa)?",
-                       "What edge cases must we handle?"],
-        structured_approach=["Understand the problem and constraints",
-                             "Identify applicable patterns or known algorithms",
-                             "Design solution with correctness argument",
-                             "Analyze time and space complexity",
-                             "Consider optimizations and edge cases"],
-        agent_hint="build",
-    ),
-    DomainProfile(
-        id="code_quality",
-        name="Code Quality & Refactoring",
-        keywords=["refactor", "clean", "readab", "maintainab", "solid", "dry",
-                  "smell", "debt", "pattern", "antipattern", "principle",
-                  "naming", "abstraction", "duplication"],
-        phrases=["code smell", "technical debt", "design pattern", "code review",
-                 "clean code", "single responsibility", "dependency injection",
-                 "separation of concerns", "boy scout rule",
-                 "strangler fig", "legacy code"],
-        file_indicators=[],
-        expert_persona=(
-            "a pragmatic software craftsperson who values readability over cleverness. "
-            "You refactor with purpose, not for its own sake. You know that good code "
-            "is code your teammates can understand and modify with confidence."
-        ),
-        thinking_frameworks=["SOLID principles (applied pragmatically)",
-                             "Refactoring patterns (Fowler)",
-                             "Code smells catalog",
-                             "Connascence (coupling analysis)"],
-        key_questions=["What problem is the current design causing?",
-                       "Is this refactoring worth the risk and effort?",
-                       "What's the minimal change that improves the situation?",
-                       "How do we refactor safely (tests as safety net)?",
-                       "Will this be clearer to the next person reading it?"],
-        structured_approach=["Identify the pain point or code smell",
-                             "Ensure adequate test coverage before refactoring",
-                             "Apply incremental, safe transformations",
-                             "Verify behavior preservation after each step",
-                             "Review for clarity and simplicity"],
-        agent_hint="build",
-    ),
-    DomainProfile(
-        id="planning",
-        name="Project Planning & Product",
-        keywords=["plan", "roadmap", "milestone", "sprint", "epic", "story",
-                  "requirement", "scope", "prioriti", "estimate", "mvp",
-                  "feature", "deadline", "backlog", "stakeholder"],
-        phrases=["user story", "acceptance criteria", "definition of done",
-                 "minimum viable", "project plan", "technical spec",
-                 "request for comments", "design doc", "product requirement",
-                 "scope creep"],
-        file_indicators=[],
-        expert_persona=(
-            "a seasoned tech lead who bridges engineering and product. You break down "
-            "ambiguous problems into concrete, shippable increments. You know that the "
-            "best plan is one the team actually follows."
-        ),
-        thinking_frameworks=["User story mapping",
-                             "RICE prioritization (Reach, Impact, Confidence, Effort)",
-                             "MoSCoW prioritization",
-                             "Incremental delivery (thin vertical slices)"],
-        key_questions=["What is the user problem we're solving?",
-                       "What is the smallest thing we can ship to learn?",
-                       "What are the dependencies and risks?",
-                       "How will we know this succeeded?",
-                       "What can we defer without losing value?"],
-        structured_approach=["Define the problem and success criteria",
-                             "Break down into shippable increments",
-                             "Identify dependencies, risks, and unknowns",
-                             "Prioritize by value and effort",
-                             "Define first concrete next steps"],
-        agent_hint="plan",
-    ),
-    DomainProfile(
-        id="general",
-        name="General Discussion",
-        keywords=[],
-        phrases=[],
-        file_indicators=[],
-        expert_persona=(
-            "a knowledgeable senior engineer with broad experience across the stack. "
-            "You think clearly, communicate precisely, and always consider the broader "
-            "context before diving into details."
-        ),
-        thinking_frameworks=["First principles thinking",
-                             "Trade-off analysis",
-                             "Systems thinking"],
-        key_questions=["What are we trying to achieve?",
-                       "What are the constraints?",
-                       "What are the trade-offs?"],
-        structured_approach=["Understand the question and context",
-                             "Consider multiple perspectives",
-                             "Analyze trade-offs",
-                             "Provide a clear recommendation"],
-        agent_hint="plan",
-    ),
-)
-
-
-@dataclass
-class DomainDetection:
-    """Result of domain detection."""
-    primary: DomainProfile
-    confidence: int  # 0-100
-    secondary: Optional[DomainProfile] = None
-    secondary_confidence: int = 0
-
-
-def detect_domain(
-    message: str,
-    file_paths: Optional[list[str]] = None,
-) -> DomainDetection:
-    """Score message against all domains and return best match.
-
-    Scoring rules:
-    - keyword match: +1 per keyword found
-    - phrase match: +2 per phrase found  (phrases are more specific)
-    - file indicator: +1.5 per matching file extension/pattern
-    """
-    text = message.lower()
-    scores: dict[str, float] = {}
-
-    for domain_id, profile in DOMAIN_REGISTRY.items():
-        if domain_id == "general":
-            continue  # general is the fallback
-        score = 0.0
-
-        for kw in profile.keywords:
-            # Short keywords (<=3 chars) use word-boundary matching
-            # to avoid false positives like "ci" in "ancient"
-            if len(kw) <= 3:
-                if re.search(r'\b' + re.escape(kw) + r'\b', text):
-                    score += 1
-            elif kw in text:
-                score += 1
-
-        for phrase in profile.phrases:
-            if phrase in text:
-                score += 2
-
-        if file_paths:
-            for fp in file_paths:
-                fp_lower = fp.lower()
-                name_lower = Path(fp).name.lower()
-                for indicator in profile.file_indicators:
-                    ind = indicator.lower()
-                    if fp_lower.endswith(ind) or ind == name_lower or ind in fp_lower:
-                        score += 1.5
-
-        if score > 0:
-            scores[domain_id] = score
-
-    if not scores:
-        return DomainDetection(
-            primary=DOMAIN_REGISTRY["general"],
-            confidence=50,
-        )
-
-    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-    best_id, best_score = ranked[0]
-
-    # Confidence: scale relative to number of matches.
-    # A score of 5+ is very confident; 1 is low.
-    confidence = min(99, int(40 + best_score * 12))
-
-    result = DomainDetection(
-        primary=DOMAIN_REGISTRY[best_id],
-        confidence=confidence,
-    )
-
-    # Cross-domain detection: secondary if >60% of primary
-    if len(ranked) > 1:
-        second_id, second_score = ranked[1]
-        if second_score >= best_score * 0.6:
-            result.secondary = DOMAIN_REGISTRY[second_id]
-            result.secondary_confidence = min(99, int(40 + second_score * 12))
-
-    return result
 
 
 def build_companion_prompt(
@@ -737,29 +223,21 @@ def build_companion_prompt(
     files: Optional[list[str]] = None,
     domain_override: Optional[str] = None,
     is_followup: bool = False,
-) -> tuple[str, DomainDetection]:
-    """Assemble a domain-aware companion prompt.
+) -> str:
+    """Assemble a companion prompt that auto-detects the domain.
 
-    Returns (prompt_text, domain_detection).
+    The LLM identifies the domain and adopts an appropriate expert persona.
+    An optional *domain_override* hint biases the framing toward a specific field.
     """
-    # Detect or override domain
-    if domain_override and domain_override in DOMAIN_REGISTRY:
-        profile = DOMAIN_REGISTRY[domain_override]
-        detection = DomainDetection(primary=profile, confidence=99)
-    else:
-        detection = detect_domain(message, files)
-        profile = detection.primary
-
     # Follow-up: lightweight prompt
     if is_followup:
-        parts = [
+        return "\n".join([
             "## Continuing Our Discussion",
             "",
             message,
             "",
             "Remember: challenge assumptions, consider alternatives, be explicit about trade-offs.",
-        ]
-        return "\n".join(parts), detection
+        ])
 
     # --- Full initial prompt ---
     parts = []
@@ -773,76 +251,19 @@ def build_companion_prompt(
             parts.append(file_context)
             parts.append("")
 
-    # Auto-generated framing for unknown domains
-    if profile.id == "general" and not domain_override:
-        return _build_autogenerated_prompt(parts, message, detection), detection
+    # Domain hint
+    domain_hint = ""
+    if domain_override:
+        domain_hint = (
+            f"\n\nNote: the user has indicated this is about **{domain_override}** — "
+            "frame your expertise accordingly."
+        )
 
-    # Cross-domain note
-    cross = ""
-    if detection.secondary:
-        cross = f" This also touches on **{detection.secondary.name}**, so weave in that perspective where relevant."
-
-    # Discussion setup
     parts.append("## Discussion Setup")
     parts.append(
-        f"You are {profile.expert_persona}{cross}\n"
-        f"I'm bringing you a question about **{profile.name}**, "
-        "and I want us to think through it together as peers."
-    )
-    parts.append("")
-
-    # Frameworks
-    parts.append("### Analytical Toolkit")
-    for fw in profile.thinking_frameworks:
-        parts.append(f"- {fw}")
-    parts.append("")
-
-    # Key questions
-    parts.append("### Key Questions to Consider")
-    for q in profile.key_questions:
-        parts.append(f"- {q}")
-    parts.append("")
-
-    # Collaborative ground rules
-    parts.append("## Collaborative Ground Rules")
-    parts.append("- Think out loud, share your reasoning")
-    parts.append("- Challenge questionable assumptions — including mine")
-    parts.append("- Lay out trade-offs explicitly: what we gain, what we lose")
-    parts.append("- Propose at least one alternative I haven't considered")
-    parts.append("")
-
-    # Structured approach
-    parts.append("## Approach")
-    for i, step in enumerate(profile.structured_approach, 1):
-        parts.append(f"{i}. {step}")
-    parts.append("")
-
-    # The question
-    parts.append("## The Question")
-    parts.append(message)
-    parts.append("")
-
-    # Synthesize
-    parts.append("## Synthesize")
-    parts.append("1. Your recommendation with rationale")
-    parts.append("2. Key trade-offs")
-    parts.append("3. Risks or blind spots")
-    parts.append("4. Open questions worth exploring")
-
-    return "\n".join(parts), detection
-
-
-def _build_autogenerated_prompt(parts: list[str], message: str, detection: DomainDetection) -> str:
-    """Build a self-framing prompt for domains not in the hardcoded registry.
-
-    Instead of using a generic persona, instructs the LLM to identify the
-    specific domain and auto-generate its own expert framing.
-    """
-    parts.append("## Discussion Setup — Auto-Framing")
-    parts.append(
-        "Before answering, silently determine the **specific domain of expertise** "
-        "this question belongs to (e.g., metagenomics, compiler design, game physics, "
-        "quantitative finance, embedded systems, or any other field).\n"
+        "Determine the **specific domain of expertise** this question belongs to "
+        "(e.g., distributed systems, metagenomics, compiler design, quantitative finance, "
+        "DevOps, security, database design, or any other field).\n"
         "\n"
         "Then adopt the persona of a **senior practitioner with deep, hands-on "
         "experience** in that domain. You have:\n"
@@ -850,8 +271,8 @@ def _build_autogenerated_prompt(parts: list[str], message: str, detection: Domai
         "- Deep knowledge of the key frameworks, methods, and trade-offs\n"
         "- Strong opinions loosely held — you recommend but explain why\n"
         "\n"
-        "As part of your response, briefly state what domain you identified "
-        "and what expert lens you're applying (one line is enough)."
+        "Briefly state what domain you identified and what expert lens you're "
+        f"applying (one line at the top is enough).{domain_hint}"
     )
     parts.append("")
 
@@ -875,21 +296,10 @@ def _build_autogenerated_prompt(parts: list[str], message: str, detection: Domai
     parts.append("")
 
     parts.append("## Synthesize")
-    parts.append("1. Domain identified and expert lens applied")
-    parts.append("2. Your recommendation with rationale")
-    parts.append("3. Key trade-offs")
-    parts.append("4. Risks or blind spots")
-    parts.append("5. Open questions worth exploring")
-
-    # Update detection name to signal auto-framing
-    detection.primary = DomainProfile(
-        id="auto",
-        name="Auto-Detected",
-        keywords=[], phrases=[], file_indicators=[],
-        expert_persona="auto-generated",
-        thinking_frameworks=[], key_questions=[],
-        structured_approach=[], agent_hint="plan",
-    )
+    parts.append("1. Your recommendation with rationale")
+    parts.append("2. Key trade-offs")
+    parts.append("3. Risks or blind spots")
+    parts.append("4. Open questions worth exploring")
 
     return "\n".join(parts)
 
@@ -1190,18 +600,14 @@ Set via:
         files = (files or []) + [temp_file.name]
 
         # Build prompt: companion system unless _raw is set
-        domain_info = ""
         if _raw:
             run_prompt = build_message_prompt(message, files)
         else:
             is_followup = len(session.messages) > 1
-            run_prompt, detection = build_companion_prompt(
+            run_prompt = build_companion_prompt(
                 message, files, domain_override=domain_override,
                 is_followup=is_followup,
             )
-            domain_info = f"[Domain: {detection.primary.name}] [Confidence: {detection.confidence}%]"
-            if detection.secondary:
-                domain_info += f" [Also: {detection.secondary.name} ({detection.secondary_confidence}%)]"
 
         args = ["run", run_prompt]
 
@@ -1266,10 +672,7 @@ Set via:
         if reply or session.opencode_session_id:
             session.save(self.sessions_dir / f"{sid}.json")
 
-        response = reply or "No response received"
-        if domain_info:
-            response = f"{domain_info}\n\n{response}"
-        return response
+        return reply or "No response received"
 
     async def plan(
         self,
@@ -1564,11 +967,7 @@ async def list_tools():
                     },
                     "domain": {
                         "type": "string",
-                        "description": "Override auto-detected domain",
-                        "enum": ["architecture", "debugging", "performance", "security",
-                                 "testing", "devops", "database", "api_design",
-                                 "frontend", "algorithms", "code_quality", "planning",
-                                 "general"]
+                        "description": "Hint the domain of expertise (e.g., 'security', 'metagenomics', 'quantitative finance')"
                     }
                 },
                 "required": ["message"]
