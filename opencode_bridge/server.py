@@ -1127,7 +1127,14 @@ Set via:
             # Chunking gate for large reviews
             if total_lines > CHUNK_THRESHOLD:
                 prompt = build_review_prompt(file_infos, focus)
-                return await self._run_chunked(prompt, file_paths, self.sessions[sid], mode="review")
+                session = self.sessions[sid]
+                session.add_message("user", f"[code review] {focus}")
+                session.save(self.sessions_dir / f"{sid}.json")
+                reply = await self._run_chunked(prompt, file_paths, session, mode="review")
+                if reply:
+                    session.add_message("assistant", reply)
+                    session.save(self.sessions_dir / f"{sid}.json")
+                return reply
 
             prompt = build_review_prompt(file_infos, focus)
 

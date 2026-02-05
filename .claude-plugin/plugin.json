@@ -1,6 +1,6 @@
 {
   "name": "opencode-bridge",
-  "version": "0.1.0",
+  "version": "0.4.3",
   "description": "Continuous discussion sessions with OpenCode (GPT-5, Claude, Gemini)",
   "author": "Antonio Fernandez-Guerra",
   "repository": "https://github.com/genomewalker/opencode-bridge",

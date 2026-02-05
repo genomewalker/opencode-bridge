@@ -33,6 +33,9 @@
         <a href="#config">Config</a>
         <a href="#env">Env</a>
       </nav>
+      <button class="nav-toggle" aria-label="Toggle menu" aria-expanded="false">
+        <span></span><span></span><span></span>
+      </button>
       <a href="https://github.com/genomewalker/opencode-bridge" class="nav-github" aria-label="GitHub repository">
         <svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
       </a>
@@ -44,7 +47,7 @@
     <section class="docs-hero">
       <div class="wrap">
         <div class="hero-eyebrow">DOCUMENTATION</div>
-        <h1 class="docs-title">opencode-bridge <span class="version">v0.4.1</span></h1>
+        <h1 class="docs-title">opencode-bridge <span class="version">v0.4.3</span></h1>
         <p class="hero-subtitle">MCP server for multi-model consultation</p>
       </div>
     </section>
@@ -607,9 +610,9 @@ opencode_discuss(
             <span class="code-title">~/.opencode-bridge/config.json</span>
           </div>
           <pre><code>{
-  <span class="json-key">"default_model"</span>: <span class="json-val">"openai/gpt-5.2-codex"</span>,
-  <span class="json-key">"default_agent"</span>: <span class="json-val">"plan"</span>,
-  <span class="json-key">"default_variant"</span>: <span class="json-val">"medium"</span>
+  <span class="json-key">"model"</span>: <span class="json-val">"openai/gpt-5.2-codex"</span>,
+  <span class="json-key">"agent"</span>: <span class="json-val">"plan"</span>,
+  <span class="json-key">"variant"</span>: <span class="json-val">"medium"</span>
 }</code></pre>
         </div>
 
@@ -617,9 +620,9 @@ opencode_discuss(
         <table class="param-table">
           <thead><tr><th>Key</th><th>Values</th><th>Default</th></tr></thead>
           <tbody>
-            <tr><td><code>default_model</code></td><td>Any OpenCode model ID</td><td><code>openai/gpt-5.2-codex</code></td></tr>
-            <tr><td><code>default_agent</code></td><td><code>plan</code>, <code>build</code>, <code>explore</code>, <code>general</code></td><td><code>plan</code></td></tr>
-            <tr><td><code>default_variant</code></td><td><code>minimal</code>, <code>low</code>, <code>medium</code>, <code>high</code>, <code>xhigh</code>, <code>max</code></td><td><code>medium</code></td></tr>
+            <tr><td><code>model</code></td><td>Any OpenCode model ID</td><td><code>openai/gpt-5.2-codex</code></td></tr>
+            <tr><td><code>agent</code></td><td><code>plan</code>, <code>build</code>, <code>explore</code>, <code>general</code></td><td><code>plan</code></td></tr>
+            <tr><td><code>variant</code></td><td><code>minimal</code>, <code>low</code>, <code>medium</code>, <code>high</code>, <code>xhigh</code>, <code>max</code></td><td><code>medium</code></td></tr>
           </tbody>
         </table>
       </div>
@@ -634,6 +637,7 @@ opencode_discuss(
           <tbody>
             <tr><td><code>OPENCODE_MODEL</code></td><td>Override default model</td><td><code>openai/gpt-5.2-codex</code></td></tr>
             <tr><td><code>OPENCODE_AGENT</code></td><td>Override default agent</td><td><code>plan</code></td></tr>
+            <tr><td><code>OPENCODE_VARIANT</code></td><td>Override default variant</td><td><code>medium</code></td></tr>
           </tbody>
         </table>
         <p class="section-note">Environment variables take precedence over config file values.</p>
@@ -646,13 +650,31 @@ opencode_discuss(
     <div class="wrap footer-inner">
       <span>opencode-bridge</span>
       <span class="footer-sep" aria-hidden="true">&middot;</span>
-      <span>v0.4.1</span>
+      <span>v0.4.3</span>
       <span class="footer-sep" aria-hidden="true">&middot;</span>
       <span>MIT</span>
     </div>
   </footer>
 
   <script>
+    // Mobile nav toggle
+    const navToggle = document.querySelector('.nav-toggle');
+    const nav = document.querySelector('.nav');
+    if (navToggle && nav) {
+      navToggle.addEventListener('click', () => {
+        const open = nav.classList.toggle('nav-open');
+        navToggle.classList.toggle('open', open);
+        navToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+      });
+      nav.querySelectorAll('a').forEach(link => {
+        link.addEventListener('click', () => {
+          nav.classList.remove('nav-open');
+          navToggle.classList.remove('open');
+          navToggle.setAttribute('aria-expanded', 'false');
+        });
+      });
+    }
+
     /* --- Scroll-reveal for cards only (sections are always visible) --- */
     const observer = new IntersectionObserver((entries) => {
       entries.forEach(entry => {

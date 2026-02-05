@@ -370,10 +370,42 @@ html { scroll-behavior: auto; }
   .docs-nav {
     gap: 12px;
   }
+  .docs-nav a {
+    min-height: 44px;
+  }
   .param-table {
     font-size: 11px;
   }
+  .param-table th,
+  .param-table td {
+    padding: 6px 8px;
+  }
   .strategy-grid {
     grid-template-columns: 1fr;
+  }
+  .tool-ref {
+    padding: 14px 16px;
+  }
+  .feature-box {
+    padding: 16px 18px;
+  }
+}
+
+@media (max-width: 480px) {
+  .param-table td:first-child {
+    white-space: normal;
+    word-break: break-word;
+  }
+  .param-table {
+    font-size: 10px;
+  }
+  .param-table td code {
+    font-size: 10px;
+  }
+  .doc-section h2 {
+    font-size: 17px;
+  }
+  .docs-title {
+    font-size: 22px;
   }
 }
