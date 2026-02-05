@@ -1,6 +1,6 @@
 # OpenCode Discussion
 
-Collaborative discussion with OpenCode models (GPT-5, Claude, Gemini). Sessions persist across messages.
+Collaborative discussion with OpenCode models (GPT-5, Claude, Gemini). Sessions persist across messages. Auto-detects discussion domains and frames OpenCode as a specialized expert.
 
 ## Usage
 
@@ -14,7 +14,7 @@ Collaborative discussion with OpenCode models (GPT-5, Claude, Gemini). Sessions 
 |---------|-------------|
 | `/opencode` | Start/continue session |
 | `/opencode plan <task>` | Plan with plan agent |
-| `/opencode ask <question>` | Ask anything |
+| `/opencode ask <question>` | Ask anything (auto-detects domain) |
 | `/opencode review <file>` | Review code |
 | `/opencode models` | List models |
 | `/opencode model <name>` | Switch model |
@@ -23,6 +23,32 @@ Collaborative discussion with OpenCode models (GPT-5, Claude, Gemini). Sessions 
 | `/opencode set model <name>` | Set default model |
 | `/opencode set agent <name>` | Set default agent |
 | `/opencode end` | End session |
+
+## Domain Detection
+
+When you send a message via `opencode_discuss`, the system auto-detects the discussion domain and frames OpenCode as a specialized expert:
+
+| Domain | Example triggers |
+|--------|-----------------|
+| Architecture | "microservice", "system design", "event driven" |
+| Debugging | "bug", "root cause", "stack trace" |
+| Performance | "optimize", "bottleneck", "cache miss" |
+| Security | "vulnerability", "SQL injection", "OWASP" |
+| Testing | "unit test", "coverage", "TDD" |
+| DevOps | "deploy", "CI/CD pipeline", "kubernetes" |
+| Database | "schema", "query optimization", "migration" |
+| API Design | "REST API", "versioning", "endpoint" |
+| Frontend | "React", "component", "SSR", "accessibility" |
+| Algorithms | "dynamic programming", "time complexity" |
+| Code Quality | "refactor", "SOLID", "technical debt" |
+| Planning | "roadmap", "MVP", "user story" |
+| General | fallback when nothing else matches |
+
+Override detection with `domain` parameter: `opencode_discuss(message="...", domain="security")`.
+
+The response includes the detected domain and confidence: `[Domain: Architecture] [Confidence: 92%]`.
+
+Follow-up messages in an existing session get a lighter prompt that preserves the collaborative framing without repeating the full setup.
 
 ## Instructions
 
@@ -42,13 +68,18 @@ When user says `/opencode plan <task>`:
 
 When user says `/opencode ask <question>`:
 1. Call `opencode_discuss(message=<question>)`
-2. Relay the response
+2. Note the detected domain in your relay
+3. Relay the response
+
+To force a specific domain: `opencode_discuss(message=<question>, domain="security")`
 
 ### Code Review
 
 When user says `/opencode review <file>`:
 1. Call `opencode_review(code_or_file=<file>)`
 2. Relay the findings
+
+Note: Code review bypasses the companion system and uses specialized review prompts.
 
 ### Configuration
 
@@ -71,7 +102,7 @@ After initial connection, messages like these should be sent as follow-ups:
 - "how would you implement..."
 - "can you explain..."
 
-Call `opencode_discuss(message=<user message>)` and relay response.
+Call `opencode_discuss(message=<user message>)` and relay response. Follow-ups automatically get a lighter prompt.
 
 ### Session Management
 
@@ -86,17 +117,14 @@ Call `opencode_discuss(message=<user message>)` and relay response.
 User: /opencode
 Claude: Connected to OpenCode (openai/gpt-5.2-codex, plan agent). Ready.
 
-User: Let's plan an RLM-inspired hierarchical retrieval system
-Claude: [calls opencode_plan, relays response]
+User: Should we use event sourcing for our order system?
+Claude: [calls opencode_discuss]
+       [Domain: Architecture & System Design] [Confidence: 92%]
+       [OpenCode responds as a distributed systems architect]
 
-User: What about the filtering stage?
-Claude: [calls opencode_discuss, relays response]
-
-User: /opencode model github-copilot/claude-opus-4.5
-Claude: Model changed to github-copilot/claude-opus-4.5
-
-User: /opencode set model openai/gpt-5.2-codex
-Claude: Default model set to openai/gpt-5.2-codex (persisted)
+User: What about the security implications?
+Claude: [calls opencode_discuss — follow-up, lighter prompt]
+       [Domain: Security & Threat Modeling] [Confidence: 76%]
 
 User: /opencode end
 Claude: Session ended.
