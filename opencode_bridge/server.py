@@ -782,7 +782,7 @@ def build_companion_prompt(
     parts.append("")
 
     # Frameworks
-    parts.append(f"### Analytical Toolkit")
+    parts.append("### Analytical Toolkit")
     for fw in profile.thinking_frameworks:
         parts.append(f"- {fw}")
     parts.append("")
@@ -802,7 +802,7 @@ def build_companion_prompt(
     parts.append("")
 
     # Structured approach
-    parts.append(f"## Approach")
+    parts.append("## Approach")
     for i, step in enumerate(profile.structured_approach, 1):
         parts.append(f"{i}. {step}")
     parts.append("")
