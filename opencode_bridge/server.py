@@ -511,8 +511,8 @@ DEFAULT_MODEL = "openai/gpt-5.2-codex"
 DEFAULT_AGENT = "plan"
 DEFAULT_VARIANT = "medium"
 
-# Codex defaults
-DEFAULT_CODEX_MODEL = "o3"
+# Codex defaults (empty model = use codex config default)
+DEFAULT_CODEX_MODEL = ""
 DEFAULT_CODEX_SANDBOX = "workspace-write"
 
 
@@ -1504,8 +1504,9 @@ Set via:
         # Build args for codex exec
         args = ["exec"]
 
-        # Add model
-        args.extend(["--model", session.model])
+        # Add model only if explicitly set (otherwise use codex config default)
+        if session.model:
+            args.extend(["--model", session.model])
 
         # Add sandbox mode
         if session.full_auto:
@@ -1547,31 +1548,27 @@ Set via:
         except Exception as e:
             return f"Error: {e}"
 
-        # Parse JSON output
+        # Parse JSON output (Codex JSONL format)
         reply_parts = []
         for line in output.split("\n"):
-            if not line:
+            if not line or line.startswith("WARNING:"):
                 continue
             try:
                 event = json.loads(line)
-                # Capture session ID if present
-                if not session.codex_session_id and event.get("session_id"):
-                    session.codex_session_id = event["session_id"]
-                # Extract text content
-                if event.get("type") == "message":
-                    content = event.get("content", "")
-                    if content:
-                        reply_parts.append(content)
-                elif event.get("type") == "text":
-                    text = event.get("text", "")
-                    if text:
-                        reply_parts.append(text)
+                # Capture thread ID as session ID
+                if not session.codex_session_id and event.get("thread_id"):
+                    session.codex_session_id = event["thread_id"]
+                # Extract text from item.completed events
+                if event.get("type") == "item.completed":
+                    item = event.get("item", {})
+                    if item.get("type") == "agent_message":
+                        text = item.get("text", "")
+                        if text:
+                            reply_parts.append(text)
             except json.JSONDecodeError:
-                # Might be plain text output
-                if line.strip():
-                    reply_parts.append(line)
+                continue
 
-        reply = "\n".join(reply_parts) if reply_parts else output
+        reply = "\n".join(reply_parts)
         if reply:
             session.add_message("assistant", reply)
             session.save(self.sessions_dir / f"{sid}.json")
@@ -1586,10 +1583,11 @@ Set via:
         full_auto: bool = True
     ) -> str:
         """Run a one-off task without session management."""
-        model = model or self.config.codex_model
-
         args = ["exec"]
-        args.extend(["--model", model])
+
+        # Add model only if explicitly specified (otherwise use codex config default)
+        if model:
+            args.extend(["--model", model])
 
         if full_auto:
             args.append("--full-auto")
@@ -1623,20 +1621,21 @@ Set via:
         except Exception as e:
             return f"Error: {e}"
 
-        # Parse output
+        # Parse output (Codex JSONL format)
         reply_parts = []
         for line in output.split("\n"):
-            if not line:
+            if not line or line.startswith("WARNING:"):
                 continue
             try:
                 event = json.loads(line)
-                if event.get("type") in ("message", "text"):
-                    text = event.get("content") or event.get("text", "")
-                    if text:
-                        reply_parts.append(text)
+                if event.get("type") == "item.completed":
+                    item = event.get("item", {})
+                    if item.get("type") == "agent_message":
+                        text = item.get("text", "")
+                        if text:
+                            reply_parts.append(text)
             except json.JSONDecodeError:
-                if line.strip():
-                    reply_parts.append(line)
+                continue
 
         return "\n".join(reply_parts) if reply_parts else output or "No response received"
 
