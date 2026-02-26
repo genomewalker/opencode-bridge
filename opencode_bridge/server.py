@@ -1730,9 +1730,297 @@ Set via:
         }
 
 
+class Orchestrator:
+    """Multi-agent orchestration for complex workflows."""
+
+    def __init__(self, opencode_bridge: OpenCodeBridge, codex_bridge: CodexBridge):
+        self.opencode = opencode_bridge
+        self.codex = codex_bridge
+
+    async def multi_consult(
+        self,
+        question: str,
+        backends: list[str] = None,
+        files: list[str] = None,
+        synthesize: bool = True,
+    ) -> str:
+        """Fan-out a question to multiple backends in parallel, optionally synthesize results.
+
+        Args:
+            question: The question/task to send to all backends
+            backends: List of backends to consult ["opencode", "codex"] (default: both)
+            files: Files to attach (OpenCode only)
+            synthesize: Whether to synthesize results into a unified response
+        """
+        backends = backends or ["opencode", "codex"]
+        results: dict[str, str] = {}
+        errors: dict[str, str] = {}
+
+        async def run_opencode():
+            try:
+                # Create temporary session
+                sid = f"multi-{datetime.now().strftime('%Y%m%d-%H%M%S')}-oc"
+                await self.opencode.start_session(sid)
+                result = await self.opencode.send_message(question, sid, files)
+                self.opencode.end_session(sid)
+                return result
+            except Exception as e:
+                return f"[OpenCode error: {e}]"
+
+        async def run_codex():
+            try:
+                # Use stateless run for multi-consult
+                result = await self.codex.run_task(question)
+                return result
+            except Exception as e:
+                return f"[Codex error: {e}]"
+
+        # Run backends in parallel
+        tasks = []
+        task_names = []
+        if "opencode" in backends:
+            tasks.append(run_opencode())
+            task_names.append("opencode")
+        if "codex" in backends:
+            tasks.append(run_codex())
+            task_names.append("codex")
+
+        if not tasks:
+            return "No backends specified."
+
+        responses = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for name, response in zip(task_names, responses):
+            if isinstance(response, Exception):
+                errors[name] = str(response)
+            else:
+                results[name] = response
+
+        # Format output
+        if not synthesize or len(results) == 1:
+            parts = []
+            for name, response in results.items():
+                parts.append(f"## {name.upper()}\n\n{response}")
+            for name, error in errors.items():
+                parts.append(f"## {name.upper()} (error)\n\n{error}")
+            return "\n\n---\n\n".join(parts)
+
+        # Synthesize using OpenCode
+        if results:
+            synthesis_prompt = f"""Synthesize these responses to the question: "{question}"
+
+"""
+            for name, response in results.items():
+                synthesis_prompt += f"### {name.upper()} Response:\n{response}\n\n"
+
+            synthesis_prompt += """### Instructions:
+- Identify areas of agreement and disagreement
+- Highlight unique insights from each perspective
+- Provide a unified recommendation that considers all viewpoints
+- Note any caveats or areas needing further investigation"""
+
+            try:
+                sid = f"synth-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+                await self.opencode.start_session(sid, agent="build")
+                synthesis = await self.opencode.send_message(synthesis_prompt, sid, _raw=True)
+                self.opencode.end_session(sid)
+                return f"## SYNTHESIS\n\n{synthesis}\n\n---\n\n## Individual Responses\n\n" + \
+                    "\n\n---\n\n".join(f"### {n.upper()}\n{r}" for n, r in results.items())
+            except Exception as e:
+                # Fallback to non-synthesized output
+                parts = [f"[Synthesis failed: {e}]"]
+                for name, response in results.items():
+                    parts.append(f"## {name.upper()}\n\n{response}")
+                return "\n\n---\n\n".join(parts)
+
+        return "All backends failed: " + ", ".join(f"{k}: {v}" for k, v in errors.items())
+
+    async def chain(
+        self,
+        steps: list[dict],
+    ) -> str:
+        """Execute a chain of agent steps, passing results forward.
+
+        Each step is a dict with:
+            - backend: "opencode" or "codex"
+            - task: The task/prompt (can include {previous} placeholder)
+            - model: Optional model override
+            - agent: Optional agent override (OpenCode only)
+
+        Example:
+            [
+                {"backend": "opencode", "task": "Plan how to implement X", "agent": "plan"},
+                {"backend": "codex", "task": "Implement the plan: {previous}"},
+                {"backend": "opencode", "task": "Review this implementation: {previous}"}
+            ]
+        """
+        if not steps:
+            return "No steps provided."
+
+        results = []
+        previous = ""
+
+        for i, step in enumerate(steps, 1):
+            backend = step.get("backend", "opencode")
+            task = step.get("task", "")
+            model = step.get("model")
+            agent = step.get("agent")
+
+            # Substitute {previous} placeholder
+            if "{previous}" in task and previous:
+                task = task.replace("{previous}", previous)
+
+            step_header = f"## Step {i}: {backend.upper()}"
+            if model:
+                step_header += f" (model={model})"
+            if agent:
+                step_header += f" (agent={agent})"
+
+            try:
+                if backend == "opencode":
+                    sid = f"chain-{i}-{datetime.now().strftime('%H%M%S')}"
+                    await self.opencode.start_session(sid, model=model, agent=agent)
+                    result = await self.opencode.send_message(task, sid, _raw=True)
+                    self.opencode.end_session(sid)
+                elif backend == "codex":
+                    result = await self.codex.run_task(task, model=model)
+                else:
+                    result = f"Unknown backend: {backend}"
+
+                previous = result
+                results.append(f"{step_header}\n\n{result}")
+
+            except Exception as e:
+                error_msg = f"Step {i} failed: {e}"
+                results.append(f"{step_header}\n\n**Error:** {error_msg}")
+                # Continue chain even if a step fails
+                previous = f"[Previous step failed: {e}]"
+
+        return "\n\n---\n\n".join(results)
+
+    async def delegate_to_codex(
+        self,
+        task: str,
+        working_dir: str = None,
+        model: str = None,
+        return_to_opencode: bool = False,
+        opencode_followup: str = None,
+    ) -> str:
+        """Delegate a task to Codex, optionally return result to OpenCode for review.
+
+        This enables: Claude -> OpenCode -> Codex -> OpenCode flow
+
+        Args:
+            task: Task for Codex to execute
+            working_dir: Working directory for Codex
+            model: Codex model to use
+            return_to_opencode: Whether to send Codex result back to OpenCode
+            opencode_followup: Custom prompt for OpenCode followup (default: review)
+        """
+        # Run task in Codex
+        codex_result = await self.codex.run_task(task, working_dir=working_dir, model=model)
+
+        if not return_to_opencode:
+            return f"## Codex Result\n\n{codex_result}"
+
+        # Send to OpenCode for review/followup
+        followup = opencode_followup or f"""Review this Codex output and provide feedback:
+
+## Original Task
+{task}
+
+## Codex Result
+{codex_result}
+
+## Instructions
+- Evaluate the correctness and completeness
+- Identify any issues or improvements needed
+- Provide a final assessment"""
+
+        try:
+            sid = f"delegate-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            await self.opencode.start_session(sid, agent="build")
+            review = await self.opencode.send_message(followup, sid, _raw=True)
+            self.opencode.end_session(sid)
+
+            return f"""## Codex Execution
+
+{codex_result}
+
+---
+
+## OpenCode Review
+
+{review}"""
+        except Exception as e:
+            return f"""## Codex Execution
+
+{codex_result}
+
+---
+
+## OpenCode Review (failed)
+
+Error: {e}"""
+
+    async def parallel_agents(
+        self,
+        tasks: list[dict],
+    ) -> str:
+        """Run multiple agent tasks in parallel across backends.
+
+        Each task is a dict with:
+            - backend: "opencode" or "codex"
+            - task: The task/prompt
+            - name: Optional name for the task
+            - model: Optional model override
+
+        All tasks run concurrently, results returned together.
+        """
+        if not tasks:
+            return "No tasks provided."
+
+        async def run_task(task_def: dict, index: int):
+            backend = task_def.get("backend", "opencode")
+            task = task_def.get("task", "")
+            name = task_def.get("name", f"Task {index}")
+            model = task_def.get("model")
+
+            try:
+                if backend == "opencode":
+                    sid = f"parallel-{index}-{datetime.now().strftime('%H%M%S')}"
+                    await self.opencode.start_session(sid, model=model)
+                    result = await self.opencode.send_message(task, sid, _raw=True)
+                    self.opencode.end_session(sid)
+                elif backend == "codex":
+                    result = await self.codex.run_task(task, model=model)
+                else:
+                    result = f"Unknown backend: {backend}"
+
+                return {"name": name, "backend": backend, "result": result, "error": None}
+            except Exception as e:
+                return {"name": name, "backend": backend, "result": None, "error": str(e)}
+
+        # Run all tasks in parallel
+        coros = [run_task(t, i) for i, t in enumerate(tasks, 1)]
+        results = await asyncio.gather(*coros)
+
+        # Format output
+        parts = []
+        for r in results:
+            header = f"## {r['name']} ({r['backend']})"
+            if r["error"]:
+                parts.append(f"{header}\n\n**Error:** {r['error']}")
+            else:
+                parts.append(f"{header}\n\n{r['result']}")
+
+        return "\n\n---\n\n".join(parts)
+
+
 # MCP Server setup
 bridge = OpenCodeBridge()
 codex_bridge = CodexBridge()
+orchestrator = Orchestrator(bridge, codex_bridge)
 server = Server("opencode-bridge")
 
 
@@ -2117,6 +2405,113 @@ async def list_tools():
             name="codex_health",
             description="Codex health check: returns status and installation info",
             inputSchema={"type": "object", "properties": {}}
+        ),
+        # Orchestration tools
+        Tool(
+            name="multi_consult",
+            description="Fan-out a question to multiple backends (OpenCode + Codex) in parallel, optionally synthesize results",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The question/task to send to all backends"
+                    },
+                    "backends": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["opencode", "codex"]},
+                        "description": "Backends to consult (default: both)"
+                    },
+                    "files": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Files to attach (OpenCode only)"
+                    },
+                    "synthesize": {
+                        "type": "boolean",
+                        "description": "Whether to synthesize results into unified response (default: true)"
+                    }
+                },
+                "required": ["question"]
+            }
+        ),
+        Tool(
+            name="agent_chain",
+            description="Execute a chain of agent steps, passing results forward. Example: plan with OpenCode -> implement with Codex -> review with OpenCode",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "steps": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "backend": {"type": "string", "enum": ["opencode", "codex"]},
+                                "task": {"type": "string", "description": "Task prompt. Use {previous} to include result from previous step"},
+                                "model": {"type": "string", "description": "Optional model override"},
+                                "agent": {"type": "string", "description": "Optional agent override (OpenCode only)"}
+                            },
+                            "required": ["backend", "task"]
+                        },
+                        "description": "List of steps to execute sequentially"
+                    }
+                },
+                "required": ["steps"]
+            }
+        ),
+        Tool(
+            name="delegate_codex",
+            description="Delegate a task to Codex, optionally return result to OpenCode for review. Enables: Claude -> Codex -> OpenCode flow",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "Task for Codex to execute"
+                    },
+                    "working_dir": {
+                        "type": "string",
+                        "description": "Working directory for Codex"
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Codex model to use"
+                    },
+                    "return_to_opencode": {
+                        "type": "boolean",
+                        "description": "Send Codex result to OpenCode for review (default: false)"
+                    },
+                    "opencode_followup": {
+                        "type": "string",
+                        "description": "Custom prompt for OpenCode followup"
+                    }
+                },
+                "required": ["task"]
+            }
+        ),
+        Tool(
+            name="parallel_agents",
+            description="Run multiple agent tasks in parallel across backends. All tasks run concurrently.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "tasks": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "backend": {"type": "string", "enum": ["opencode", "codex"]},
+                                "task": {"type": "string"},
+                                "name": {"type": "string", "description": "Optional name for this task"},
+                                "model": {"type": "string", "description": "Optional model override"}
+                            },
+                            "required": ["backend", "task"]
+                        },
+                        "description": "List of tasks to run in parallel"
+                    }
+                },
+                "required": ["tasks"]
+            }
         )
     ]
 
@@ -2232,6 +2627,26 @@ async def call_tool(name: str, arguments: dict):
         elif name == "codex_health":
             health = codex_bridge.health_check()
             result = f"Status: {health['status']}\nCodex installed: {health['codex_installed']}\nSessions: {health['sessions']}\nUptime: {health['uptime']}s"
+        # Orchestration tools
+        elif name == "multi_consult":
+            result = await orchestrator.multi_consult(
+                question=arguments["question"],
+                backends=arguments.get("backends"),
+                files=arguments.get("files"),
+                synthesize=arguments.get("synthesize", True)
+            )
+        elif name == "agent_chain":
+            result = await orchestrator.chain(steps=arguments["steps"])
+        elif name == "delegate_codex":
+            result = await orchestrator.delegate_to_codex(
+                task=arguments["task"],
+                working_dir=arguments.get("working_dir"),
+                model=arguments.get("model"),
+                return_to_opencode=arguments.get("return_to_opencode", False),
+                opencode_followup=arguments.get("opencode_followup")
+            )
+        elif name == "parallel_agents":
+            result = await orchestrator.parallel_agents(tasks=arguments["tasks"])
         else:
             result = f"Unknown tool: {name}"
 
