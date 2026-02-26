@@ -4,8 +4,8 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#06090c" />
-  <title>opencode-bridge — MCP server linking Claude Code to OpenCode</title>
-  <meta name="description" content="MCP server that connects Claude Code to OpenCode for multi-model consultation. GPT-5, Gemini, and more as a companion brain." />
+  <title>opencode-bridge — MCP server linking Claude Code to OpenCode &amp; Codex</title>
+  <meta name="description" content="MCP server that connects Claude Code to OpenCode and Codex for multi-model consultation. GPT-5, o3, Gemini, and more as companion brains." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300;0,400;0,600;0,700;1,400&display=swap" rel="stylesheet" />
@@ -45,8 +45,8 @@
       <div class="wrap">
         <div class="hero-eyebrow">MCP SERVER</div>
         <h1 id="hero-title" class="hero-title">opencode-bridge</h1>
-        <p class="hero-subtitle">linking Claude Code to OpenCode</p>
-        <p class="hero-micro">multi-model consultation, framed by domain</p>
+        <p class="hero-subtitle">linking Claude Code to OpenCode &amp; Codex</p>
+        <p class="hero-micro">multi-model consultation &middot; agentic execution &middot; domain framing</p>
 
         <div class="hero-install">
           <code>pip install opencode-bridge</code>
@@ -88,12 +88,23 @@
           <div class="bridge-node bridge-opencode">
             <div class="node-ring"></div>
             <div class="node-core"></div>
-            <div class="node-label">OpenCode Hub</div>
+            <div class="node-label">OpenCode</div>
             <div class="node-tag">companion</div>
             <div class="model-fan">
               <div class="model-pill pill-gpt"><span class="pill-dot"></span>GPT-5</div>
               <div class="model-pill pill-gemini"><span class="pill-dot"></span>Gemini</div>
-              <div class="model-pill pill-other"><span class="pill-dot"></span>Other</div>
+            </div>
+          </div>
+
+          <!-- Codex Hub -->
+          <div class="bridge-node bridge-codex" style="margin-top: 1.5rem;">
+            <div class="node-ring"></div>
+            <div class="node-core"></div>
+            <div class="node-label">Codex</div>
+            <div class="node-tag">agent</div>
+            <div class="model-fan">
+              <div class="model-pill pill-gpt"><span class="pill-dot"></span>o3</div>
+              <div class="model-pill pill-other"><span class="pill-dot"></span>o4-mini</div>
             </div>
           </div>
         </div>
@@ -129,7 +140,7 @@
           </div>
           <pre><code><span class="prompt">$</span> pip install opencode-bridge</code></pre>
         </div>
-        <p class="section-note">requires: Python 3.10+ &middot; Claude Code &middot; OpenCode CLI</p>
+        <p class="section-note">requires: Python 3.10+ &middot; Claude Code &middot; OpenCode CLI and/or Codex CLI</p>
         <p class="section-note" style="margin-top:8px">then add to your MCP config:</p>
         <div class="code-block" style="margin-top:8px">
           <pre><code><span class="prompt">{</span> "opencode-bridge": { "command": "opencode-bridge" } <span class="prompt">}</span></code></pre>
@@ -144,12 +155,16 @@
         <h2>Capabilities</h2>
         <div class="spec-grid">
           <div class="spec-card">
-            <div class="spec-key">multi-model</div>
-            <div class="spec-val">consult GPT-5, Gemini, others via OpenCode</div>
+            <div class="spec-key">dual backends</div>
+            <div class="spec-val">OpenCode (GPT-5, Gemini) + Codex (o3, o4-mini)</div>
           </div>
           <div class="spec-card">
             <div class="spec-key">auto-framing</div>
             <div class="spec-val">detects domain and frames as specialized expert</div>
+          </div>
+          <div class="spec-card">
+            <div class="spec-key">agentic execution</div>
+            <div class="spec-val">Codex full-auto mode with sandboxed file operations</div>
           </div>
           <div class="spec-card">
             <div class="spec-key">code review</div>
@@ -168,8 +183,8 @@
             <div class="spec-val">dedicated plan agent for task decomposition</div>
           </div>
           <div class="spec-card">
-            <div class="spec-key">brainstorming</div>
-            <div class="spec-val">open-ended ideation through alternate perspectives</div>
+            <div class="spec-key">sandbox modes</div>
+            <div class="spec-val">read-only, workspace-write, full-access for Codex</div>
           </div>
         </div>
       </div>
@@ -225,7 +240,7 @@
     <section id="tools" class="section">
       <div class="wrap">
         <div class="section-label">04</div>
-        <h2>MCP Tools <span class="tool-count">18</span></h2>
+        <h2>MCP Tools <span class="tool-count">30</span></h2>
 
         <div class="tool-group">
           <h3 class="tool-group-label">Core</h3>
@@ -313,6 +328,72 @@
             <div class="tool-card">
               <code class="tool-name">opencode_health</code>
               <span class="tool-desc">server health check</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="tool-group">
+          <h3 class="tool-group-label">Codex Core</h3>
+          <div class="tool-grid">
+            <div class="tool-card">
+              <code class="tool-name">codex_start</code>
+              <span class="tool-desc">start a new Codex session</span>
+            </div>
+            <div class="tool-card">
+              <code class="tool-name">codex_discuss</code>
+              <span class="tool-desc">send message to Codex agent</span>
+            </div>
+            <div class="tool-card">
+              <code class="tool-name">codex_run</code>
+              <span class="tool-desc">one-off stateless task execution</span>
+            </div>
+            <div class="tool-card">
+              <code class="tool-name">codex_review</code>
+              <span class="tool-desc">code review on repository</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="tool-group">
+          <h3 class="tool-group-label">Codex Session</h3>
+          <div class="tool-grid">
+            <div class="tool-card">
+              <code class="tool-name">codex_end</code>
+              <span class="tool-desc">end current session</span>
+            </div>
+            <div class="tool-card">
+              <code class="tool-name">codex_switch</code>
+              <span class="tool-desc">switch between sessions</span>
+            </div>
+            <div class="tool-card">
+              <code class="tool-name">codex_sessions</code>
+              <span class="tool-desc">list all Codex sessions</span>
+            </div>
+            <div class="tool-card">
+              <code class="tool-name">codex_history</code>
+              <span class="tool-desc">get conversation history</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="tool-group">
+          <h3 class="tool-group-label">Codex Config</h3>
+          <div class="tool-grid">
+            <div class="tool-card">
+              <code class="tool-name">codex_model</code>
+              <span class="tool-desc">change session model (o3, o4-mini)</span>
+            </div>
+            <div class="tool-card">
+              <code class="tool-name">codex_config</code>
+              <span class="tool-desc">get current config</span>
+            </div>
+            <div class="tool-card">
+              <code class="tool-name">codex_configure</code>
+              <span class="tool-desc">set defaults (persisted)</span>
+            </div>
+            <div class="tool-card">
+              <code class="tool-name">codex_health</code>
+              <span class="tool-desc">Codex health check</span>
             </div>
           </div>
         </div>
