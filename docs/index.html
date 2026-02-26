@@ -27,7 +27,7 @@
         <a href="#capabilities">capabilities</a>
         <a href="#flow">flow</a>
         <a href="#tools">tools</a>
-        <a href="#framing">framing</a>
+        <a href="#orchestration">orchestration</a>
         <a href="docs.html">docs</a>
       </nav>
       <button class="nav-toggle" aria-label="Toggle menu" aria-expanded="false">
@@ -240,7 +240,7 @@
     <section id="tools" class="section">
       <div class="wrap">
         <div class="section-label">04</div>
-        <h2>MCP Tools <span class="tool-count">30</span></h2>
+        <h2>MCP Tools <span class="tool-count">34</span></h2>
 
         <div class="tool-group">
           <h3 class="tool-group-label">Core</h3>
@@ -397,6 +397,28 @@
             </div>
           </div>
         </div>
+
+        <div class="tool-group">
+          <h3 class="tool-group-label">Orchestration</h3>
+          <div class="tool-grid">
+            <div class="tool-card">
+              <code class="tool-name">multi_consult</code>
+              <span class="tool-desc">fan-out to multiple backends, synthesize results</span>
+            </div>
+            <div class="tool-card">
+              <code class="tool-name">agent_chain</code>
+              <span class="tool-desc">sequential steps passing results forward</span>
+            </div>
+            <div class="tool-card">
+              <code class="tool-name">delegate_codex</code>
+              <span class="tool-desc">delegate to Codex with optional OpenCode review</span>
+            </div>
+            <div class="tool-card">
+              <code class="tool-name">parallel_agents</code>
+              <span class="tool-desc">run multiple tasks concurrently</span>
+            </div>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -478,10 +500,84 @@
       </div>
     </section>
 
+    <!-- ===== ORCHESTRATION ===== -->
+    <section id="orchestration" class="section">
+      <div class="wrap">
+        <div class="section-label">07</div>
+        <h2>Multi-Agent Orchestration</h2>
+        <p class="section-desc">Coordinate workflows across multiple AI backends with hierarchical agent patterns.</p>
+
+        <div class="chunk-specs">
+          <div class="chunk-row">
+            <span class="chunk-key">multi_consult</span>
+            <span class="chunk-val">fan-out question to OpenCode + Codex in parallel &middot; synthesize results</span>
+          </div>
+          <div class="chunk-row">
+            <span class="chunk-key">agent_chain</span>
+            <span class="chunk-val">sequential steps &middot; {previous} passes result forward &middot; plan → implement → review</span>
+          </div>
+          <div class="chunk-row">
+            <span class="chunk-key">delegate_codex</span>
+            <span class="chunk-val">delegate to Codex &middot; optional OpenCode review &middot; Claude → Codex → OpenCode</span>
+          </div>
+          <div class="chunk-row">
+            <span class="chunk-key">parallel_agents</span>
+            <span class="chunk-val">run multiple tasks concurrently &middot; across both backends</span>
+          </div>
+        </div>
+
+        <!-- Orchestration flow visual -->
+        <div class="flow-diagram" style="margin-top: 2rem;">
+          <div class="flow-step">
+            <div class="flow-num">1</div>
+            <div class="flow-box fb-claude">Claude Code</div>
+          </div>
+          <div class="flow-connector" aria-hidden="true">
+            <div class="fc-line"></div>
+            <div class="fc-arrow"></div>
+          </div>
+          <div class="flow-step">
+            <div class="flow-num">2</div>
+            <div class="flow-box fb-opencode">OpenCode (plan)</div>
+          </div>
+          <div class="flow-connector" aria-hidden="true">
+            <div class="fc-line"></div>
+            <div class="fc-arrow"></div>
+          </div>
+          <div class="flow-step">
+            <div class="flow-num">3</div>
+            <div class="flow-box fb-bridge">Codex (implement)</div>
+          </div>
+          <div class="flow-connector" aria-hidden="true">
+            <div class="fc-line"></div>
+            <div class="fc-arrow"></div>
+          </div>
+          <div class="flow-step">
+            <div class="flow-num">4</div>
+            <div class="flow-box fb-opencode">OpenCode (review)</div>
+          </div>
+        </div>
+
+        <div class="code-block" style="margin-top: 1.5rem;">
+          <div class="code-bar">
+            <span class="code-dot red"></span>
+            <span class="code-dot yellow"></span>
+            <span class="code-dot green"></span>
+            <span class="code-title">agent_chain example</span>
+          </div>
+          <pre><code>agent_chain(steps=[
+  {"backend": "opencode", "task": "Plan caching strategy", "agent": "plan"},
+  {"backend": "codex", "task": "Implement: {previous}"},
+  {"backend": "opencode", "task": "Review: {previous}"}
+])</code></pre>
+        </div>
+      </div>
+    </section>
+
     <!-- ===== LINKS ===== -->
     <section id="links" class="section section-links">
       <div class="wrap">
-        <div class="section-label">07</div>
+        <div class="section-label">08</div>
         <h2>Links</h2>
         <div class="link-list">
           <a href="https://github.com/genomewalker/opencode-bridge" class="link-item">
