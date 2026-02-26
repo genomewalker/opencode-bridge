@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-OpenCode Bridge - MCP server for continuous OpenCode sessions.
+OpenCode Bridge - MCP server for continuous OpenCode and Codex sessions.
 
 Features:
 - Continuous discussion sessions with conversation history
-- Access to all OpenCode models (GPT-5, Claude, Gemini, etc.)
+- Access to OpenCode models (GPT-5, Claude, Gemini, etc.)
+- Access to Codex CLI (OpenAI's agentic coding assistant)
 - Agent support (plan, build, explore, general)
 - Session continuation
 - File attachment for code review
 
 Configuration:
-- OPENCODE_MODEL: Default model (e.g., openai/gpt-5.2-codex)
+- OPENCODE_MODEL: Default model for OpenCode
 - OPENCODE_AGENT: Default agent (plan, build, explore, general)
+- CODEX_MODEL: Default model for Codex (e.g., o3, gpt-4.1)
 - ~/.opencode-bridge/config.json: Persistent config
 """
 
@@ -24,7 +26,7 @@ import shutil
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Literal
 from dataclasses import dataclass, field, asdict
 
 from mcp.server import Server, InitializationOptions
@@ -509,12 +511,20 @@ DEFAULT_MODEL = "openai/gpt-5.2-codex"
 DEFAULT_AGENT = "plan"
 DEFAULT_VARIANT = "medium"
 
+# Codex defaults
+DEFAULT_CODEX_MODEL = "o3"
+DEFAULT_CODEX_SANDBOX = "workspace-write"
+
 
 @dataclass
 class Config:
+    # OpenCode settings
     model: str = DEFAULT_MODEL
     agent: str = DEFAULT_AGENT
     variant: str = DEFAULT_VARIANT
+    # Codex settings
+    codex_model: str = DEFAULT_CODEX_MODEL
+    codex_sandbox: str = DEFAULT_CODEX_SANDBOX
 
     @classmethod
     def load(cls) -> "Config":
@@ -528,6 +538,8 @@ class Config:
                 config.model = data.get("model", config.model)
                 config.agent = data.get("agent", config.agent)
                 config.variant = data.get("variant", config.variant)
+                config.codex_model = data.get("codex_model", config.codex_model)
+                config.codex_sandbox = data.get("codex_sandbox", config.codex_sandbox)
             except Exception:
                 pass
 
@@ -535,6 +547,8 @@ class Config:
         config.model = os.environ.get("OPENCODE_MODEL", config.model)
         config.agent = os.environ.get("OPENCODE_AGENT", config.agent)
         config.variant = os.environ.get("OPENCODE_VARIANT") or config.variant
+        config.codex_model = os.environ.get("CODEX_MODEL", config.codex_model)
+        config.codex_sandbox = os.environ.get("CODEX_SANDBOX", config.codex_sandbox)
 
         return config
 
@@ -542,7 +556,13 @@ class Config:
         config_dir = Path.home() / ".opencode-bridge"
         config_dir.mkdir(parents=True, exist_ok=True)
         config_path = config_dir / "config.json"
-        data = {"model": self.model, "agent": self.agent, "variant": self.variant}
+        data = {
+            "model": self.model,
+            "agent": self.agent,
+            "variant": self.variant,
+            "codex_model": self.codex_model,
+            "codex_sandbox": self.codex_sandbox,
+        }
         config_path.write_text(json.dumps(data, indent=2))
 
 
@@ -564,7 +584,26 @@ def find_opencode() -> Optional[Path]:
     return None
 
 
+def find_codex() -> Optional[Path]:
+    """Find codex binary."""
+    # Check common locations
+    paths = [
+        Path.home() / ".codex" / "bin" / "codex",
+        Path("/usr/local/bin/codex"),
+        Path("/usr/bin/codex"),
+    ]
+    for p in paths:
+        if p.exists():
+            return p
+    # Check PATH
+    which = shutil.which("codex")
+    if which:
+        return Path(which)
+    return None
+
+
 OPENCODE_BIN = find_opencode()
+CODEX_BIN = find_codex()
 
 
 @dataclass
@@ -576,6 +615,7 @@ class Message:
 
 @dataclass
 class Session:
+    """Session for OpenCode backend."""
     id: str
     model: str
     agent: str
@@ -608,6 +648,51 @@ class Session:
             agent=data.get("agent", DEFAULT_AGENT),
             variant=data.get("variant", DEFAULT_VARIANT),
             opencode_session_id=data.get("opencode_session_id"),
+            created=data.get("created", datetime.now().isoformat())
+        )
+        for m in data.get("messages", []):
+            session.messages.append(Message(**m))
+        return session
+
+
+@dataclass
+class CodexSession:
+    """Session for Codex backend."""
+    id: str
+    model: str
+    sandbox: str = DEFAULT_CODEX_SANDBOX
+    full_auto: bool = True
+    codex_session_id: Optional[str] = None
+    working_dir: Optional[str] = None
+    messages: list[Message] = field(default_factory=list)
+    created: str = field(default_factory=lambda: datetime.now().isoformat())
+
+    def add_message(self, role: str, content: str):
+        self.messages.append(Message(role=role, content=content))
+
+    def save(self, path: Path):
+        data = {
+            "id": self.id,
+            "model": self.model,
+            "sandbox": self.sandbox,
+            "full_auto": self.full_auto,
+            "codex_session_id": self.codex_session_id,
+            "working_dir": self.working_dir,
+            "created": self.created,
+            "messages": [asdict(m) for m in self.messages]
+        }
+        path.write_text(json.dumps(data, indent=2))
+
+    @classmethod
+    def load(cls, path: Path) -> "CodexSession":
+        data = json.loads(path.read_text())
+        session = cls(
+            id=data["id"],
+            model=data["model"],
+            sandbox=data.get("sandbox", DEFAULT_CODEX_SANDBOX),
+            full_auto=data.get("full_auto", True),
+            codex_session_id=data.get("codex_session_id"),
+            working_dir=data.get("working_dir"),
             created=data.get("created", datetime.now().isoformat())
         )
         for m in data.get("messages", []):
@@ -1302,8 +1387,352 @@ Provide:
         }
 
 
+class CodexBridge:
+    """Bridge for Codex CLI interactions with session management."""
+
+    def __init__(self):
+        self.start_time = datetime.now()
+        self.config = Config.load()
+        self.sessions: dict[str, CodexSession] = {}
+        self.active_session: Optional[str] = None
+        self.sessions_dir = Path.home() / ".opencode-bridge" / "codex-sessions"
+        self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        self._load_sessions()
+
+    def _load_sessions(self):
+        for path in self.sessions_dir.glob("*.json"):
+            try:
+                session = CodexSession.load(path)
+                self.sessions[session.id] = session
+            except Exception:
+                pass
+
+    async def _run_codex(self, *args, timeout: int = 300, cwd: Optional[str] = None) -> tuple[str, int]:
+        """Run codex CLI command and return output (async)."""
+        if not CODEX_BIN:
+            return "Codex not installed. Install from: https://github.com/openai/codex", 1
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                str(CODEX_BIN), *args,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=cwd
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(input=b''),
+                timeout=timeout
+            )
+            output = stdout.decode() or stderr.decode()
+            return output.strip(), proc.returncode or 0
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return "Command timed out", 1
+        except Exception as e:
+            return f"Error: {e}", 1
+
+    async def start_session(
+        self,
+        session_id: str,
+        model: Optional[str] = None,
+        sandbox: Optional[str] = None,
+        full_auto: bool = True,
+        working_dir: Optional[str] = None
+    ) -> str:
+        model = model or self.config.codex_model
+        sandbox = sandbox or self.config.codex_sandbox
+
+        session = CodexSession(
+            id=session_id,
+            model=model,
+            sandbox=sandbox,
+            full_auto=full_auto,
+            working_dir=working_dir or os.getcwd()
+        )
+        self.sessions[session_id] = session
+        self.active_session = session_id
+        session.save(self.sessions_dir / f"{session_id}.json")
+
+        result = f"Codex session '{session_id}' started\n  Model: {model}\n  Sandbox: {sandbox}"
+        if full_auto:
+            result += "\n  Mode: full-auto"
+        if working_dir:
+            result += f"\n  Working dir: {working_dir}"
+        return result
+
+    def get_config(self) -> str:
+        """Get current Codex configuration."""
+        return f"""Codex configuration:
+  Model: {self.config.codex_model}
+  Sandbox: {self.config.codex_sandbox}
+
+Set via:
+  - ~/.opencode-bridge/config.json
+  - CODEX_MODEL, CODEX_SANDBOX env vars
+  - codex_configure tool"""
+
+    def set_config(self, model: Optional[str] = None, sandbox: Optional[str] = None) -> str:
+        """Update and persist Codex configuration."""
+        changes = []
+        if model:
+            self.config.codex_model = model
+            changes.append(f"model: {model}")
+        if sandbox:
+            self.config.codex_sandbox = sandbox
+            changes.append(f"sandbox: {sandbox}")
+
+        if changes:
+            self.config.save()
+            return "Codex configuration updated:\n  " + "\n  ".join(changes)
+        return "No changes made."
+
+    async def send_message(
+        self,
+        message: str,
+        session_id: Optional[str] = None,
+        images: Optional[list[str]] = None
+    ) -> str:
+        sid = session_id or self.active_session
+        if not sid or sid not in self.sessions:
+            return "No active Codex session. Use codex_start first."
+
+        session = self.sessions[sid]
+        session.add_message("user", message)
+
+        # Build args for codex exec
+        args = ["exec"]
+
+        # Add model
+        args.extend(["--model", session.model])
+
+        # Add sandbox mode
+        if session.full_auto:
+            args.append("--full-auto")
+        else:
+            args.extend(["--sandbox", session.sandbox])
+
+        # Add images if provided
+        if images:
+            for img in images:
+                args.extend(["--image", img])
+
+        # Use JSON output for parsing
+        args.append("--json")
+
+        # Add the prompt (read from stdin via -)
+        args.append("-")
+
+        # Run codex with message as stdin
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                str(CODEX_BIN), *args,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=session.working_dir
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(input=message.encode()),
+                timeout=300
+            )
+            output = stdout.decode()
+            if proc.returncode != 0:
+                return f"Error: {stderr.decode() or output}"
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return "Command timed out"
+        except Exception as e:
+            return f"Error: {e}"
+
+        # Parse JSON output
+        reply_parts = []
+        for line in output.split("\n"):
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+                # Capture session ID if present
+                if not session.codex_session_id and event.get("session_id"):
+                    session.codex_session_id = event["session_id"]
+                # Extract text content
+                if event.get("type") == "message":
+                    content = event.get("content", "")
+                    if content:
+                        reply_parts.append(content)
+                elif event.get("type") == "text":
+                    text = event.get("text", "")
+                    if text:
+                        reply_parts.append(text)
+            except json.JSONDecodeError:
+                # Might be plain text output
+                if line.strip():
+                    reply_parts.append(line)
+
+        reply = "\n".join(reply_parts) if reply_parts else output
+        if reply:
+            session.add_message("assistant", reply)
+            session.save(self.sessions_dir / f"{sid}.json")
+
+        return reply or "No response received"
+
+    async def run_task(
+        self,
+        task: str,
+        working_dir: Optional[str] = None,
+        model: Optional[str] = None,
+        full_auto: bool = True
+    ) -> str:
+        """Run a one-off task without session management."""
+        model = model or self.config.codex_model
+
+        args = ["exec"]
+        args.extend(["--model", model])
+
+        if full_auto:
+            args.append("--full-auto")
+        else:
+            args.extend(["--sandbox", self.config.codex_sandbox])
+
+        args.append("--json")
+        args.append("-")
+
+        cwd = working_dir or os.getcwd()
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                str(CODEX_BIN), *args,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=cwd
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(input=task.encode()),
+                timeout=300
+            )
+            output = stdout.decode()
+            if proc.returncode != 0:
+                return f"Error: {stderr.decode() or output}"
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return "Command timed out"
+        except Exception as e:
+            return f"Error: {e}"
+
+        # Parse output
+        reply_parts = []
+        for line in output.split("\n"):
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+                if event.get("type") in ("message", "text"):
+                    text = event.get("content") or event.get("text", "")
+                    if text:
+                        reply_parts.append(text)
+            except json.JSONDecodeError:
+                if line.strip():
+                    reply_parts.append(line)
+
+        return "\n".join(reply_parts) if reply_parts else output or "No response received"
+
+    async def review_code(
+        self,
+        working_dir: Optional[str] = None,
+        model: Optional[str] = None
+    ) -> str:
+        """Run Codex code review on the current repository."""
+        model = model or self.config.codex_model
+        cwd = working_dir or os.getcwd()
+
+        args = ["exec", "review", "--model", model, "--json"]
+
+        output, code = await self._run_codex(*args, cwd=cwd)
+        if code != 0:
+            return f"Error: {output}"
+
+        return output or "Review complete"
+
+    def list_sessions(self) -> str:
+        if not self.sessions:
+            return "No Codex sessions found."
+
+        lines = ["Codex Sessions:"]
+        for sid, session in self.sessions.items():
+            active = " (active)" if sid == self.active_session else ""
+            msg_count = len(session.messages)
+            mode = "full-auto" if session.full_auto else session.sandbox
+            lines.append(f"  - {sid}: {session.model} [{mode}], {msg_count} messages{active}")
+        return "\n".join(lines)
+
+    def get_history(self, session_id: Optional[str] = None, last_n: int = 20) -> str:
+        sid = session_id or self.active_session
+        if not sid or sid not in self.sessions:
+            return "No active Codex session."
+
+        session = self.sessions[sid]
+        mode = "full-auto" if session.full_auto else session.sandbox
+        lines = [f"Codex Session: {sid}", f"Model: {session.model}, Mode: {mode}", "---"]
+
+        for msg in session.messages[-last_n:]:
+            role = "You" if msg.role == "user" else "Codex"
+            lines.append(f"\n**{role}:**\n{msg.content}")
+
+        return "\n".join(lines)
+
+    def set_active(self, session_id: str) -> str:
+        if session_id not in self.sessions:
+            return f"Codex session '{session_id}' not found."
+        self.active_session = session_id
+        session = self.sessions[session_id]
+        mode = "full-auto" if session.full_auto else session.sandbox
+        return f"Active Codex session: '{session_id}' ({session.model}, {mode})"
+
+    def set_model(self, model: str, session_id: Optional[str] = None) -> str:
+        sid = session_id or self.active_session
+        if not sid or sid not in self.sessions:
+            return "No active Codex session."
+
+        session = self.sessions[sid]
+        old_model = session.model
+        session.model = model
+        session.save(self.sessions_dir / f"{sid}.json")
+
+        return f"Codex model changed: {old_model} -> {model}"
+
+    def end_session(self, session_id: Optional[str] = None) -> str:
+        sid = session_id or self.active_session
+        if not sid or sid not in self.sessions:
+            return "No active Codex session to end."
+
+        del self.sessions[sid]
+        session_path = self.sessions_dir / f"{sid}.json"
+        if session_path.exists():
+            session_path.unlink()
+
+        if self.active_session == sid:
+            self.active_session = None
+
+        return f"Codex session '{sid}' ended."
+
+    def health_check(self) -> dict:
+        """Return Codex bridge health status."""
+        uptime_seconds = int((datetime.now() - self.start_time).total_seconds())
+        return {
+            "status": "ok" if CODEX_BIN else "codex not found",
+            "codex_installed": CODEX_BIN is not None,
+            "sessions": len(self.sessions),
+            "uptime": uptime_seconds
+        }
+
+
 # MCP Server setup
 bridge = OpenCodeBridge()
+codex_bridge = CodexBridge()
 server = Server("opencode-bridge")
 
 
@@ -1532,6 +1961,162 @@ async def list_tools():
             name="opencode_health",
             description="Health check: returns server status, session count, and uptime",
             inputSchema={"type": "object", "properties": {}}
+        ),
+        # Codex tools
+        Tool(
+            name="codex_start",
+            description="Start a new Codex session (OpenAI's agentic coding assistant)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Unique identifier for this session"
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Model to use (default: o3). Options: o3, o4-mini, gpt-4.1"
+                    },
+                    "sandbox": {
+                        "type": "string",
+                        "description": "Sandbox mode: read-only, workspace-write, danger-full-access (default: workspace-write)"
+                    },
+                    "full_auto": {
+                        "type": "boolean",
+                        "description": "Enable full-auto mode for low-friction execution (default: true)"
+                    },
+                    "working_dir": {
+                        "type": "string",
+                        "description": "Working directory for Codex (default: current directory)"
+                    }
+                },
+                "required": ["session_id"]
+            }
+        ),
+        Tool(
+            name="codex_discuss",
+            description="Send a message to Codex. Use for coding tasks, file operations, debugging.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "message": {
+                        "type": "string",
+                        "description": "Your message or coding task"
+                    },
+                    "images": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Image file paths to attach"
+                    }
+                },
+                "required": ["message"]
+            }
+        ),
+        Tool(
+            name="codex_run",
+            description="Run a one-off Codex task without session (stateless)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "The coding task to perform"
+                    },
+                    "working_dir": {
+                        "type": "string",
+                        "description": "Working directory (default: current)"
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Model to use (default: o3)"
+                    },
+                    "full_auto": {
+                        "type": "boolean",
+                        "description": "Enable full-auto mode (default: true)"
+                    }
+                },
+                "required": ["task"]
+            }
+        ),
+        Tool(
+            name="codex_review",
+            description="Run Codex code review on the current repository",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "working_dir": {
+                        "type": "string",
+                        "description": "Repository directory to review (default: current)"
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Model to use for review"
+                    }
+                }
+            }
+        ),
+        Tool(
+            name="codex_model",
+            description="Change the model for the current Codex session",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "model": {"type": "string", "description": "New model (o3, o4-mini, gpt-4.1)"}
+                },
+                "required": ["model"]
+            }
+        ),
+        Tool(
+            name="codex_history",
+            description="Get Codex conversation history",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "last_n": {"type": "integer", "description": "Number of messages (default: 20)"}
+                }
+            }
+        ),
+        Tool(
+            name="codex_sessions",
+            description="List all Codex sessions",
+            inputSchema={"type": "object", "properties": {}}
+        ),
+        Tool(
+            name="codex_switch",
+            description="Switch to a different Codex session",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "Session to switch to"}
+                },
+                "required": ["session_id"]
+            }
+        ),
+        Tool(
+            name="codex_end",
+            description="End the current Codex session",
+            inputSchema={"type": "object", "properties": {}}
+        ),
+        Tool(
+            name="codex_config",
+            description="Get current Codex configuration",
+            inputSchema={"type": "object", "properties": {}}
+        ),
+        Tool(
+            name="codex_configure",
+            description="Set default Codex model and sandbox mode (persisted)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "model": {"type": "string", "description": "Default model (o3, o4-mini, gpt-4.1)"},
+                    "sandbox": {"type": "string", "description": "Default sandbox mode"}
+                }
+            }
+        ),
+        Tool(
+            name="codex_health",
+            description="Codex health check: returns status and installation info",
+            inputSchema={"type": "object", "properties": {}}
         )
     ]
 
@@ -1601,6 +2186,52 @@ async def call_tool(name: str, arguments: dict):
         elif name == "opencode_health":
             health = bridge.health_check()
             result = f"Status: {health['status']}\nSessions: {health['sessions']}\nUptime: {health['uptime']}s"
+        # Codex tools
+        elif name == "codex_start":
+            result = await codex_bridge.start_session(
+                session_id=arguments["session_id"],
+                model=arguments.get("model"),
+                sandbox=arguments.get("sandbox"),
+                full_auto=arguments.get("full_auto", True),
+                working_dir=arguments.get("working_dir")
+            )
+        elif name == "codex_discuss":
+            result = await codex_bridge.send_message(
+                message=arguments["message"],
+                images=arguments.get("images")
+            )
+        elif name == "codex_run":
+            result = await codex_bridge.run_task(
+                task=arguments["task"],
+                working_dir=arguments.get("working_dir"),
+                model=arguments.get("model"),
+                full_auto=arguments.get("full_auto", True)
+            )
+        elif name == "codex_review":
+            result = await codex_bridge.review_code(
+                working_dir=arguments.get("working_dir"),
+                model=arguments.get("model")
+            )
+        elif name == "codex_model":
+            result = codex_bridge.set_model(arguments["model"])
+        elif name == "codex_history":
+            result = codex_bridge.get_history(last_n=arguments.get("last_n", 20))
+        elif name == "codex_sessions":
+            result = codex_bridge.list_sessions()
+        elif name == "codex_switch":
+            result = codex_bridge.set_active(arguments["session_id"])
+        elif name == "codex_end":
+            result = codex_bridge.end_session()
+        elif name == "codex_config":
+            result = codex_bridge.get_config()
+        elif name == "codex_configure":
+            result = codex_bridge.set_config(
+                model=arguments.get("model"),
+                sandbox=arguments.get("sandbox")
+            )
+        elif name == "codex_health":
+            health = codex_bridge.health_check()
+            result = f"Status: {health['status']}\nCodex installed: {health['codex_installed']}\nSessions: {health['sessions']}\nUptime: {health['uptime']}s"
         else:
             result = f"Unknown tool: {name}"
 

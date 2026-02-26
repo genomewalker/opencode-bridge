@@ -4,15 +4,15 @@ build-backend = "hatchling.build"
 
 [project]
 name = "opencode-bridge"
-version = "0.4.3"
-description = "MCP server for continuous OpenCode discussion sessions"
+version = "0.5.0"
+description = "MCP server for continuous OpenCode and Codex discussion sessions"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [
     {name = "Antonio Fernandez-Guerra"}
 ]
-keywords = ["opencode", "mcp", "claude", "gpt", "code-review", "discussion"]
+keywords = ["opencode", "codex", "mcp", "claude", "gpt", "code-review", "discussion", "agents"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
