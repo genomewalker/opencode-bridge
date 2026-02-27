@@ -1501,17 +1501,23 @@ Set via:
         session = self.sessions[sid]
         session.add_message("user", message)
 
-        # Build args for codex exec
-        args = ["exec"]
+        # Build args for codex exec (or resume if we have a session)
+        if session.codex_session_id:
+            # Resume existing conversation
+            args = ["exec", "resume", session.codex_session_id]
+        else:
+            # Start new conversation
+            args = ["exec"]
 
         # Add model only if explicitly set (otherwise use codex config default)
         if session.model:
             args.extend(["--model", session.model])
 
-        # Add sandbox mode
+        # Add sandbox mode (for new sessions or as override)
         if session.full_auto:
             args.append("--full-auto")
-        else:
+        elif not session.codex_session_id:
+            # Only set sandbox on first call; resume inherits
             args.extend(["--sandbox", session.sandbox])
 
         # Add images if provided
