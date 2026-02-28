@@ -78,6 +78,43 @@ LANG_MAP = {
 
 _file_info_cache: dict[str, dict] = {}
 
+# OpenCode snapshot directory (issue #6845: tmp_pack_* files can grow unbounded)
+_OPENCODE_SNAPSHOT_PACK_DIR = Path.home() / ".local" / "share" / "opencode" / "snapshot" / "global" / "objects" / "pack"
+
+
+def cleanup_opencode_snapshot() -> str:
+    """Remove stale tmp_pack_* files from the OpenCode snapshot directory.
+
+    These files are created during git pack operations but never cleaned up
+    when OpenCode crashes or is force-killed, causing unbounded disk growth
+    (see: https://github.com/anomalyco/opencode/issues/6845).
+    """
+    pack_dir = _OPENCODE_SNAPSHOT_PACK_DIR
+    if not pack_dir.exists():
+        return "Snapshot pack directory does not exist — nothing to clean."
+
+    removed = []
+    errors = []
+    for f in pack_dir.glob("tmp_pack_*"):
+        try:
+            size = f.stat().st_size
+            f.unlink()
+            removed.append(f"{f.name} ({size / 1024 / 1024:.1f} MB)")
+        except OSError as e:
+            errors.append(f"{f.name}: {e}")
+
+    if not removed and not errors:
+        return "No stale tmp_pack_* files found."
+
+    lines = []
+    if removed:
+        lines.append(f"Removed {len(removed)} stale file(s):")
+        lines.extend(f"  - {r}" for r in removed)
+    if errors:
+        lines.append(f"Failed to remove {len(errors)} file(s):")
+        lines.extend(f"  - {e}" for e in errors)
+    return "\n".join(lines)
+
 MAX_READ_SIZE = 10 * 1024 * 1024  # 10MB - above this, estimate lines from size
 
 
@@ -2517,7 +2554,14 @@ async def list_tools():
                 },
                 "required": ["tasks"]
             }
-        )
+        ),
+        Tool(
+            name="opencode_cleanup",
+            description="Remove stale tmp_pack_* files from OpenCode's snapshot directory. "
+                        "These files accumulate when OpenCode is killed mid-operation and can "
+                        "grow to hundreds of GB (issue #6845). Also runs automatically at startup.",
+            inputSchema={"type": "object", "properties": {}}
+        ),
     ]
 
 
@@ -2652,6 +2696,8 @@ async def call_tool(name: str, arguments: dict):
             )
         elif name == "parallel_agents":
             result = await orchestrator.parallel_agents(tasks=arguments["tasks"])
+        elif name == "opencode_cleanup":
+            result = cleanup_opencode_snapshot()
         else:
             result = f"Unknown tool: {name}"
 
@@ -2662,6 +2708,9 @@ async def call_tool(name: str, arguments: dict):
 
 
 def main():
+    # Clean up stale snapshot files on every startup (issue #6845)
+    cleanup_opencode_snapshot()
+
     async def run():
         init_options = InitializationOptions(
             server_name="opencode-bridge",
