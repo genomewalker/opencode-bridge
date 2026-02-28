@@ -507,12 +507,12 @@ def build_synthesis_prompt(
 
 
 # Default configuration
-DEFAULT_MODEL = "openai/gpt-5.2-codex"
+DEFAULT_MODEL = "openai/gpt-5.3-codex"
 DEFAULT_AGENT = "plan"
 DEFAULT_VARIANT = "medium"
 
-# Codex defaults (empty model = use codex config default)
-DEFAULT_CODEX_MODEL = ""
+# Codex defaults
+DEFAULT_CODEX_MODEL = "gpt-5.3-codex"
 DEFAULT_CODEX_SANDBOX = "workspace-write"
 
 
