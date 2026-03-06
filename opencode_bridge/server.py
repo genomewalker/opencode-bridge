@@ -642,6 +642,15 @@ def find_codex() -> Optional[Path]:
 OPENCODE_BIN = find_opencode()
 CODEX_BIN = find_codex()
 
+_STARTUP_WARNING_PREFIXES = (
+    "WARNING: failed to clean up stale",
+)
+
+def _strip_startup_warnings(text: str) -> str:
+    """Remove known benign startup warnings emitted to stderr by OpenCode/Codex binaries."""
+    lines = [l for l in text.splitlines() if not l.startswith(_STARTUP_WARNING_PREFIXES)]
+    return "\n".join(lines).strip()
+
 
 @dataclass
 class Message:
@@ -781,9 +790,7 @@ class OpenCodeBridge:
             # Combine stdout+stderr so errors aren't silently lost
             out = stdout.decode(errors="replace").strip()
             err = stderr.decode(errors="replace").strip()
-            # Strip benign OpenCode startup warnings (emitted to stderr unconditionally)
-            err_lines = [l for l in err.splitlines() if not l.startswith("WARNING: failed to clean up stale")]
-            err = "\n".join(err_lines).strip()
+            err = _strip_startup_warnings(err)
             output = out if out else err
             # If both exist and return code indicates error, include stderr
             if out and err and proc.returncode:
@@ -1464,7 +1471,7 @@ class CodexBridge:
                 proc.communicate(input=b''),
                 timeout=timeout
             )
-            output = stdout.decode() or stderr.decode()
+            output = stdout.decode() or _strip_startup_warnings(stderr.decode())
             return output.strip(), proc.returncode or 0
         except asyncio.TimeoutError:
             proc.kill()
@@ -1586,7 +1593,7 @@ Set via:
             )
             output = stdout.decode()
             if proc.returncode != 0:
-                return f"Error: {stderr.decode() or output}"
+                return f"Error: {_strip_startup_warnings(stderr.decode()) or output}"
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
@@ -1659,7 +1666,7 @@ Set via:
             )
             output = stdout.decode()
             if proc.returncode != 0:
-                return f"Error: {stderr.decode() or output}"
+                return f"Error: {_strip_startup_warnings(stderr.decode()) or output}"
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
