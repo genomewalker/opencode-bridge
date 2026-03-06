@@ -781,6 +781,9 @@ class OpenCodeBridge:
             # Combine stdout+stderr so errors aren't silently lost
             out = stdout.decode(errors="replace").strip()
             err = stderr.decode(errors="replace").strip()
+            # Strip benign OpenCode startup warnings (emitted to stderr unconditionally)
+            err_lines = [l for l in err.splitlines() if not l.startswith("WARNING: failed to clean up stale")]
+            err = "\n".join(err_lines).strip()
             output = out if out else err
             # If both exist and return code indicates error, include stderr
             if out and err and proc.returncode:
