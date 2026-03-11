@@ -1381,6 +1381,34 @@ Provide:
 
         return f"Session '{sid}' ended."
 
+    def end_all(self, session_ids: Optional[list] = None) -> str:
+        """End all sessions, or only the sessions named in session_ids."""
+        if session_ids:
+            targets = [_sanitize_session_id(s) for s in session_ids if s in self.sessions]
+            not_found = [s for s in session_ids if s not in self.sessions]
+        else:
+            targets = list(self.sessions.keys())
+            not_found = []
+
+        if not targets:
+            msg = "No matching sessions to end."
+            if not_found:
+                msg += f" Not found: {', '.join(not_found)}"
+            return msg
+
+        for sid in targets:
+            del self.sessions[sid]
+            path = self.sessions_dir / f"{sid}.json"
+            if path.exists():
+                path.unlink()
+            if self.active_session == sid:
+                self.active_session = None
+
+        lines = [f"Ended {len(targets)} session(s): {', '.join(targets)}"]
+        if not_found:
+            lines.append(f"Not found: {', '.join(not_found)}")
+        return "\n".join(lines)
+
     def export_session(self, session_id: Optional[str] = None, export_format: str = "markdown") -> str:
         """Export a session as markdown or JSON."""
         sid = session_id or self.active_session
@@ -1432,6 +1460,20 @@ Provide:
             "sessions": len(self.sessions),
             "uptime": uptime_seconds
         }
+
+    async def ping(self) -> str:
+        """Send a minimal request to verify the model is reachable and responding."""
+        model = self.config.model
+        output, code = await self._run_opencode(
+            "run", "Reply with only the word: OK", "--model", model, "--format", "json",
+            timeout=30
+        )
+        if code != 0:
+            return f"Model unreachable (exit {code}): {output[:300]}"
+        reply, _ = self._parse_opencode_response(output)
+        if reply:
+            return f"Model reachable ({model}). Response: {reply.strip()[:100]}"
+        return f"Model responded but returned no text ({model})."
 
 
 class CodexBridge:
@@ -1770,6 +1812,34 @@ Set via:
             self.active_session = None
 
         return f"Codex session '{sid}' ended."
+
+    def end_all(self, session_ids: Optional[list] = None) -> str:
+        """End all Codex sessions, or only the sessions named in session_ids."""
+        if session_ids:
+            targets = [_sanitize_session_id(s) for s in session_ids if s in self.sessions]
+            not_found = [s for s in session_ids if s not in self.sessions]
+        else:
+            targets = list(self.sessions.keys())
+            not_found = []
+
+        if not targets:
+            msg = "No matching Codex sessions to end."
+            if not_found:
+                msg += f" Not found: {', '.join(not_found)}"
+            return msg
+
+        for sid in targets:
+            del self.sessions[sid]
+            path = self.sessions_dir / f"{sid}.json"
+            if path.exists():
+                path.unlink()
+            if self.active_session == sid:
+                self.active_session = None
+
+        lines = [f"Ended {len(targets)} Codex session(s): {', '.join(targets)}"]
+        if not_found:
+            lines.append(f"Not found: {', '.join(not_found)}")
+        return "\n".join(lines)
 
     def health_check(self) -> dict:
         """Return Codex bridge health status."""
@@ -2572,6 +2642,41 @@ async def list_tools():
                         "grow to hundreds of GB (issue #6845). Also runs automatically at startup.",
             inputSchema={"type": "object", "properties": {}}
         ),
+        Tool(
+            name="opencode_ping",
+            description="Check if the configured model is reachable by sending a minimal request. "
+                        "Use this at session start to verify the model is responding before running longer tasks.",
+            inputSchema={"type": "object", "properties": {}}
+        ),
+        Tool(
+            name="opencode_end_all",
+            description="End all OpenCode sessions, or a specific list of named sessions. "
+                        "Use to clean up accumulated sessions.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of session IDs to end. Omit to end ALL sessions."
+                    }
+                }
+            }
+        ),
+        Tool(
+            name="codex_end_all",
+            description="End all Codex sessions, or a specific list of named sessions.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of session IDs to end. Omit to end ALL sessions."
+                    }
+                }
+            }
+        ),
     ]
 
 
@@ -2708,6 +2813,12 @@ async def call_tool(name: str, arguments: dict):
             result = await orchestrator.parallel_agents(tasks=arguments["tasks"])
         elif name == "opencode_cleanup":
             result = cleanup_opencode_snapshot()
+        elif name == "opencode_ping":
+            result = await bridge.ping()
+        elif name == "opencode_end_all":
+            result = bridge.end_all(session_ids=arguments.get("session_ids"))
+        elif name == "codex_end_all":
+            result = codex_bridge.end_all(session_ids=arguments.get("session_ids"))
         else:
             result = f"Unknown tool: {name}"
 
