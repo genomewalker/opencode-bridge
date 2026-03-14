@@ -1381,17 +1381,29 @@ Provide:
 
         return f"Session '{sid}' ended."
 
-    def end_all(self, session_ids: Optional[list] = None) -> str:
-        """End all sessions, or only the sessions named in session_ids."""
+    def end_all(self, session_ids: Optional[list] = None, exclude_model: Optional[str] = None) -> str:
+        """End all sessions, or only the sessions named in session_ids.
+
+        exclude_model: if set, sessions using this model are kept; all others are ended.
+        """
         if session_ids:
-            targets = [_sanitize_session_id(s) for s in session_ids if s in self.sessions]
+            candidates = [_sanitize_session_id(s) for s in session_ids if s in self.sessions]
             not_found = [s for s in session_ids if s not in self.sessions]
         else:
-            targets = list(self.sessions.keys())
+            candidates = list(self.sessions.keys())
             not_found = []
+
+        if exclude_model:
+            targets = [s for s in candidates if self.sessions[s].model != exclude_model]
+            skipped = [s for s in candidates if self.sessions[s].model == exclude_model]
+        else:
+            targets = candidates
+            skipped = []
 
         if not targets:
             msg = "No matching sessions to end."
+            if skipped:
+                msg += f" Kept {len(skipped)} session(s) with model '{exclude_model}'."
             if not_found:
                 msg += f" Not found: {', '.join(not_found)}"
             return msg
@@ -1405,6 +1417,8 @@ Provide:
                 self.active_session = None
 
         lines = [f"Ended {len(targets)} session(s): {', '.join(targets)}"]
+        if skipped:
+            lines.append(f"Kept {len(skipped)} session(s) with model '{exclude_model}': {', '.join(skipped)}")
         if not_found:
             lines.append(f"Not found: {', '.join(not_found)}")
         return "\n".join(lines)
@@ -1813,17 +1827,29 @@ Set via:
 
         return f"Codex session '{sid}' ended."
 
-    def end_all(self, session_ids: Optional[list] = None) -> str:
-        """End all Codex sessions, or only the sessions named in session_ids."""
+    def end_all(self, session_ids: Optional[list] = None, exclude_model: Optional[str] = None) -> str:
+        """End all Codex sessions, or only the sessions named in session_ids.
+
+        exclude_model: if set, sessions using this model are kept; all others are ended.
+        """
         if session_ids:
-            targets = [_sanitize_session_id(s) for s in session_ids if s in self.sessions]
+            candidates = [_sanitize_session_id(s) for s in session_ids if s in self.sessions]
             not_found = [s for s in session_ids if s not in self.sessions]
         else:
-            targets = list(self.sessions.keys())
+            candidates = list(self.sessions.keys())
             not_found = []
+
+        if exclude_model:
+            targets = [s for s in candidates if self.sessions[s].model != exclude_model]
+            skipped = [s for s in candidates if self.sessions[s].model == exclude_model]
+        else:
+            targets = candidates
+            skipped = []
 
         if not targets:
             msg = "No matching Codex sessions to end."
+            if skipped:
+                msg += f" Kept {len(skipped)} session(s) with model '{exclude_model}'."
             if not_found:
                 msg += f" Not found: {', '.join(not_found)}"
             return msg
@@ -1837,6 +1863,8 @@ Set via:
                 self.active_session = None
 
         lines = [f"Ended {len(targets)} Codex session(s): {', '.join(targets)}"]
+        if skipped:
+            lines.append(f"Kept {len(skipped)} session(s) with model '{exclude_model}': {', '.join(skipped)}")
         if not_found:
             lines.append(f"Not found: {', '.join(not_found)}")
         return "\n".join(lines)
@@ -2651,28 +2679,37 @@ async def list_tools():
         Tool(
             name="opencode_end_all",
             description="End all OpenCode sessions, or a specific list of named sessions. "
-                        "Use to clean up accumulated sessions.",
+                        "Use exclude_model to keep sessions of one model and kill the rest.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "session_ids": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "List of session IDs to end. Omit to end ALL sessions."
+                        "description": "List of session IDs to end. Omit to target ALL sessions."
+                    },
+                    "exclude_model": {
+                        "type": "string",
+                        "description": "Keep sessions using this model; end all others. E.g. 'gpt-5.4'."
                     }
                 }
             }
         ),
         Tool(
             name="codex_end_all",
-            description="End all Codex sessions, or a specific list of named sessions.",
+            description="End all Codex sessions, or a specific list of named sessions. "
+                        "Use exclude_model to keep sessions of one model and kill the rest.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "session_ids": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "List of session IDs to end. Omit to end ALL sessions."
+                        "description": "List of session IDs to end. Omit to target ALL sessions."
+                    },
+                    "exclude_model": {
+                        "type": "string",
+                        "description": "Keep sessions using this model; end all others."
                     }
                 }
             }
@@ -2816,9 +2853,15 @@ async def call_tool(name: str, arguments: dict):
         elif name == "opencode_ping":
             result = await bridge.ping()
         elif name == "opencode_end_all":
-            result = bridge.end_all(session_ids=arguments.get("session_ids"))
+            result = bridge.end_all(
+                session_ids=arguments.get("session_ids"),
+                exclude_model=arguments.get("exclude_model")
+            )
         elif name == "codex_end_all":
-            result = codex_bridge.end_all(session_ids=arguments.get("session_ids"))
+            result = codex_bridge.end_all(
+                session_ids=arguments.get("session_ids"),
+                exclude_model=arguments.get("exclude_model")
+            )
         else:
             result = f"Unknown tool: {name}"
 
