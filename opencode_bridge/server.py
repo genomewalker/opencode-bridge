@@ -1082,11 +1082,14 @@ class OpenCodeBridge:
         if "unreachable" in ping or "stalled" in ping:
             return f"Model not responding — session not started.\n{ping}"
 
+        claude_session_id = os.environ.get("CLAUDE_SESSION_ID")
+
         session = Session(
             id=session_id,
             model=model,
             agent=agent,
-            variant=variant
+            variant=variant,
+            claude_session_ids=[claude_session_id] if claude_session_id else []
         )
         self.sessions[session_id] = session
         self.active_session = session_id
@@ -1095,6 +1098,8 @@ class OpenCodeBridge:
         result = f"Session '{session_id}' started\n  Model: {model}\n  Agent: {agent}"
         if variant:
             result += f"\n  Variant: {variant}"
+        if claude_session_id:
+            result += f"\n  Claude session: {claude_session_id}"
         return result
 
     def get_config(self) -> str:
@@ -1659,12 +1664,15 @@ class CodexBridge:
         if code != 0:
             return f"Codex binary not responding — session not started.\n{version_out}"
 
+        claude_session_id = os.environ.get("CLAUDE_SESSION_ID")
+
         session = CodexSession(
             id=session_id,
             model=model,
             sandbox=sandbox,
             full_auto=full_auto,
-            working_dir=working_dir or os.getcwd()
+            working_dir=working_dir or os.getcwd(),
+            claude_session_ids=[claude_session_id] if claude_session_id else []
         )
         self.sessions[session_id] = session
         self.active_session = session_id
@@ -1675,6 +1683,8 @@ class CodexBridge:
             result += "\n  Mode: full-auto"
         if working_dir:
             result += f"\n  Working dir: {working_dir}"
+        if claude_session_id:
+            result += f"\n  Claude session: {claude_session_id}"
         return result
 
     def get_config(self) -> str:
