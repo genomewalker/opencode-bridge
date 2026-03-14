@@ -1655,9 +1655,14 @@ Provide:
             "uptime": uptime_seconds
         }
 
-    async def ping(self) -> str:
-        """Send a minimal request to verify the model is reachable and responding."""
-        model = self.config.model
+    async def ping(self, session_id: Optional[str] = None) -> str:
+        """Send a minimal request to verify the model is reachable and responding.
+
+        Uses the active session's model if available, otherwise falls back to config model.
+        """
+        sid = session_id or self.active_session
+        session = self.sessions.get(sid) if sid else None
+        model = (session.model if session else None) or self.config.model
         output, code = await self._run_opencode(
             "run", "Reply with only the word: OK", "--model", model, "--format", "json",
             timeout=30, stall_timeout=15
@@ -3032,9 +3037,15 @@ async def list_tools():
         ),
         Tool(
             name="opencode_ping",
-            description="Check if the configured model is reachable by sending a minimal request. "
-                        "Use this at session start to verify the model is responding before running longer tasks.",
-            inputSchema={"type": "object", "properties": {}}
+            description="Check if the model is reachable by sending a minimal request. "
+                        "Uses the active session's model (or a named session) — falls back to the configured default model. "
+                        "Use this to verify a model is responding before running longer tasks.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "Session ID to ping (uses its model). Defaults to active session."}
+                }
+            }
         ),
         Tool(
             name="opencode_attach",
@@ -3272,7 +3283,7 @@ async def call_tool(name: str, arguments: dict):
         elif name == "opencode_cleanup":
             result = cleanup_opencode_snapshot()
         elif name == "opencode_ping":
-            result = await bridge.ping()
+            result = await bridge.ping(session_id=arguments.get("session_id"))
         elif name == "opencode_attach":
             result = bridge.attach_claude_session(
                 session_id=arguments["session_id"],
