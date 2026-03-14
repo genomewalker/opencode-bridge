@@ -819,7 +819,7 @@ class OpenCodeBridge:
             except Exception as e:
                 print(f"Warning: skipping corrupted session {path.name}: {e}", file=sys.stderr)
 
-    async def _run_opencode(self, *args, timeout: int = 120, stall_timeout: int = 60) -> tuple[str, int]:
+    async def _run_opencode(self, *args, timeout: int = 120, stall_timeout: int = 120) -> tuple[str, int]:
         """Run opencode CLI command with streaming stdout and stall detection.
 
         timeout: max total seconds before giving up.
@@ -1252,7 +1252,9 @@ Set via:
             # Base 300s, +60s per 1000 lines above threshold, capped at 900s
             timeout = min(900, 300 + max(0, (total_lines - MEDIUM_FILE) * 60 // 1000))
 
-            output, code = await self._run_opencode(*args, timeout=timeout)
+            # stall_timeout: gpt-5.4/high variant can take 2+ min before first token
+            stall_timeout = min(300, max(120, total_lines // 10))
+            output, code = await self._run_opencode(*args, timeout=timeout, stall_timeout=stall_timeout)
 
             if code != 0:
                 return f"Error: {output}"
@@ -1633,7 +1635,7 @@ class CodexBridge:
             except Exception:
                 pass
 
-    async def _run_codex(self, *args, timeout: int = 120, stall_timeout: int = 60, cwd: Optional[str] = None) -> tuple[str, int]:
+    async def _run_codex(self, *args, timeout: int = 120, stall_timeout: int = 120, cwd: Optional[str] = None) -> tuple[str, int]:
         """Run codex CLI command with streaming stdout and stall detection."""
         if not CODEX_BIN:
             return "Codex not installed. Install from: https://github.com/openai/codex", 1
