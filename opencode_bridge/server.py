@@ -766,8 +766,12 @@ class OpenCodeBridge:
             except Exception as e:
                 print(f"Warning: skipping corrupted session {path.name}: {e}", file=sys.stderr)
 
-    async def _run_opencode(self, *args, timeout: int = 300) -> tuple[str, int]:
-        """Run opencode CLI command and return output (async)."""
+    async def _run_opencode(self, *args, timeout: int = 120, stall_timeout: int = 60) -> tuple[str, int]:
+        """Run opencode CLI command with streaming stdout and stall detection.
+
+        timeout: max total seconds before giving up.
+        stall_timeout: max seconds of silence (no output) before declaring the model hung.
+        """
         global OPENCODE_BIN
         # Lazy retry: if binary wasn't found at startup, try again
         if not OPENCODE_BIN:
@@ -783,16 +787,37 @@ class OpenCodeBridge:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(input=b''),
-                timeout=timeout
-            )
-            # Combine stdout+stderr so errors aren't silently lost
-            out = stdout.decode(errors="replace").strip()
-            err = stderr.decode(errors="replace").strip()
-            err = _strip_startup_warnings(err)
+            proc.stdin.close()
+
+            stdout_parts: list[str] = []
+            deadline = asyncio.get_event_loop().time() + timeout
+
+            # Read stdout line by line — detect stalls between lines
+            while True:
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    proc.kill()
+                    await proc.wait()
+                    return f"Timed out after {timeout}s", 1
+                try:
+                    line = await asyncio.wait_for(
+                        proc.stdout.readline(),
+                        timeout=min(stall_timeout, remaining)
+                    )
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+                    return f"Model stalled — no output for {stall_timeout}s", 1
+                if not line:
+                    break
+                stdout_parts.append(line.decode(errors="replace"))
+
+            stderr_raw = await asyncio.wait_for(proc.stderr.read(), timeout=5)
+            await proc.wait()
+
+            out = "".join(stdout_parts).strip()
+            err = _strip_startup_warnings(stderr_raw.decode(errors="replace")).strip()
             output = out if out else err
-            # If both exist and return code indicates error, include stderr
             if out and err and proc.returncode:
                 output = f"{out}\n\nStderr:\n{err}"
             return output, proc.returncode or 0
@@ -802,6 +827,8 @@ class OpenCodeBridge:
                 await proc.wait()
             return f"Command timed out after {timeout}s", 1
         except Exception as e:
+            if proc:
+                proc.kill()
             return f"Error: {e}", 1
 
     @staticmethod
@@ -865,7 +892,7 @@ class OpenCodeBridge:
             if session.variant:
                 args.extend(["--variant", session.variant])
 
-            output, code = await self._run_opencode(*args, timeout=300)
+            output, code = await self._run_opencode(*args, timeout=300, stall_timeout=90)
 
             if code != 0:
                 result["error"] = output[:500]
@@ -1043,6 +1070,11 @@ class OpenCodeBridge:
         model = model or self.config.model
         agent = agent or self.config.agent
         variant = variant or self.config.variant
+
+        # Beacon: verify model is reachable before committing to the session
+        ping = await self.ping()
+        if "unreachable" in ping or "stalled" in ping:
+            return f"Model not responding — session not started.\n{ping}"
 
         session = Session(
             id=session_id,
@@ -1480,7 +1512,7 @@ Provide:
         model = self.config.model
         output, code = await self._run_opencode(
             "run", "Reply with only the word: OK", "--model", model, "--format", "json",
-            timeout=30
+            timeout=30, stall_timeout=15
         )
         if code != 0:
             return f"Model unreachable (exit {code}): {output[:300]}"
@@ -1510,11 +1542,12 @@ class CodexBridge:
             except Exception:
                 pass
 
-    async def _run_codex(self, *args, timeout: int = 300, cwd: Optional[str] = None) -> tuple[str, int]:
-        """Run codex CLI command and return output (async)."""
+    async def _run_codex(self, *args, timeout: int = 120, stall_timeout: int = 60, cwd: Optional[str] = None) -> tuple[str, int]:
+        """Run codex CLI command with streaming stdout and stall detection."""
         if not CODEX_BIN:
             return "Codex not installed. Install from: https://github.com/openai/codex", 1
 
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 str(CODEX_BIN), *args,
@@ -1523,17 +1556,45 @@ class CodexBridge:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd
             )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(input=b''),
-                timeout=timeout
-            )
-            output = stdout.decode() or _strip_startup_warnings(stderr.decode())
-            return output.strip(), proc.returncode or 0
-        except asyncio.TimeoutError:
-            proc.kill()
+            proc.stdin.close()
+
+            stdout_parts: list[str] = []
+            deadline = asyncio.get_event_loop().time() + timeout
+
+            while True:
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    proc.kill()
+                    await proc.wait()
+                    return f"Timed out after {timeout}s", 1
+                try:
+                    line = await asyncio.wait_for(
+                        proc.stdout.readline(),
+                        timeout=min(stall_timeout, remaining)
+                    )
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+                    return f"Model stalled — no output for {stall_timeout}s", 1
+                if not line:
+                    break
+                stdout_parts.append(line.decode(errors="replace"))
+
+            stderr_raw = await asyncio.wait_for(proc.stderr.read(), timeout=5)
             await proc.wait()
+
+            out = "".join(stdout_parts).strip()
+            err = _strip_startup_warnings(stderr_raw.decode(errors="replace")).strip()
+            output = out if out else err
+            return output, proc.returncode or 0
+        except asyncio.TimeoutError:
+            if proc:
+                proc.kill()
+                await proc.wait()
             return "Command timed out", 1
         except Exception as e:
+            if proc:
+                proc.kill()
             return f"Error: {e}", 1
 
     async def start_session(
@@ -1546,6 +1607,13 @@ class CodexBridge:
     ) -> str:
         model = model or self.config.codex_model
         sandbox = sandbox or self.config.codex_sandbox
+
+        # Beacon: verify codex binary is available and responsive
+        if not CODEX_BIN:
+            return "Codex not installed — session not started. Install from: https://github.com/openai/codex"
+        version_out, code = await self._run_codex("--version", timeout=10, stall_timeout=10)
+        if code != 0:
+            return f"Codex binary not responding — session not started.\n{version_out}"
 
         session = CodexSession(
             id=session_id,
@@ -1635,6 +1703,7 @@ Set via:
         args.append("-")
 
         # Run codex with message as stdin
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 str(CODEX_BIN), *args,
@@ -1643,18 +1712,48 @@ Set via:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=session.working_dir
             )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(input=message.encode()),
-                timeout=300
-            )
-            output = stdout.decode()
-            if proc.returncode != 0:
-                return f"Error: {_strip_startup_warnings(stderr.decode()) or output}"
-        except asyncio.TimeoutError:
-            proc.kill()
+            proc.stdin.write(message.encode())
+            await proc.stdin.drain()
+            proc.stdin.close()
+
+            stdout_parts: list[str] = []
+            deadline = asyncio.get_event_loop().time() + 300
+            stall_timeout = 90
+
+            while True:
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    proc.kill()
+                    await proc.wait()
+                    return "Timed out after 300s"
+                try:
+                    line = await asyncio.wait_for(
+                        proc.stdout.readline(),
+                        timeout=min(stall_timeout, remaining)
+                    )
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+                    return f"Model stalled — no output for {stall_timeout}s"
+                if not line:
+                    break
+                stdout_parts.append(line.decode(errors="replace"))
+
+            stderr_raw = await asyncio.wait_for(proc.stderr.read(), timeout=5)
             await proc.wait()
+
+            output = "".join(stdout_parts)
+            if proc.returncode != 0:
+                err = _strip_startup_warnings(stderr_raw.decode(errors="replace")).strip()
+                return f"Error: {err or output}"
+        except asyncio.TimeoutError:
+            if proc:
+                proc.kill()
+                await proc.wait()
             return "Command timed out"
         except Exception as e:
+            if proc:
+                proc.kill()
             return f"Error: {e}"
 
         # Parse JSON output (Codex JSONL format)
@@ -1708,6 +1807,7 @@ Set via:
 
         cwd = working_dir or os.getcwd()
 
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 str(CODEX_BIN), *args,
@@ -1716,18 +1816,48 @@ Set via:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd
             )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(input=task.encode()),
-                timeout=300
-            )
-            output = stdout.decode()
-            if proc.returncode != 0:
-                return f"Error: {_strip_startup_warnings(stderr.decode()) or output}"
-        except asyncio.TimeoutError:
-            proc.kill()
+            proc.stdin.write(task.encode())
+            await proc.stdin.drain()
+            proc.stdin.close()
+
+            stdout_parts: list[str] = []
+            deadline = asyncio.get_event_loop().time() + 300
+            stall_timeout = 90
+
+            while True:
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    proc.kill()
+                    await proc.wait()
+                    return "Timed out after 300s"
+                try:
+                    line = await asyncio.wait_for(
+                        proc.stdout.readline(),
+                        timeout=min(stall_timeout, remaining)
+                    )
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+                    return f"Model stalled — no output for {stall_timeout}s"
+                if not line:
+                    break
+                stdout_parts.append(line.decode(errors="replace"))
+
+            stderr_raw = await asyncio.wait_for(proc.stderr.read(), timeout=5)
             await proc.wait()
+
+            output = "".join(stdout_parts)
+            if proc.returncode != 0:
+                err = _strip_startup_warnings(stderr_raw.decode(errors="replace")).strip()
+                return f"Error: {err or output}"
+        except asyncio.TimeoutError:
+            if proc:
+                proc.kill()
+                await proc.wait()
             return "Command timed out"
         except Exception as e:
+            if proc:
+                proc.kill()
             return f"Error: {e}"
 
         # Parse output (Codex JSONL format)
