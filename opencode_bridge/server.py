@@ -1124,11 +1124,6 @@ class OpenCodeBridge:
         agent = agent or self.config.agent
         variant = variant or self.config.variant
 
-        # Beacon: verify model is reachable before committing to the session
-        ping = await self.ping()
-        if "unreachable" in ping or "stalled" in ping:
-            return f"Model not responding — session not started.\n{ping}"
-
         claude_session_id = _get_claude_session_id()
 
         session = Session(
@@ -1704,12 +1699,8 @@ class CodexBridge:
         model = model or self.config.codex_model
         sandbox = sandbox or self.config.codex_sandbox
 
-        # Beacon: verify codex binary is available and responsive
         if not CODEX_BIN:
             return "Codex not installed — session not started. Install from: https://github.com/openai/codex"
-        version_out, code = await self._run_codex("--version", timeout=10, stall_timeout=10)
-        if code != 0:
-            return f"Codex binary not responding — session not started.\n{version_out}"
 
         claude_session_id = _get_claude_session_id()
 
