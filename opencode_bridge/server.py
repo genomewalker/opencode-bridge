@@ -648,7 +648,7 @@ _STARTUP_WARNING_PREFIXES = (
 
 def _strip_startup_warnings(text: str) -> str:
     """Remove known benign startup warnings emitted to stderr by OpenCode/Codex binaries."""
-    lines = [l for l in text.splitlines() if not l.startswith(_STARTUP_WARNING_PREFIXES)]
+    lines = [line for line in text.splitlines() if not line.startswith(_STARTUP_WARNING_PREFIXES)]
     return "\n".join(lines).strip()
 
 
