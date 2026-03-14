@@ -667,6 +667,7 @@ class Session:
     agent: str
     variant: str = DEFAULT_VARIANT
     opencode_session_id: Optional[str] = None
+    claude_session_ids: list = field(default_factory=list)
     messages: list[Message] = field(default_factory=list)
     created: str = field(default_factory=lambda: datetime.now().isoformat())
 
@@ -680,6 +681,7 @@ class Session:
             "agent": self.agent,
             "variant": self.variant,
             "opencode_session_id": self.opencode_session_id,
+            "claude_session_ids": self.claude_session_ids,
             "created": self.created,
             "messages": [asdict(m) for m in self.messages]
         }
@@ -694,6 +696,7 @@ class Session:
             agent=data.get("agent", DEFAULT_AGENT),
             variant=data.get("variant", DEFAULT_VARIANT),
             opencode_session_id=data.get("opencode_session_id"),
+            claude_session_ids=data.get("claude_session_ids", []),
             created=data.get("created", datetime.now().isoformat())
         )
         for m in data.get("messages", []):
@@ -710,6 +713,7 @@ class CodexSession:
     full_auto: bool = True
     codex_session_id: Optional[str] = None
     working_dir: Optional[str] = None
+    claude_session_ids: list = field(default_factory=list)
     messages: list[Message] = field(default_factory=list)
     created: str = field(default_factory=lambda: datetime.now().isoformat())
 
@@ -724,6 +728,7 @@ class CodexSession:
             "full_auto": self.full_auto,
             "codex_session_id": self.codex_session_id,
             "working_dir": self.working_dir,
+            "claude_session_ids": self.claude_session_ids,
             "created": self.created,
             "messages": [asdict(m) for m in self.messages]
         }
@@ -739,6 +744,7 @@ class CodexSession:
             full_auto=data.get("full_auto", True),
             codex_session_id=data.get("codex_session_id"),
             working_dir=data.get("working_dir"),
+            claude_session_ids=data.get("claude_session_ids", []),
             created=data.get("created", datetime.now().isoformat())
         )
         for m in data.get("messages", []):
@@ -1332,8 +1338,46 @@ Provide:
             active = " (active)" if sid == self.active_session else ""
             msg_count = len(session.messages)
             variant_str = f", variant={session.variant}" if session.variant else ""
-            lines.append(f"  - {sid}: {session.model} [{session.agent}{variant_str}], {msg_count} messages{active}")
+            cc_ids = f", claude={','.join(session.claude_session_ids)}" if session.claude_session_ids else ""
+            lines.append(f"  - {sid}: {session.model} [{session.agent}{variant_str}], {msg_count} messages{cc_ids}{active}")
         return "\n".join(lines)
+
+    def attach_claude_session(self, session_id: str, claude_session_id: str) -> str:
+        """Register a Claude Code session ID as using this OpenCode session."""
+        sid = session_id or self.active_session
+        if not sid or sid not in self.sessions:
+            return "Session not found."
+        session = self.sessions[sid]
+        if claude_session_id not in session.claude_session_ids:
+            session.claude_session_ids.append(claude_session_id)
+            session.save(self.sessions_dir / f"{sid}.json")
+        return f"Attached Claude session '{claude_session_id}' to OpenCode session '{sid}'."
+
+    def detach_claude_session(self, session_id: str, claude_session_id: str) -> str:
+        """Remove a Claude Code session ID from an OpenCode session."""
+        sid = session_id or self.active_session
+        if not sid or sid not in self.sessions:
+            return "Session not found."
+        session = self.sessions[sid]
+        if claude_session_id in session.claude_session_ids:
+            session.claude_session_ids.remove(claude_session_id)
+            session.save(self.sessions_dir / f"{sid}.json")
+            return f"Detached Claude session '{claude_session_id}' from '{sid}'."
+        return f"Claude session '{claude_session_id}' was not attached to '{sid}'."
+
+    def end_unattached(self) -> str:
+        """End all OpenCode sessions that have no Claude Code session IDs registered."""
+        targets = [sid for sid, s in self.sessions.items() if not s.claude_session_ids]
+        if not targets:
+            return "All sessions have attached Claude Code IDs — nothing to end."
+        for sid in targets:
+            del self.sessions[sid]
+            path = self.sessions_dir / f"{sid}.json"
+            if path.exists():
+                path.unlink()
+            if self.active_session == sid:
+                self.active_session = None
+        return f"Ended {len(targets)} unattached session(s): {', '.join(targets)}"
 
     def get_history(self, session_id: Optional[str] = None, last_n: int = 20) -> str:
         sid = session_id or self.active_session
@@ -1904,8 +1948,46 @@ Set via:
             active = " (active)" if sid == self.active_session else ""
             msg_count = len(session.messages)
             mode = "full-auto" if session.full_auto else session.sandbox
-            lines.append(f"  - {sid}: {session.model} [{mode}], {msg_count} messages{active}")
+            cc_ids = f", claude={','.join(session.claude_session_ids)}" if session.claude_session_ids else ""
+            lines.append(f"  - {sid}: {session.model} [{mode}], {msg_count} messages{cc_ids}{active}")
         return "\n".join(lines)
+
+    def attach_claude_session(self, session_id: str, claude_session_id: str) -> str:
+        """Register a Claude Code session ID as using this Codex session."""
+        sid = session_id or self.active_session
+        if not sid or sid not in self.sessions:
+            return "Codex session not found."
+        session = self.sessions[sid]
+        if claude_session_id not in session.claude_session_ids:
+            session.claude_session_ids.append(claude_session_id)
+            session.save(self.sessions_dir / f"{sid}.json")
+        return f"Attached Claude session '{claude_session_id}' to Codex session '{sid}'."
+
+    def detach_claude_session(self, session_id: str, claude_session_id: str) -> str:
+        """Remove a Claude Code session ID from a Codex session."""
+        sid = session_id or self.active_session
+        if not sid or sid not in self.sessions:
+            return "Codex session not found."
+        session = self.sessions[sid]
+        if claude_session_id in session.claude_session_ids:
+            session.claude_session_ids.remove(claude_session_id)
+            session.save(self.sessions_dir / f"{sid}.json")
+            return f"Detached Claude session '{claude_session_id}' from '{sid}'."
+        return f"Claude session '{claude_session_id}' was not attached to '{sid}'."
+
+    def end_unattached(self) -> str:
+        """End all Codex sessions that have no Claude Code session IDs registered."""
+        targets = [sid for sid, s in self.sessions.items() if not s.claude_session_ids]
+        if not targets:
+            return "All Codex sessions have attached Claude Code IDs — nothing to end."
+        for sid in targets:
+            del self.sessions[sid]
+            path = self.sessions_dir / f"{sid}.json"
+            if path.exists():
+                path.unlink()
+            if self.active_session == sid:
+                self.active_session = None
+        return f"Ended {len(targets)} unattached Codex session(s): {', '.join(targets)}"
 
     def get_history(self, session_id: Optional[str] = None, last_n: int = 20) -> str:
         sid = session_id or self.active_session
@@ -2807,6 +2889,38 @@ async def list_tools():
             inputSchema={"type": "object", "properties": {}}
         ),
         Tool(
+            name="opencode_attach",
+            description="Register a Claude Code session ID as attached to an OpenCode session. "
+                        "Call this when starting work in a Claude Code session so the session "
+                        "can later be identified as in-use. Use opencode_end_unattached to clean up.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "OpenCode session ID"},
+                    "claude_session_id": {"type": "string", "description": "Identifier for this Claude Code session (e.g. task name, terminal, PID)"}
+                },
+                "required": ["session_id", "claude_session_id"]
+            }
+        ),
+        Tool(
+            name="opencode_detach",
+            description="Remove a Claude Code session ID from an OpenCode session (call on session end).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "OpenCode session ID"},
+                    "claude_session_id": {"type": "string", "description": "Claude Code session ID to detach"}
+                },
+                "required": ["session_id", "claude_session_id"]
+            }
+        ),
+        Tool(
+            name="opencode_end_unattached",
+            description="End all OpenCode sessions that have no Claude Code session IDs registered. "
+                        "Use after attaching IDs with opencode_attach to safely clean up orphaned sessions.",
+            inputSchema={"type": "object", "properties": {}}
+        ),
+        Tool(
             name="opencode_end_all",
             description="End all OpenCode sessions, or a specific list of named sessions. "
                         "Use exclude_model to keep sessions of one model and kill the rest.",
@@ -2824,6 +2938,35 @@ async def list_tools():
                     }
                 }
             }
+        ),
+        Tool(
+            name="codex_attach",
+            description="Register a Claude Code session ID as attached to a Codex session.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "Codex session ID"},
+                    "claude_session_id": {"type": "string", "description": "Identifier for this Claude Code session"}
+                },
+                "required": ["session_id", "claude_session_id"]
+            }
+        ),
+        Tool(
+            name="codex_detach",
+            description="Remove a Claude Code session ID from a Codex session.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "Codex session ID"},
+                    "claude_session_id": {"type": "string", "description": "Claude Code session ID to detach"}
+                },
+                "required": ["session_id", "claude_session_id"]
+            }
+        ),
+        Tool(
+            name="codex_end_unattached",
+            description="End all Codex sessions that have no Claude Code session IDs registered.",
+            inputSchema={"type": "object", "properties": {}}
         ),
         Tool(
             name="codex_end_all",
@@ -2982,11 +3125,35 @@ async def call_tool(name: str, arguments: dict):
             result = cleanup_opencode_snapshot()
         elif name == "opencode_ping":
             result = await bridge.ping()
+        elif name == "opencode_attach":
+            result = bridge.attach_claude_session(
+                session_id=arguments["session_id"],
+                claude_session_id=arguments["claude_session_id"]
+            )
+        elif name == "opencode_detach":
+            result = bridge.detach_claude_session(
+                session_id=arguments["session_id"],
+                claude_session_id=arguments["claude_session_id"]
+            )
+        elif name == "opencode_end_unattached":
+            result = bridge.end_unattached()
         elif name == "opencode_end_all":
             result = bridge.end_all(
                 session_ids=arguments.get("session_ids"),
                 exclude_model=arguments.get("exclude_model")
             )
+        elif name == "codex_attach":
+            result = codex_bridge.attach_claude_session(
+                session_id=arguments["session_id"],
+                claude_session_id=arguments["claude_session_id"]
+            )
+        elif name == "codex_detach":
+            result = codex_bridge.detach_claude_session(
+                session_id=arguments["session_id"],
+                claude_session_id=arguments["claude_session_id"]
+            )
+        elif name == "codex_end_unattached":
+            result = codex_bridge.end_unattached()
         elif name == "codex_end_all":
             result = codex_bridge.end_all(
                 session_ids=arguments.get("session_ids"),
