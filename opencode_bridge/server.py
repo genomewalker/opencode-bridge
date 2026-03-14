@@ -646,6 +646,53 @@ _STARTUP_WARNING_PREFIXES = (
     "WARNING: failed to clean up stale",
 )
 
+_CHITTA_MIND_DIR = Path.home() / ".claude" / "mind"
+
+
+def _get_ppid_chain() -> list[int]:
+    """Return PIDs from current process up to init."""
+    pids = []
+    pid = os.getpid()
+    for _ in range(15):
+        pids.append(pid)
+        try:
+            status = Path(f"/proc/{pid}/status").read_text()
+            for line in status.splitlines():
+                if line.startswith("PPid:"):
+                    pid = int(line.split()[1])
+                    break
+            else:
+                break
+        except OSError:
+            break
+        if pid <= 1:
+            break
+    return pids
+
+
+def _get_claude_session_id() -> Optional[str]:
+    """Look up the current Claude Code session ID from chitta's session_registry.
+
+    Chitta stores session_id keyed by Claude's PID in the session_registry DuckDB
+    table. We walk up the process tree and ask chitta for a match.
+    """
+    pids = _get_ppid_chain()
+    pid_list = ",".join(str(p) for p in pids)
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["chitta", "sql_query", "--query",
+             f"SELECT session_id FROM session_registry WHERE pid IN ({pid_list}) AND status='active' ORDER BY last_heartbeat DESC LIMIT 1"],
+            capture_output=True, text=True, timeout=5
+        )
+        for line in result.stdout.splitlines():
+            line = line.strip().strip("|").strip()
+            if line and "-" in line and not line.startswith("session_id") and not line.startswith("---"):
+                return line
+    except Exception:
+        pass
+    return os.environ.get("CLAUDE_SESSION_ID")
+
 def _strip_startup_warnings(text: str) -> str:
     """Remove known benign startup warnings emitted to stderr by OpenCode/Codex binaries."""
     lines = [line for line in text.splitlines() if not line.startswith(_STARTUP_WARNING_PREFIXES)]
@@ -1082,7 +1129,7 @@ class OpenCodeBridge:
         if "unreachable" in ping or "stalled" in ping:
             return f"Model not responding — session not started.\n{ping}"
 
-        claude_session_id = os.environ.get("CLAUDE_SESSION_ID")
+        claude_session_id = _get_claude_session_id()
 
         session = Session(
             id=session_id,
@@ -1664,7 +1711,7 @@ class CodexBridge:
         if code != 0:
             return f"Codex binary not responding — session not started.\n{version_out}"
 
-        claude_session_id = os.environ.get("CLAUDE_SESSION_ID")
+        claude_session_id = _get_claude_session_id()
 
         session = CodexSession(
             id=session_id,
