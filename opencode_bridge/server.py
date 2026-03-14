@@ -670,6 +670,24 @@ def _get_ppid_chain() -> list[int]:
     return pids
 
 
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
+
+
+def _chitta_sql(query: str, timeout: int = 5) -> Optional[str]:
+    """Run a chitta sql_query and return stdout, or None on failure."""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["chitta", "sql_query", "--query", query],
+            capture_output=True, text=True, timeout=timeout
+        )
+        if result.returncode == 0:
+            return result.stdout
+    except Exception:
+        pass
+    return None
+
+
 def _get_claude_session_id() -> Optional[str]:
     """Look up the current Claude Code session ID from chitta's session_registry.
 
@@ -678,20 +696,34 @@ def _get_claude_session_id() -> Optional[str]:
     """
     pids = _get_ppid_chain()
     pid_list = ",".join(str(p) for p in pids)
-    try:
-        import subprocess
-        result = subprocess.run(
-            ["chitta", "sql_query", "--query",
-             f"SELECT session_id FROM session_registry WHERE pid IN ({pid_list}) AND status='active' ORDER BY last_heartbeat DESC LIMIT 1"],
-            capture_output=True, text=True, timeout=5
-        )
-        for line in result.stdout.splitlines():
-            line = line.strip().strip("|").strip()
-            if line and "-" in line and not line.startswith("session_id") and not line.startswith("---"):
-                return line
-    except Exception:
-        pass
+    output = _chitta_sql(
+        f"SELECT session_id FROM session_registry WHERE pid IN ({pid_list}) AND status='active' ORDER BY last_heartbeat DESC LIMIT 1"
+    )
+    if output:
+        for line in output.splitlines():
+            candidate = line.strip().strip("|").strip()
+            if _UUID_RE.match(candidate):
+                return candidate
     return os.environ.get("CLAUDE_SESSION_ID")
+
+
+def _chitta_session_alive(claude_session_id: str) -> Optional[bool]:
+    """Check if a Claude Code session is still active in chitta's registry.
+
+    Returns True if active, False if dead/missing, None if chitta unavailable.
+    """
+    if not _UUID_RE.match(claude_session_id):
+        return None
+    output = _chitta_sql(
+        f"SELECT COUNT(*) FROM session_registry WHERE session_id='{claude_session_id}' AND status='active'"
+    )
+    if output is None:
+        return None
+    for line in output.splitlines():
+        candidate = line.strip().strip("|").strip()
+        if candidate.isdigit():
+            return int(candidate) > 0
+    return None
 
 def _strip_startup_warnings(text: str) -> str:
     """Remove known benign startup warnings emitted to stderr by OpenCode/Codex binaries."""
@@ -842,6 +874,9 @@ class OpenCodeBridge:
             )
             proc.stdin.close()
 
+            # Drain stderr concurrently so a full stderr pipe never blocks stdout.
+            stderr_task = asyncio.ensure_future(proc.stderr.read())
+
             stdout_parts: list[str] = []
             deadline = asyncio.get_event_loop().time() + timeout
             first_line = True
@@ -854,6 +889,7 @@ class OpenCodeBridge:
                 if remaining <= 0:
                     proc.kill()
                     await proc.wait()
+                    stderr_task.cancel()
                     return f"Timed out after {timeout}s", 1
                 read_timeout = remaining if first_line else min(stall_timeout, remaining)
                 try:
@@ -864,17 +900,24 @@ class OpenCodeBridge:
                 except asyncio.TimeoutError:
                     proc.kill()
                     await proc.wait()
+                    stderr_task.cancel()
                     return f"Model stalled — no output for {stall_timeout}s", 1
                 if not line:
                     break
                 stdout_parts.append(line.decode(errors="replace"))
                 first_line = False
 
-            stderr_raw = await asyncio.wait_for(proc.stderr.read(), timeout=5)
+            try:
+                stderr_raw = await asyncio.wait_for(stderr_task, timeout=5)
+            except asyncio.TimeoutError:
+                stderr_raw = b""
             await proc.wait()
 
             out = "".join(stdout_parts).strip()
-            err = _strip_startup_warnings(stderr_raw.decode(errors="replace")).strip()
+            if proc.returncode == 0:
+                err = _strip_startup_warnings(stderr_raw.decode(errors="replace")).strip()
+            else:
+                err = stderr_raw.decode(errors="replace").strip()
             output = out if out else err
             if out and err and proc.returncode:
                 output = f"{out}\n\nStderr:\n{err}"
@@ -1420,10 +1463,17 @@ Provide:
         return f"Claude session '{claude_session_id}' was not attached to '{sid}'."
 
     def end_unattached(self) -> str:
-        """End all OpenCode sessions that have no Claude Code session IDs registered."""
-        targets = [sid for sid, s in self.sessions.items() if not s.claude_session_ids]
+        """End all OpenCode sessions with no live Claude Code session IDs."""
+        targets = []
+        for sid, s in self.sessions.items():
+            if not s.claude_session_ids:
+                targets.append(sid)
+            else:
+                alive = any(_chitta_session_alive(csid) is True for csid in s.claude_session_ids)
+                if not alive:
+                    targets.append(sid)
         if not targets:
-            return "All sessions have attached Claude Code IDs — nothing to end."
+            return "All sessions have live attached Claude Code IDs — nothing to end."
         for sid in targets:
             del self.sessions[sid]
             path = self.sessions_dir / f"{sid}.json"
@@ -1656,6 +1706,9 @@ class CodexBridge:
             )
             proc.stdin.close()
 
+            # Drain stderr concurrently so a full stderr pipe never blocks stdout.
+            stderr_task = asyncio.ensure_future(proc.stderr.read())
+
             stdout_parts: list[str] = []
             deadline = asyncio.get_event_loop().time() + timeout
             first_line = True
@@ -1665,6 +1718,7 @@ class CodexBridge:
                 if remaining <= 0:
                     proc.kill()
                     await proc.wait()
+                    stderr_task.cancel()
                     return f"Timed out after {timeout}s", 1
                 read_timeout = remaining if first_line else min(stall_timeout, remaining)
                 try:
@@ -1675,17 +1729,24 @@ class CodexBridge:
                 except asyncio.TimeoutError:
                     proc.kill()
                     await proc.wait()
+                    stderr_task.cancel()
                     return f"Model stalled — no output for {stall_timeout}s", 1
                 if not line:
                     break
                 stdout_parts.append(line.decode(errors="replace"))
                 first_line = False
 
-            stderr_raw = await asyncio.wait_for(proc.stderr.read(), timeout=5)
+            try:
+                stderr_raw = await asyncio.wait_for(stderr_task, timeout=5)
+            except asyncio.TimeoutError:
+                stderr_raw = b""
             await proc.wait()
 
             out = "".join(stdout_parts).strip()
-            err = _strip_startup_warnings(stderr_raw.decode(errors="replace")).strip()
+            if proc.returncode == 0:
+                err = _strip_startup_warnings(stderr_raw.decode(errors="replace")).strip()
+            else:
+                err = stderr_raw.decode(errors="replace").strip()
             output = out if out else err
             return output, proc.returncode or 0
         except asyncio.TimeoutError:
@@ -1818,6 +1879,9 @@ Set via:
             await proc.stdin.drain()
             proc.stdin.close()
 
+            # Drain stderr concurrently so a full stderr pipe never blocks stdout.
+            stderr_task = asyncio.ensure_future(proc.stderr.read())
+
             stdout_parts: list[str] = []
             deadline = asyncio.get_event_loop().time() + 300
             stall_timeout = 90
@@ -1828,6 +1892,7 @@ Set via:
                 if remaining <= 0:
                     proc.kill()
                     await proc.wait()
+                    stderr_task.cancel()
                     return "Timed out after 300s"
                 read_timeout = remaining if first_line else min(stall_timeout, remaining)
                 try:
@@ -1838,18 +1903,22 @@ Set via:
                 except asyncio.TimeoutError:
                     proc.kill()
                     await proc.wait()
+                    stderr_task.cancel()
                     return f"Model stalled — no output for {stall_timeout}s"
                 if not line:
                     break
                 stdout_parts.append(line.decode(errors="replace"))
                 first_line = False
 
-            stderr_raw = await asyncio.wait_for(proc.stderr.read(), timeout=5)
+            try:
+                stderr_raw = await asyncio.wait_for(stderr_task, timeout=5)
+            except asyncio.TimeoutError:
+                stderr_raw = b""
             await proc.wait()
 
             output = "".join(stdout_parts)
             if proc.returncode != 0:
-                err = _strip_startup_warnings(stderr_raw.decode(errors="replace")).strip()
+                err = stderr_raw.decode(errors="replace").strip()
                 return f"Error: {err or output}"
         except asyncio.TimeoutError:
             if proc:
@@ -1925,6 +1994,9 @@ Set via:
             await proc.stdin.drain()
             proc.stdin.close()
 
+            # Drain stderr concurrently so a full stderr pipe never blocks stdout.
+            stderr_task = asyncio.ensure_future(proc.stderr.read())
+
             stdout_parts: list[str] = []
             deadline = asyncio.get_event_loop().time() + 300
             stall_timeout = 90
@@ -1935,6 +2007,7 @@ Set via:
                 if remaining <= 0:
                     proc.kill()
                     await proc.wait()
+                    stderr_task.cancel()
                     return "Timed out after 300s"
                 read_timeout = remaining if first_line else min(stall_timeout, remaining)
                 try:
@@ -1945,18 +2018,22 @@ Set via:
                 except asyncio.TimeoutError:
                     proc.kill()
                     await proc.wait()
+                    stderr_task.cancel()
                     return f"Model stalled — no output for {stall_timeout}s"
                 if not line:
                     break
                 stdout_parts.append(line.decode(errors="replace"))
                 first_line = False
 
-            stderr_raw = await asyncio.wait_for(proc.stderr.read(), timeout=5)
+            try:
+                stderr_raw = await asyncio.wait_for(stderr_task, timeout=5)
+            except asyncio.TimeoutError:
+                stderr_raw = b""
             await proc.wait()
 
             output = "".join(stdout_parts)
             if proc.returncode != 0:
-                err = _strip_startup_warnings(stderr_raw.decode(errors="replace")).strip()
+                err = stderr_raw.decode(errors="replace").strip()
                 return f"Error: {err or output}"
         except asyncio.TimeoutError:
             if proc:
@@ -2040,10 +2117,17 @@ Set via:
         return f"Claude session '{claude_session_id}' was not attached to '{sid}'."
 
     def end_unattached(self) -> str:
-        """End all Codex sessions that have no Claude Code session IDs registered."""
-        targets = [sid for sid, s in self.sessions.items() if not s.claude_session_ids]
+        """End all Codex sessions with no live Claude Code session IDs."""
+        targets = []
+        for sid, s in self.sessions.items():
+            if not s.claude_session_ids:
+                targets.append(sid)
+            else:
+                alive = any(_chitta_session_alive(csid) is True for csid in s.claude_session_ids)
+                if not alive:
+                    targets.append(sid)
         if not targets:
-            return "All Codex sessions have attached Claude Code IDs — nothing to end."
+            return "All Codex sessions have live attached Claude Code IDs — nothing to end."
         for sid in targets:
             del self.sessions[sid]
             path = self.sessions_dir / f"{sid}.json"
