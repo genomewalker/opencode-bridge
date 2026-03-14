@@ -865,6 +865,7 @@ class OpenCodeBridge:
             return "OpenCode not installed. Install from: https://opencode.ai", 1
 
         proc = None
+        stderr_task = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 str(OPENCODE_BIN), *args,
@@ -910,6 +911,7 @@ class OpenCodeBridge:
             try:
                 stderr_raw = await asyncio.wait_for(stderr_task, timeout=5)
             except asyncio.TimeoutError:
+                stderr_task.cancel()
                 stderr_raw = b""
             await proc.wait()
 
@@ -926,10 +928,15 @@ class OpenCodeBridge:
             if proc:
                 proc.kill()
                 await proc.wait()
+            if stderr_task and not stderr_task.done():
+                stderr_task.cancel()
             return f"Command timed out after {timeout}s", 1
         except Exception as e:
             if proc:
                 proc.kill()
+                await proc.wait()
+            if stderr_task and not stderr_task.done():
+                stderr_task.cancel()
             return f"Error: {e}", 1
 
     @staticmethod
@@ -1463,15 +1470,20 @@ Provide:
         return f"Claude session '{claude_session_id}' was not attached to '{sid}'."
 
     def end_unattached(self) -> str:
-        """End all OpenCode sessions with no live Claude Code session IDs."""
+        """End all OpenCode sessions with no live Claude Code session IDs.
+
+        A session is kept if any attached ID is confirmed alive (True) or unknown (None).
+        Only sessions where all IDs are confirmed dead (False) are ended.
+        """
         targets = []
         for sid, s in self.sessions.items():
             if not s.claude_session_ids:
                 targets.append(sid)
             else:
-                alive = any(_chitta_session_alive(csid) is True for csid in s.claude_session_ids)
-                if not alive:
-                    targets.append(sid)
+                statuses = [_chitta_session_alive(csid) for csid in s.claude_session_ids]
+                if any(st is True or st is None for st in statuses):
+                    continue  # keep: at least one alive or status unknown
+                targets.append(sid)
         if not targets:
             return "All sessions have live attached Claude Code IDs — nothing to end."
         for sid in targets:
@@ -1660,6 +1672,8 @@ Provide:
 
         Uses the active session's model if available, otherwise falls back to config model.
         """
+        if session_id and session_id not in self.sessions:
+            return f"Session '{session_id}' not found."
         sid = session_id or self.active_session
         session = self.sessions.get(sid) if sid else None
         model = (session.model if session else None) or self.config.model
@@ -1701,6 +1715,7 @@ class CodexBridge:
             return "Codex not installed. Install from: https://github.com/openai/codex", 1
 
         proc = None
+        stderr_task = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 str(CODEX_BIN), *args,
@@ -1744,6 +1759,7 @@ class CodexBridge:
             try:
                 stderr_raw = await asyncio.wait_for(stderr_task, timeout=5)
             except asyncio.TimeoutError:
+                stderr_task.cancel()
                 stderr_raw = b""
             await proc.wait()
 
@@ -1758,10 +1774,15 @@ class CodexBridge:
             if proc:
                 proc.kill()
                 await proc.wait()
+            if stderr_task and not stderr_task.done():
+                stderr_task.cancel()
             return "Command timed out", 1
         except Exception as e:
             if proc:
                 proc.kill()
+                await proc.wait()
+            if stderr_task and not stderr_task.done():
+                stderr_task.cancel()
             return f"Error: {e}", 1
 
     async def start_session(
@@ -1872,6 +1893,7 @@ Set via:
 
         # Run codex with message as stdin
         proc = None
+        stderr_task = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 str(CODEX_BIN), *args,
@@ -1918,6 +1940,7 @@ Set via:
             try:
                 stderr_raw = await asyncio.wait_for(stderr_task, timeout=5)
             except asyncio.TimeoutError:
+                stderr_task.cancel()
                 stderr_raw = b""
             await proc.wait()
 
@@ -1929,10 +1952,15 @@ Set via:
             if proc:
                 proc.kill()
                 await proc.wait()
+            if stderr_task and not stderr_task.done():
+                stderr_task.cancel()
             return "Command timed out"
         except Exception as e:
             if proc:
                 proc.kill()
+                await proc.wait()
+            if stderr_task and not stderr_task.done():
+                stderr_task.cancel()
             return f"Error: {e}"
 
         # Parse JSON output (Codex JSONL format)
@@ -1987,6 +2015,7 @@ Set via:
         cwd = working_dir or os.getcwd()
 
         proc = None
+        stderr_task = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 str(CODEX_BIN), *args,
@@ -2033,6 +2062,7 @@ Set via:
             try:
                 stderr_raw = await asyncio.wait_for(stderr_task, timeout=5)
             except asyncio.TimeoutError:
+                stderr_task.cancel()
                 stderr_raw = b""
             await proc.wait()
 
@@ -2044,10 +2074,15 @@ Set via:
             if proc:
                 proc.kill()
                 await proc.wait()
+            if stderr_task and not stderr_task.done():
+                stderr_task.cancel()
             return "Command timed out"
         except Exception as e:
             if proc:
                 proc.kill()
+                await proc.wait()
+            if stderr_task and not stderr_task.done():
+                stderr_task.cancel()
             return f"Error: {e}"
 
         # Parse output (Codex JSONL format)
@@ -2122,15 +2157,20 @@ Set via:
         return f"Claude session '{claude_session_id}' was not attached to '{sid}'."
 
     def end_unattached(self) -> str:
-        """End all Codex sessions with no live Claude Code session IDs."""
+        """End all Codex sessions with no live Claude Code session IDs.
+
+        A session is kept if any attached ID is confirmed alive (True) or unknown (None).
+        Only sessions where all IDs are confirmed dead (False) are ended.
+        """
         targets = []
         for sid, s in self.sessions.items():
             if not s.claude_session_ids:
                 targets.append(sid)
             else:
-                alive = any(_chitta_session_alive(csid) is True for csid in s.claude_session_ids)
-                if not alive:
-                    targets.append(sid)
+                statuses = [_chitta_session_alive(csid) for csid in s.claude_session_ids]
+                if any(st is True or st is None for st in statuses):
+                    continue  # keep: at least one alive or status unknown
+                targets.append(sid)
         if not targets:
             return "All Codex sessions have live attached Claude Code IDs — nothing to end."
         for sid in targets:
