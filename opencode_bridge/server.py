@@ -844,18 +844,22 @@ class OpenCodeBridge:
 
             stdout_parts: list[str] = []
             deadline = asyncio.get_event_loop().time() + timeout
+            first_line = True
 
-            # Read stdout line by line — detect stalls between lines
+            # Read stdout line by line — detect stalls between lines.
+            # stall_timeout only applies after the first line; initial response
+            # uses the full remaining budget so slow-thinking models aren't killed.
             while True:
                 remaining = deadline - asyncio.get_event_loop().time()
                 if remaining <= 0:
                     proc.kill()
                     await proc.wait()
                     return f"Timed out after {timeout}s", 1
+                read_timeout = remaining if first_line else min(stall_timeout, remaining)
                 try:
                     line = await asyncio.wait_for(
                         proc.stdout.readline(),
-                        timeout=min(stall_timeout, remaining)
+                        timeout=read_timeout
                     )
                 except asyncio.TimeoutError:
                     proc.kill()
@@ -864,6 +868,7 @@ class OpenCodeBridge:
                 if not line:
                     break
                 stdout_parts.append(line.decode(errors="replace"))
+                first_line = False
 
             stderr_raw = await asyncio.wait_for(proc.stderr.read(), timeout=5)
             await proc.wait()
@@ -1653,6 +1658,7 @@ class CodexBridge:
 
             stdout_parts: list[str] = []
             deadline = asyncio.get_event_loop().time() + timeout
+            first_line = True
 
             while True:
                 remaining = deadline - asyncio.get_event_loop().time()
@@ -1660,10 +1666,11 @@ class CodexBridge:
                     proc.kill()
                     await proc.wait()
                     return f"Timed out after {timeout}s", 1
+                read_timeout = remaining if first_line else min(stall_timeout, remaining)
                 try:
                     line = await asyncio.wait_for(
                         proc.stdout.readline(),
-                        timeout=min(stall_timeout, remaining)
+                        timeout=read_timeout
                     )
                 except asyncio.TimeoutError:
                     proc.kill()
@@ -1672,6 +1679,7 @@ class CodexBridge:
                 if not line:
                     break
                 stdout_parts.append(line.decode(errors="replace"))
+                first_line = False
 
             stderr_raw = await asyncio.wait_for(proc.stderr.read(), timeout=5)
             await proc.wait()
@@ -1813,6 +1821,7 @@ Set via:
             stdout_parts: list[str] = []
             deadline = asyncio.get_event_loop().time() + 300
             stall_timeout = 90
+            first_line = True
 
             while True:
                 remaining = deadline - asyncio.get_event_loop().time()
@@ -1820,10 +1829,11 @@ Set via:
                     proc.kill()
                     await proc.wait()
                     return "Timed out after 300s"
+                read_timeout = remaining if first_line else min(stall_timeout, remaining)
                 try:
                     line = await asyncio.wait_for(
                         proc.stdout.readline(),
-                        timeout=min(stall_timeout, remaining)
+                        timeout=read_timeout
                     )
                 except asyncio.TimeoutError:
                     proc.kill()
@@ -1832,6 +1842,7 @@ Set via:
                 if not line:
                     break
                 stdout_parts.append(line.decode(errors="replace"))
+                first_line = False
 
             stderr_raw = await asyncio.wait_for(proc.stderr.read(), timeout=5)
             await proc.wait()
@@ -1917,6 +1928,7 @@ Set via:
             stdout_parts: list[str] = []
             deadline = asyncio.get_event_loop().time() + 300
             stall_timeout = 90
+            first_line = True
 
             while True:
                 remaining = deadline - asyncio.get_event_loop().time()
@@ -1924,10 +1936,11 @@ Set via:
                     proc.kill()
                     await proc.wait()
                     return "Timed out after 300s"
+                read_timeout = remaining if first_line else min(stall_timeout, remaining)
                 try:
                     line = await asyncio.wait_for(
                         proc.stdout.readline(),
-                        timeout=min(stall_timeout, remaining)
+                        timeout=read_timeout
                     )
                 except asyncio.TimeoutError:
                     proc.kill()
@@ -1936,6 +1949,7 @@ Set via:
                 if not line:
                     break
                 stdout_parts.append(line.decode(errors="replace"))
+                first_line = False
 
             stderr_raw = await asyncio.wait_for(proc.stderr.read(), timeout=5)
             await proc.wait()
