@@ -3397,7 +3397,12 @@ def main():
                 "or requests a specific model/id\n"
                 "The active session retains full conversation context — starting a new one "
                 "destroys that context. Same rule applies to Codex: prefer codex_discuss / "
-                "codex_switch over codex_start."
+                "codex_switch over codex_start.\n\n"
+                "## File Attachments — CRITICAL\n"
+                "The 'files' parameter in opencode_discuss, opencode_review, and similar tools "
+                "MUST be an array, even for a single file.\n"
+                "WRONG: files: \"/path/to/file.hpp\"\n"
+                "CORRECT: files: [\"/path/to/file.hpp\"]"
             )
         )
         async with stdio_server() as (read_stream, write_stream):
