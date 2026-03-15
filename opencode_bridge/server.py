@@ -78,12 +78,15 @@ LANG_MAP = {
 
 _file_info_cache: dict[str, dict] = {}
 
-# OpenCode snapshot directory (issue #6845: tmp_pack_* files can grow unbounded)
+# OpenCode snapshot directory (issue #6845: tmp_* files can grow unbounded)
 _OPENCODE_SNAPSHOT_PACK_DIR = Path.home() / ".local" / "share" / "opencode" / "snapshot" / "global" / "objects" / "pack"
+
+# All tmp_* prefixes created by OpenCode's git pack operations
+_SNAPSHOT_TMP_PREFIXES = ("tmp_pack_", "tmp_idx_", "tmp_mtimes_", "tmp_rev_")
 
 
 def cleanup_opencode_snapshot() -> str:
-    """Remove stale tmp_pack_* files from the OpenCode snapshot directory.
+    """Remove stale tmp_* files from the OpenCode snapshot pack directory.
 
     These files are created during git pack operations but never cleaned up
     when OpenCode crashes or is force-killed, causing unbounded disk growth
@@ -95,16 +98,18 @@ def cleanup_opencode_snapshot() -> str:
 
     removed = []
     errors = []
-    for f in pack_dir.glob("tmp_pack_*"):
+    for f in pack_dir.iterdir():
+        if not any(f.name.startswith(p) for p in _SNAPSHOT_TMP_PREFIXES):
+            continue
         try:
             size = f.stat().st_size
             f.unlink()
-            removed.append(f"{f.name} ({size / 1024 / 1024:.1f} MB)")
+            removed.append(f"{f.name} ({size / 1024:.0f} KB)")
         except OSError as e:
             errors.append(f"{f.name}: {e}")
 
     if not removed and not errors:
-        return "No stale tmp_pack_* files found."
+        return "No stale tmp_* files found."
 
     lines = []
     if removed:
@@ -1493,6 +1498,7 @@ Provide:
                 path.unlink()
             if self.active_session == sid:
                 self.active_session = None
+        cleanup_opencode_snapshot()
         return f"Ended {len(targets)} unattached session(s): {', '.join(targets)}"
 
     def get_history(self, session_id: Optional[str] = None, last_n: int = 20) -> str:
@@ -1571,6 +1577,7 @@ Provide:
         if self.active_session == sid:
             self.active_session = None
 
+        cleanup_opencode_snapshot()
         return f"Session '{sid}' ended."
 
     def end_all(self, session_ids: Optional[list] = None, exclude_model: Optional[str] = None) -> str:
@@ -1608,6 +1615,7 @@ Provide:
             if self.active_session == sid:
                 self.active_session = None
 
+        cleanup_opencode_snapshot()
         lines = [f"Ended {len(targets)} session(s): {', '.join(targets)}"]
         if skipped:
             lines.append(f"Kept {len(skipped)} session(s) with model '{exclude_model}': {', '.join(skipped)}")
@@ -2180,6 +2188,7 @@ Set via:
                 path.unlink()
             if self.active_session == sid:
                 self.active_session = None
+        cleanup_opencode_snapshot()
         return f"Ended {len(targets)} unattached Codex session(s): {', '.join(targets)}"
 
     def get_history(self, session_id: Optional[str] = None, last_n: int = 20) -> str:
@@ -2230,6 +2239,7 @@ Set via:
         if self.active_session == sid:
             self.active_session = None
 
+        cleanup_opencode_snapshot()
         return f"Codex session '{sid}' ended."
 
     def end_all(self, session_ids: Optional[list] = None, exclude_model: Optional[str] = None) -> str:
@@ -2267,6 +2277,7 @@ Set via:
             if self.active_session == sid:
                 self.active_session = None
 
+        cleanup_opencode_snapshot()
         lines = [f"Ended {len(targets)} Codex session(s): {', '.join(targets)}"]
         if skipped:
             lines.append(f"Kept {len(skipped)} session(s) with model '{exclude_model}': {', '.join(skipped)}")
