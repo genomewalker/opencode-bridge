@@ -1005,7 +1005,9 @@ class OpenCodeBridge:
             if session.variant:
                 args.extend(["--variant", session.variant])
 
-            output, code = await self._run_opencode(*args, timeout=300, stall_timeout=90)
+            chunk_lines = chunk_info.get("line_count", CHUNK_SIZE)
+            stall_timeout = min(300, max(120, chunk_lines // 10))
+            output, code = await self._run_opencode(*args, timeout=300, stall_timeout=stall_timeout)
 
             if code != 0:
                 result["error"] = output[:500]
@@ -1262,9 +1264,11 @@ Set via:
         try:
             # --- Chunking gate: large user files get map-reduce processing ---
             user_files = [f for f in files if not Path(f).name.startswith("opencode_msg_")]
-            needs_chunking = any(
-                get_file_info(f).get("lines", 0) > CHUNK_THRESHOLD
-                for f in user_files
+            file_line_counts = [get_file_info(f).get("lines", 0) for f in user_files]
+            total_lines = sum(file_line_counts)
+            needs_chunking = (
+                any(n > CHUNK_THRESHOLD for n in file_line_counts)
+                or total_lines > CHUNK_THRESHOLD
             )
 
             if needs_chunking:
@@ -1307,8 +1311,7 @@ Set via:
             # Use JSON format to get session ID
             args.extend(["--format", "json"])
 
-            # Scale timeout based on attached file size
-            total_lines = sum(get_file_info(f).get("lines", 0) for f in user_files)
+            # Scale timeout based on attached file size (total_lines computed above in chunking gate)
             # Base 300s, +60s per 1000 lines above threshold, capped at 900s
             timeout = min(900, 300 + max(0, (total_lines - MEDIUM_FILE) * 60 // 1000))
 
@@ -1679,22 +1682,32 @@ Provide:
         """Send a minimal request to verify the model is reachable and responding.
 
         Uses the active session's model if available, otherwise falls back to config model.
+        Reports response latency so slow models are visible before committing to large tasks.
         """
         if session_id and session_id not in self.sessions:
             return f"Session '{session_id}' not found."
         sid = session_id or self.active_session
         session = self.sessions.get(sid) if sid else None
         model = (session.model if session else None) or self.config.model
+        variant = session.variant if session else None
+
+        t0 = asyncio.get_event_loop().time()
         output, code = await self._run_opencode(
             "run", "Reply with only the word: OK", "--model", model, "--format", "json",
             timeout=30, stall_timeout=15
         )
+        elapsed = asyncio.get_event_loop().time() - t0
+
+        label = f"{model}" + (f" [{variant}]" if variant else "")
+        latency = f"{elapsed:.1f}s"
+        speed = " ⚠️ slow" if elapsed > 10 else ""
+
         if code != 0:
-            return f"Model unreachable (exit {code}): {output[:300]}"
+            return f"Model unreachable ({label}, {latency}): {output[:300]}"
         reply, _ = self._parse_opencode_response(output)
         if reply:
-            return f"Model reachable ({model}). Response: {reply.strip()[:100]}"
-        return f"Model responded but returned no text ({model})."
+            return f"Model reachable ({label}) — {latency}{speed}. Response: {reply.strip()[:100]}"
+        return f"Model responded but returned no text ({label}, {latency}{speed})."
 
 
 class CodexBridge:
