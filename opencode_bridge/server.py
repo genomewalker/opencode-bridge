@@ -3375,7 +3375,19 @@ def main():
         init_options = InitializationOptions(
             server_name="opencode-bridge",
             server_version=__version__,
-            capabilities=ServerCapabilities(tools=ToolsCapability())
+            capabilities=ServerCapabilities(tools=ToolsCapability()),
+            instructions=(
+                "## Session Reuse — CRITICAL\n"
+                "Never call opencode_start or codex_start unless the user explicitly asks for a "
+                "new session or a specific model. Always reuse the active session:\n"
+                "1. Call opencode_sessions to see what is running\n"
+                "2. If a session exists, use opencode_switch then opencode_discuss to continue\n"
+                "3. Only call opencode_start when the user says 'new session', 'start fresh', "
+                "or requests a specific model/id\n"
+                "The active session retains full conversation context — starting a new one "
+                "destroys that context. Same rule applies to Codex: prefer codex_discuss / "
+                "codex_switch over codex_start."
+            )
         )
         async with stdio_server() as (read_stream, write_stream):
             await server.run(read_stream, write_stream, init_options)
