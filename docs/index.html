@@ -56,9 +56,10 @@
           </button>
         </div>
 
-        <!-- BRIDGE ANIMATION -->
-        <div class="bridge" aria-label="Animated bridge between Claude Code and OpenCode">
-          <!-- Claude Node -->
+        <!-- UNIFIED BRIDGE + ROOM ANIMATION -->
+        <div class="bridge" aria-label="opencode-bridge: Claude Code connected to OpenCode, Codex, and discussion rooms">
+
+          <!-- Left: Claude Code -->
           <div class="bridge-node bridge-claude">
             <div class="node-ring"></div>
             <div class="node-core"></div>
@@ -66,108 +67,91 @@
             <div class="node-tag">primary</div>
           </div>
 
-          <!-- Conduit -->
+          <!-- Center: Conduit -->
           <div class="conduit">
             <div class="conduit-track"></div>
             <div class="conduit-glow"></div>
-            <!-- Query packets (L→R, coral) -->
             <div class="packet pkt-query pkt-q1" aria-hidden="true"></div>
             <div class="packet pkt-query pkt-q2" aria-hidden="true"></div>
             <div class="packet pkt-query pkt-q3" aria-hidden="true"></div>
-            <!-- Response packets (R→L, teal) -->
             <div class="packet pkt-response pkt-r1" aria-hidden="true"></div>
             <div class="packet pkt-response pkt-r2" aria-hidden="true"></div>
             <div class="packet pkt-response pkt-r3" aria-hidden="true"></div>
-            <!-- Labels floating above conduit -->
             <div class="conduit-label cl-1">query</div>
             <div class="conduit-label cl-2">review</div>
-            <div class="conduit-label cl-3">plan</div>
-            <div class="conduit-label cl-4">synthesize</div>
+            <div class="conduit-label cl-3">room</div>
+            <div class="conduit-label cl-4">plan</div>
           </div>
 
-          <!-- OpenCode Hub -->
-          <div class="bridge-node bridge-opencode">
-            <div class="node-ring"></div>
-            <div class="node-core"></div>
-            <div class="node-label">OpenCode</div>
-            <div class="node-tag">companion</div>
-            <div class="model-fan">
-              <div class="model-pill pill-gpt"><span class="pill-dot"></span>GPT-5</div>
-              <div class="model-pill pill-gemini"><span class="pill-dot"></span>Gemini</div>
+          <!-- Right: Hub column -->
+          <div class="hub-column">
+            <!-- OpenCode -->
+            <div class="bridge-node bridge-opencode">
+              <div class="node-ring"></div>
+              <div class="node-core"></div>
+              <div class="node-label">OpenCode</div>
+              <div class="node-tag">companion</div>
+              <div class="model-fan">
+                <div class="model-pill pill-gpt"><span class="pill-dot"></span>GPT-5</div>
+                <div class="model-pill pill-gemini"><span class="pill-dot"></span>Gemini</div>
+              </div>
             </div>
-          </div>
 
-          <!-- Codex Hub -->
-          <div class="bridge-node bridge-codex" style="margin-top: 1.5rem;">
-            <div class="node-ring"></div>
-            <div class="node-core"></div>
-            <div class="node-label">Codex</div>
-            <div class="node-tag">agent</div>
-            <div class="model-fan">
-              <div class="model-pill pill-gpt"><span class="pill-dot"></span>o3</div>
-              <div class="model-pill pill-other"><span class="pill-dot"></span>o4-mini</div>
+            <!-- Codex -->
+            <div class="bridge-node bridge-codex">
+              <div class="node-ring"></div>
+              <div class="node-core"></div>
+              <div class="node-label">Codex</div>
+              <div class="node-tag">agent</div>
+              <div class="model-fan">
+                <div class="model-pill pill-gpt"><span class="pill-dot"></span>o3</div>
+                <div class="model-pill pill-other"><span class="pill-dot"></span>o4-mini</div>
+              </div>
             </div>
-          </div>
-        </div>
 
-        <!-- Discussion Room Orbit -->
-        <div class="room-viz" aria-label="Discussion room with multiple AI participants">
-          <div class="room-header">
-            <span class="room-tag">discussion room</span>
-            <span class="room-tag-desc">all participants respond in parallel &middot; see full thread each round</span>
-          </div>
-          <div class="room-stage">
-            <!-- Claude connector line (left) -->
-            <div class="room-claude-connector">
-              <div class="room-claude-node">
-                <div class="rn-dot rn-claude"></div>
-                <div class="rn-label">Claude</div>
-                <div class="rn-sublabel">orchestrator</div>
+            <!-- Divider -->
+            <div class="hub-divider" aria-hidden="true"></div>
+
+            <!-- Discussion Room -->
+            <div class="room-inline">
+              <div class="room-inline-label">
+                <span class="room-tag-sm">room</span>
+                <span class="room-inline-desc">parallel &middot; async</span>
               </div>
-              <div class="room-connector-line">
-                <div class="room-connector-track"></div>
-                <div class="rpkt rpkt-ctrl rpkt-c1"></div>
-                <div class="rpkt rpkt-ctrl rpkt-c2"></div>
+              <div class="room-nodes">
+                <div class="room-node-wrap">
+                  <div class="rnode rnode-coral"></div>
+                  <div class="rnode-name">Claude</div>
+                </div>
+                <div class="room-mesh">
+                  <div class="rmesh-track rt-1">
+                    <div class="rmesh-pkt rmp-1a"></div>
+                    <div class="rmesh-pkt rmp-1b"></div>
+                  </div>
+                  <div class="rmesh-track rt-2">
+                    <div class="rmesh-pkt rmp-2a"></div>
+                    <div class="rmesh-pkt rmp-2b"></div>
+                  </div>
+                </div>
+                <div class="room-node-wrap">
+                  <div class="rnode rnode-cyan"></div>
+                  <div class="rnode-name">Codex</div>
+                </div>
+                <div class="room-mesh">
+                  <div class="rmesh-track rt-3">
+                    <div class="rmesh-pkt rmp-3a"></div>
+                    <div class="rmesh-pkt rmp-3b"></div>
+                  </div>
+                  <div class="rmesh-track rt-4">
+                    <div class="rmesh-pkt rmp-4a"></div>
+                    <div class="rmesh-pkt rmp-4b"></div>
+                  </div>
+                </div>
+                <div class="room-node-wrap">
+                  <div class="rnode rnode-green"></div>
+                  <div class="rnode-name">Gemini</div>
+                </div>
               </div>
-            </div>
-            <!-- Room orbit -->
-            <div class="room-orbit-wrap">
-              <div class="room-orbit-ring"></div>
-              <!-- Participant nodes at 3 positions -->
-              <div class="room-participant rp-top">
-                <div class="rn-dot rn-gpt"></div>
-                <div class="rn-label">Codex</div>
-                <div class="rn-sublabel">gpt-5.4</div>
-              </div>
-              <div class="room-participant rp-bot-left">
-                <div class="rn-dot rn-gemini"></div>
-                <div class="rn-label">Gemini</div>
-                <div class="rn-sublabel">2.5-pro</div>
-              </div>
-              <div class="room-participant rp-bot-right">
-                <div class="rn-dot rn-claude"></div>
-                <div class="rn-label">Claude</div>
-                <div class="rn-sublabel">claude -p</div>
-              </div>
-              <!-- Cross-connect packets (SVG lines) -->
-              <svg class="room-lines" viewBox="0 0 200 180" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-                <!-- top → bot-left -->
-                <line x1="100" y1="28" x2="44" y2="148" stroke="rgba(155,123,255,0.18)" stroke-width="1"/>
-                <!-- top → bot-right -->
-                <line x1="100" y1="28" x2="156" y2="148" stroke="rgba(155,123,255,0.18)" stroke-width="1"/>
-                <!-- bot-left → bot-right -->
-                <line x1="44" y1="148" x2="156" y2="148" stroke="rgba(155,123,255,0.18)" stroke-width="1"/>
-                <!-- Animated packets on each edge -->
-                <circle class="rl-pkt rl-p1" r="3" fill="#9b7bff" filter="url(#glow)"/>
-                <circle class="rl-pkt rl-p2" r="3" fill="#66d9ff" filter="url(#glow)"/>
-                <circle class="rl-pkt rl-p3" r="3" fill="#5ee38b" filter="url(#glow)"/>
-                <circle class="rl-pkt rl-p4" r="3" fill="#9b7bff" filter="url(#glow)"/>
-                <circle class="rl-pkt rl-p5" r="3" fill="#66d9ff" filter="url(#glow)"/>
-                <circle class="rl-pkt rl-p6" r="3" fill="#5ee38b" filter="url(#glow)"/>
-                <defs>
-                  <filter id="glow"><feGaussianBlur stdDeviation="2" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
-                </defs>
-              </svg>
             </div>
           </div>
         </div>
