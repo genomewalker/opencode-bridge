@@ -217,7 +217,10 @@ a:hover { color: var(--text-bright); }
 /* --- Bridge Animation --- */
 .bridge {
   display: grid;
-  grid-template-columns: minmax(100px, 1fr) minmax(160px, 2fr) minmax(160px, 1.5fr);
+  grid-template-columns: minmax(100px, 1fr) minmax(200px, 2.5fr) minmax(100px, 1fr);
+  grid-template-areas:
+    "claude conduit opencode"
+    "claude conduit codex";
   gap: 0;
   align-items: center;
   padding: 32px 24px;
@@ -273,6 +276,11 @@ a:hover { color: var(--text-bright); }
   position: relative;
   z-index: 1;
 }
+
+.bridge-claude   { grid-area: claude; }
+.conduit         { grid-area: conduit; }
+.bridge-opencode { grid-area: opencode; }
+.bridge-codex    { grid-area: codex; }
 
 .bridge-claude .node-ring {
   border-color: rgba(255, 122, 107, 0.2);
@@ -458,117 +466,53 @@ a:hover { color: var(--text-bright); }
   35%, 100% { opacity: 0; transform: translateY(-4px); }
 }
 
-/* --- Unified hub column (right side of bridge) --- */
-.hub-column {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
+/* --- Discussion Room Panel --- */
+.room-panel {
+  background: var(--panel);
+  border: 1px solid rgba(155,123,255,0.18);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+  margin-bottom: 16px;
+  position: relative;
+  overflow: hidden;
 }
-
-.hub-divider {
-  width: 100%;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(155,123,255,0.3), transparent);
+.room-panel::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse 500px 200px at 50% 50%, rgba(155,123,255,0.03), transparent);
+  pointer-events: none;
 }
-
-/* --- Discussion Room (inline, inside hub column) --- */
-.room-inline {
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-}
-
-.room-inline-label {
+.room-panel-header {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
+  margin-bottom: 12px;
 }
-.room-tag-sm {
-  font-size: 8px;
+.room-badge {
+  font-size: 9px;
   font-weight: 600;
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--violet);
-  border: 1px solid rgba(155, 123, 255, 0.3);
-  padding: 1px 6px;
+  border: 1px solid rgba(155,123,255,0.3);
+  padding: 2px 7px;
   border-radius: 3px;
-}
-.room-inline-desc {
-  font-size: 9px;
-  color: var(--dim);
-}
-
-/* Room participant nodes (shared) */
-.rnode {
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
   flex-shrink: 0;
-  background: var(--bg-deep);
-  border: 2px solid var(--panel-border);
-  animation: roomNodePulse 4s ease-in-out infinite;
 }
-.rnode-coral { border-color: rgba(255,122,107,0.6); box-shadow: 0 0 8px rgba(255,122,107,0.3); }
-.rnode-cyan  { border-color: rgba(102,217,255,0.6); box-shadow: 0 0 8px rgba(102,217,255,0.3); animation-delay: 1.3s; }
-.rnode-green { border-color: rgba(94,227,139,0.6);  box-shadow: 0 0 8px rgba(94,227,139,0.3);  animation-delay: 2.6s; }
-@keyframes roomNodePulse {
-  0%, 100% { opacity: 0.55; }
-  50% { opacity: 1; }
+.room-badge-desc {
+  font-size: 10px;
+  color: var(--muted);
 }
-.rnode-name { font-size: 9px; color: var(--muted); white-space: nowrap; }
-
-/* Vertical stacked layout for room nodes */
-.room-nodes-v {
+.room-panel-body {
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 0;
+  justify-content: center;
 }
-
-.rnv-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.rnv-connector {
-  position: relative;
-  width: 2px;
-  height: 18px;
-  margin: 1px 0;
-  background: linear-gradient(180deg, rgba(155,123,255,0.15), rgba(155,123,255,0.35), rgba(155,123,255,0.15));
-  align-self: center;
-}
-
-.rnv-pkt {
-  position: absolute;
-  left: 50%;
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: var(--violet);
-  box-shadow: 0 0 5px var(--violet);
-  transform: translateX(-50%);
-}
-.rnv-p1 { animation: flowTB 2.4s linear infinite; }
-.rnv-p2 { animation: flowBT 2.4s linear infinite 1.2s; }
-.rnv-p3 { animation: flowTB 2.4s linear infinite 0.6s; }
-.rnv-p4 { animation: flowBT 2.4s linear infinite 1.8s; }
-
-@keyframes flowTB {
-  0%   { top: 0%;   opacity: 0; }
-  5%   { opacity: 1; }
-  90%  { opacity: 1; }
-  100% { top: 100%; opacity: 0; }
-}
-@keyframes flowBT {
-  0%   { top: 100%; opacity: 0; }
-  5%   { opacity: 1; }
-  90%  { opacity: 1; }
-  100% { top: 0%;   opacity: 0; }
+.room-svg {
+  width: 100%;
+  max-width: 420px;
+  height: auto;
+  display: block;
 }
 
 /* Flow trace */
