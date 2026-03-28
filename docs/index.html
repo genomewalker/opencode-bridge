@@ -56,118 +56,103 @@
           </button>
         </div>
 
-        <!-- BRIDGE ANIMATION -->
-        <div class="bridge" aria-label="Claude Code bridged to OpenCode and Codex">
-          <div class="bridge-node bridge-claude">
-            <div class="node-ring"></div>
-            <div class="node-core"></div>
-            <div class="node-label">Claude Code</div>
-            <div class="node-tag">primary</div>
-          </div>
+        <!-- TOPOLOGY ANIMATION -->
+        <div class="topology" aria-label="opencode-bridge topology: Claude Code connected to OpenCode, Codex, and discussion rooms">
+          <svg class="topo-svg" viewBox="0 0 720 210" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <defs>
+              <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+                <feGaussianBlur stdDeviation="3" result="blur"/>
+                <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+              </filter>
+              <filter id="glow-sm" x="-40%" y="-40%" width="180%" height="180%">
+                <feGaussianBlur stdDeviation="1.5" result="blur"/>
+                <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+              </filter>
+            </defs>
 
-          <div class="conduit">
-            <div class="conduit-track"></div>
-            <div class="conduit-glow"></div>
-            <div class="packet pkt-query pkt-q1" aria-hidden="true"></div>
-            <div class="packet pkt-query pkt-q2" aria-hidden="true"></div>
-            <div class="packet pkt-query pkt-q3" aria-hidden="true"></div>
-            <div class="packet pkt-response pkt-r1" aria-hidden="true"></div>
-            <div class="packet pkt-response pkt-r2" aria-hidden="true"></div>
-            <div class="packet pkt-response pkt-r3" aria-hidden="true"></div>
-            <div class="conduit-label cl-1">query</div>
-            <div class="conduit-label cl-2">review</div>
-            <div class="conduit-label cl-3">plan</div>
-            <div class="conduit-label cl-4">synthesize</div>
-          </div>
+            <!-- Routing lines -->
+            <!-- trunk: Claude → junction -->
+            <path d="M 110,105 H 340" stroke="rgba(148,163,184,0.12)" stroke-width="1.5" fill="none"/>
+            <!-- branch up → OpenCode -->
+            <path d="M 340,105 V 45 H 540" stroke="rgba(148,163,184,0.12)" stroke-width="1.5" fill="none"/>
+            <!-- branch straight → Codex -->
+            <path d="M 340,105 H 540" stroke="rgba(148,163,184,0.12)" stroke-width="1.5" fill="none"/>
+            <!-- branch down → Room -->
+            <path d="M 340,105 V 170 H 540" stroke="rgba(148,163,184,0.12)" stroke-width="1.5" fill="none"/>
+            <!-- junction dot -->
+            <circle cx="340" cy="105" r="3" fill="rgba(148,163,184,0.25)"/>
 
-          <div class="bridge-node bridge-opencode">
-            <div class="node-ring"></div>
-            <div class="node-core"></div>
-            <div class="node-label">OpenCode</div>
-            <div class="node-tag">companion</div>
-            <div class="model-fan">
-              <div class="model-pill pill-gpt"><span class="pill-dot"></span>GPT-5</div>
-              <div class="model-pill pill-gemini"><span class="pill-dot"></span>Gemini</div>
-            </div>
-          </div>
+            <!-- Animated packets: Claude → OpenCode -->
+            <circle r="3" fill="#22d3ee" filter="url(#glow-sm)">
+              <animateMotion dur="3s" repeatCount="indefinite" begin="0s" path="M 110,105 H 340 V 45 H 540"/>
+            </circle>
+            <circle r="3" fill="#22d3ee" filter="url(#glow-sm)">
+              <animateMotion dur="3s" repeatCount="indefinite" begin="1.5s" path="M 540,45 V 45 H 340 V 105 H 110"/>
+            </circle>
+            <!-- Claude → Codex -->
+            <circle r="3" fill="#34d399" filter="url(#glow-sm)">
+              <animateMotion dur="2.4s" repeatCount="indefinite" begin="0.4s" path="M 110,105 H 540"/>
+            </circle>
+            <circle r="3" fill="#34d399" filter="url(#glow-sm)">
+              <animateMotion dur="2.4s" repeatCount="indefinite" begin="1.6s" path="M 540,105 H 110"/>
+            </circle>
+            <!-- Claude → Room -->
+            <circle r="3" fill="#a78bfa" filter="url(#glow-sm)">
+              <animateMotion dur="3.4s" repeatCount="indefinite" begin="0.8s" path="M 110,105 H 340 V 170 H 540"/>
+            </circle>
+            <circle r="3" fill="#a78bfa" filter="url(#glow-sm)">
+              <animateMotion dur="3.4s" repeatCount="indefinite" begin="2.5s" path="M 540,170 H 340 V 105 H 110"/>
+            </circle>
 
-          <div class="bridge-node bridge-codex">
-            <div class="node-ring"></div>
-            <div class="node-core"></div>
-            <div class="node-label">Codex</div>
-            <div class="node-tag">agent</div>
-            <div class="model-fan">
-              <div class="model-pill pill-gpt"><span class="pill-dot"></span>o3</div>
-              <div class="model-pill pill-other"><span class="pill-dot"></span>o4-mini</div>
-            </div>
-          </div>
-        </div>
+            <!-- NODE: Claude Code -->
+            <rect x="10" y="78" width="100" height="54" rx="6" fill="#080d15" stroke="rgba(245,158,11,0.5)" stroke-width="1.5"/>
+            <rect x="10" y="78" width="100" height="54" rx="6" fill="rgba(245,158,11,0.03)"/>
+            <text x="60" y="101" text-anchor="middle" font-size="11" font-weight="600" fill="#f1f5f9" font-family="JetBrains Mono,monospace">Claude</text>
+            <text x="60" y="116" text-anchor="middle" font-size="9" fill="#64748b" font-family="JetBrains Mono,monospace">Code</text>
+            <text x="60" y="126" text-anchor="middle" font-size="7" fill="rgba(245,158,11,0.6)" font-family="JetBrains Mono,monospace">primary</text>
 
-        <!-- DISCUSSION ROOM ANIMATION -->
-        <div class="room-panel" aria-label="Discussion room: multiple AI participants responding in parallel">
-          <div class="room-panel-header">
-            <span class="room-badge">discussion room</span>
-            <span class="room-badge-desc">all participants respond in parallel · see the full thread each round</span>
-          </div>
-          <div class="room-panel-body">
-            <svg class="room-svg" viewBox="0 0 360 130" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-              <!-- Connection lines -->
-              <line x1="72" y1="52" x2="180" y2="52" stroke="rgba(155,123,255,0.2)" stroke-width="1"/>
-              <line x1="180" y1="52" x2="288" y2="52" stroke="rgba(155,123,255,0.2)" stroke-width="1"/>
-              <line x1="72" y1="52" x2="288" y2="52" stroke="rgba(155,123,255,0.07)" stroke-width="1" stroke-dasharray="4 4"/>
-              <!-- Animated packets: Claude → Codex -->
-              <circle r="3" fill="#ff7a6b" opacity="0.9" filter="url(#rglow)">
-                <animateMotion dur="2.2s" repeatCount="indefinite" begin="0s" path="M72,52 L180,52"/>
-              </circle>
-              <circle r="3" fill="#9b7bff" opacity="0.9" filter="url(#rglow)">
-                <animateMotion dur="2.2s" repeatCount="indefinite" begin="1.1s" path="M180,52 L72,52"/>
-              </circle>
-              <!-- Codex → Gemini -->
-              <circle r="3" fill="#66d9ff" opacity="0.9" filter="url(#rglow)">
-                <animateMotion dur="2.2s" repeatCount="indefinite" begin="0.4s" path="M180,52 L288,52"/>
-              </circle>
-              <circle r="3" fill="#9b7bff" opacity="0.9" filter="url(#rglow)">
-                <animateMotion dur="2.2s" repeatCount="indefinite" begin="1.5s" path="M288,52 L180,52"/>
-              </circle>
-              <!-- Claude → Gemini (long) -->
-              <circle r="2.5" fill="#5ee38b" opacity="0.7" filter="url(#rglow)">
-                <animateMotion dur="3.6s" repeatCount="indefinite" begin="0.8s" path="M72,52 L288,52"/>
-              </circle>
-              <circle r="2.5" fill="#5ee38b" opacity="0.7" filter="url(#rglow)">
-                <animateMotion dur="3.6s" repeatCount="indefinite" begin="2.6s" path="M288,52 L72,52"/>
-              </circle>
-              <!-- Node: Claude -->
-              <circle cx="72" cy="52" r="16" fill="#06090c" stroke="rgba(255,122,107,0.55)" stroke-width="1.5"/>
-              <circle cx="72" cy="52" r="22" fill="none" stroke="rgba(255,122,107,0.12)" stroke-width="1">
-                <animate attributeName="r" values="20;25;20" dur="4s" repeatCount="indefinite"/>
-                <animate attributeName="opacity" values="0.4;0.1;0.4" dur="4s" repeatCount="indefinite"/>
-              </circle>
-              <text x="72" y="82" text-anchor="middle" font-size="10" fill="#d4dde3" font-family="JetBrains Mono,monospace" font-weight="600">Claude</text>
-              <text x="72" y="94" text-anchor="middle" font-size="8" fill="#576772" font-family="JetBrains Mono,monospace">claude -p</text>
-              <!-- Node: Codex -->
-              <circle cx="180" cy="52" r="16" fill="#06090c" stroke="rgba(102,217,255,0.55)" stroke-width="1.5"/>
-              <circle cx="180" cy="52" r="22" fill="none" stroke="rgba(102,217,255,0.12)" stroke-width="1">
-                <animate attributeName="r" values="20;25;20" dur="4s" begin="1.3s" repeatCount="indefinite"/>
-                <animate attributeName="opacity" values="0.4;0.1;0.4" dur="4s" begin="1.3s" repeatCount="indefinite"/>
-              </circle>
-              <text x="180" y="82" text-anchor="middle" font-size="10" fill="#d4dde3" font-family="JetBrains Mono,monospace" font-weight="600">Codex</text>
-              <text x="180" y="94" text-anchor="middle" font-size="8" fill="#576772" font-family="JetBrains Mono,monospace">gpt-5.4</text>
-              <!-- Node: Gemini -->
-              <circle cx="288" cy="52" r="16" fill="#06090c" stroke="rgba(94,227,139,0.55)" stroke-width="1.5"/>
-              <circle cx="288" cy="52" r="22" fill="none" stroke="rgba(94,227,139,0.12)" stroke-width="1">
-                <animate attributeName="r" values="20;25;20" dur="4s" begin="2.6s" repeatCount="indefinite"/>
-                <animate attributeName="opacity" values="0.4;0.1;0.4" dur="4s" begin="2.6s" repeatCount="indefinite"/>
-              </circle>
-              <text x="288" y="82" text-anchor="middle" font-size="10" fill="#d4dde3" font-family="JetBrains Mono,monospace" font-weight="600">Gemini</text>
-              <text x="288" y="94" text-anchor="middle" font-size="8" fill="#576772" font-family="JetBrains Mono,monospace">2.5-pro</text>
-              <defs>
-                <filter id="rglow" x="-50%" y="-50%" width="200%" height="200%">
-                  <feGaussianBlur stdDeviation="1.5" result="blur"/>
-                  <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
-                </filter>
-              </defs>
-            </svg>
-          </div>
+            <!-- NODE: OpenCode -->
+            <rect x="540" y="18" width="160" height="54" rx="6" fill="#080d15" stroke="rgba(34,211,238,0.45)" stroke-width="1.5"/>
+            <rect x="540" y="18" width="160" height="54" rx="6" fill="rgba(34,211,238,0.02)"/>
+            <text x="620" y="41" text-anchor="middle" font-size="11" font-weight="600" fill="#f1f5f9" font-family="JetBrains Mono,monospace">OpenCode</text>
+            <text x="620" y="56" text-anchor="middle" font-size="8" fill="#64748b" font-family="JetBrains Mono,monospace">GPT-5 · Gemini · Claude</text>
+            <text x="620" y="66" text-anchor="middle" font-size="7" fill="rgba(34,211,238,0.5)" font-family="JetBrains Mono,monospace">companion</text>
+
+            <!-- NODE: Codex -->
+            <rect x="540" y="78" width="160" height="54" rx="6" fill="#080d15" stroke="rgba(52,211,153,0.45)" stroke-width="1.5"/>
+            <rect x="540" y="78" width="160" height="54" rx="6" fill="rgba(52,211,153,0.02)"/>
+            <text x="620" y="101" text-anchor="middle" font-size="11" font-weight="600" fill="#f1f5f9" font-family="JetBrains Mono,monospace">Codex</text>
+            <text x="620" y="116" text-anchor="middle" font-size="8" fill="#64748b" font-family="JetBrains Mono,monospace">o3 · o4-mini · gpt-4.1</text>
+            <text x="620" y="126" text-anchor="middle" font-size="7" fill="rgba(52,211,153,0.5)" font-family="JetBrains Mono,monospace">agent</text>
+
+            <!-- NODE: Discussion Room -->
+            <rect x="540" y="143" width="170" height="58" rx="6" fill="#080d15" stroke="rgba(167,139,250,0.45)" stroke-width="1.5" stroke-dasharray="5 3"/>
+            <rect x="540" y="143" width="170" height="58" rx="6" fill="rgba(167,139,250,0.02)"/>
+            <text x="548" y="159" font-size="7" font-weight="600" fill="rgba(167,139,250,0.7)" font-family="JetBrains Mono,monospace" letter-spacing="0.08em">ROOM · parallel · async</text>
+            <!-- Room participant nodes -->
+            <circle cx="565" cy="178" r="7" fill="#080d15" stroke="rgba(245,158,11,0.5)" stroke-width="1.2"/>
+            <text x="565" y="196" text-anchor="middle" font-size="7" fill="#64748b" font-family="JetBrains Mono,monospace">Claude</text>
+            <circle cx="625" cy="178" r="7" fill="#080d15" stroke="rgba(34,211,238,0.5)" stroke-width="1.2"/>
+            <text x="625" y="196" text-anchor="middle" font-size="7" fill="#64748b" font-family="JetBrains Mono,monospace">Codex</text>
+            <circle cx="685" cy="178" r="7" fill="#080d15" stroke="rgba(52,211,153,0.5)" stroke-width="1.2"/>
+            <text x="685" y="196" text-anchor="middle" font-size="7" fill="#64748b" font-family="JetBrains Mono,monospace">Gemini</text>
+            <!-- Room internal connections -->
+            <line x1="572" y1="178" x2="618" y2="178" stroke="rgba(167,139,250,0.2)" stroke-width="1"/>
+            <line x1="632" y1="178" x2="678" y2="178" stroke="rgba(167,139,250,0.2)" stroke-width="1"/>
+            <!-- Room internal packets -->
+            <circle r="2" fill="#a78bfa" opacity="0.8">
+              <animateMotion dur="1.8s" repeatCount="indefinite" begin="0s" path="M 572,178 H 618"/>
+            </circle>
+            <circle r="2" fill="#a78bfa" opacity="0.8">
+              <animateMotion dur="1.8s" repeatCount="indefinite" begin="0.9s" path="M 618,178 H 572"/>
+            </circle>
+            <circle r="2" fill="#a78bfa" opacity="0.8">
+              <animateMotion dur="1.8s" repeatCount="indefinite" begin="0.3s" path="M 632,178 H 678"/>
+            </circle>
+            <circle r="2" fill="#a78bfa" opacity="0.8">
+              <animateMotion dur="1.8s" repeatCount="indefinite" begin="1.2s" path="M 678,178 H 632"/>
+            </circle>
+          </svg>
         </div>
 
         <!-- Flow trace -->
