@@ -217,7 +217,7 @@ a:hover { color: var(--text-bright); }
 /* --- Bridge Animation --- */
 .bridge {
   display: grid;
-  grid-template-columns: minmax(100px, 1fr) minmax(200px, 2.5fr) minmax(100px, 1fr);
+  grid-template-columns: minmax(100px, 1fr) minmax(160px, 2fr) minmax(160px, 1.5fr);
   gap: 0;
   align-items: center;
   padding: 32px 24px;
@@ -501,76 +501,75 @@ a:hover { color: var(--text-bright); }
   color: var(--dim);
 }
 
-/* Room nodes row with mesh tracks between them */
-.room-nodes {
-  display: flex;
-  align-items: center;
-  gap: 0;
-  width: 100%;
-  justify-content: center;
-}
-
-.room-node-wrap {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 3px;
-  flex-shrink: 0;
-}
-
+/* Room participant nodes (shared) */
 .rnode {
-  width: 22px;
-  height: 22px;
+  width: 20px;
+  height: 20px;
   border-radius: 50%;
+  flex-shrink: 0;
   background: var(--bg-deep);
   border: 2px solid var(--panel-border);
   animation: roomNodePulse 4s ease-in-out infinite;
 }
-.rnode-coral  { border-color: rgba(255,122,107,0.5); box-shadow: 0 0 10px rgba(255,122,107,0.25); }
-.rnode-cyan   { border-color: rgba(102,217,255,0.5); box-shadow: 0 0 10px rgba(102,217,255,0.25); animation-delay: 1.3s; }
-.rnode-green  { border-color: rgba(94,227,139,0.5);  box-shadow: 0 0 10px rgba(94,227,139,0.25);  animation-delay: 2.6s; }
+.rnode-coral { border-color: rgba(255,122,107,0.6); box-shadow: 0 0 8px rgba(255,122,107,0.3); }
+.rnode-cyan  { border-color: rgba(102,217,255,0.6); box-shadow: 0 0 8px rgba(102,217,255,0.3); animation-delay: 1.3s; }
+.rnode-green { border-color: rgba(94,227,139,0.6);  box-shadow: 0 0 8px rgba(94,227,139,0.3);  animation-delay: 2.6s; }
 @keyframes roomNodePulse {
-  0%, 100% { opacity: 0.6; }
+  0%, 100% { opacity: 0.55; }
   50% { opacity: 1; }
 }
-.rnode-name { font-size: 9px; color: var(--muted); }
+.rnode-name { font-size: 9px; color: var(--muted); white-space: nowrap; }
 
-/* Mesh tracks between room nodes (bidirectional mini conduits) */
-.room-mesh {
+/* Vertical stacked layout for room nodes */
+.room-nodes-v {
   display: flex;
   flex-direction: column;
-  gap: 3px;
-  flex: 1;
-  min-width: 28px;
-  max-width: 48px;
+  align-items: center;
+  gap: 0;
 }
 
-.rmesh-track {
+.rnv-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rnv-connector {
   position: relative;
-  height: 2px;
-  background: linear-gradient(90deg, rgba(155,123,255,0.15), rgba(155,123,255,0.3), rgba(155,123,255,0.15));
+  width: 2px;
+  height: 18px;
+  margin: 1px 0;
+  background: linear-gradient(180deg, rgba(155,123,255,0.15), rgba(155,123,255,0.35), rgba(155,123,255,0.15));
+  align-self: center;
 }
 
-.rmesh-pkt {
+.rnv-pkt {
   position: absolute;
-  top: 50%;
+  left: 50%;
   width: 4px;
   height: 4px;
   border-radius: 50%;
   background: var(--violet);
   box-shadow: 0 0 5px var(--violet);
-  transform: translateY(-50%);
+  transform: translateX(-50%);
 }
+.rnv-p1 { animation: flowTB 2.4s linear infinite; }
+.rnv-p2 { animation: flowBT 2.4s linear infinite 1.2s; }
+.rnv-p3 { animation: flowTB 2.4s linear infinite 0.6s; }
+.rnv-p4 { animation: flowBT 2.4s linear infinite 1.8s; }
 
-/* Forward and reverse packets on top/bottom tracks */
-.rmp-1a { animation: flowLR 2.8s linear infinite; }
-.rmp-1b { animation: flowLR 2.8s linear infinite 1.4s; }
-.rmp-2a { animation: flowRL 2.8s linear infinite 0.7s; }
-.rmp-2b { animation: flowRL 2.8s linear infinite 2.1s; }
-.rmp-3a { animation: flowLR 2.8s linear infinite 0.4s; }
-.rmp-3b { animation: flowLR 2.8s linear infinite 1.8s; }
-.rmp-4a { animation: flowRL 2.8s linear infinite 1.1s; }
-.rmp-4b { animation: flowRL 2.8s linear infinite 2.5s; }
+@keyframes flowTB {
+  0%   { top: 0%;   opacity: 0; }
+  5%   { opacity: 1; }
+  90%  { opacity: 1; }
+  100% { top: 100%; opacity: 0; }
+}
+@keyframes flowBT {
+  0%   { top: 100%; opacity: 0; }
+  5%   { opacity: 1; }
+  90%  { opacity: 1; }
+  100% { top: 0%;   opacity: 0; }
+}
 
 /* Flow trace */
 .flow-trace {
