@@ -1199,9 +1199,27 @@ class OpenCodeBridge:
         self.active_session = session_id
         session.save(self.sessions_dir / f"{session_id}.json")
 
+        # Warmup: fire a trivial message so opencode pre-initializes and we capture
+        # the session ID. All subsequent calls use --session and skip cold start.
+        warmup_args = [
+            "run", ".",
+            "--model", model,
+            "--agent", agent,
+            "--format", "json",
+        ]
+        if variant:
+            warmup_args.extend(["--variant", variant])
+        warmup_out, _ = await self._run_opencode(*warmup_args, timeout=60, stall_timeout=60)
+        _, oc_session_id = self._parse_opencode_response(warmup_out)
+        if oc_session_id:
+            session.opencode_session_id = oc_session_id
+            session.save(self.sessions_dir / f"{session_id}.json")
+
         result = f"Session '{session_id}' started\n  Model: {model}\n  Agent: {agent}"
         if variant:
             result += f"\n  Variant: {variant}"
+        if oc_session_id:
+            result += f"\n  OpenCode session: {oc_session_id} (warmed up)"
         if claude_session_id:
             result += f"\n  Claude session: {claude_session_id}"
         return result
@@ -1266,10 +1284,7 @@ Set via:
             user_files = [f for f in files if not Path(f).name.startswith("opencode_msg_")]
             file_line_counts = [get_file_info(f).get("lines", 0) for f in user_files]
             total_lines = sum(file_line_counts)
-            needs_chunking = (
-                any(n > CHUNK_THRESHOLD for n in file_line_counts)
-                or total_lines > CHUNK_THRESHOLD
-            )
+            needs_chunking = any(n > CHUNK_THRESHOLD for n in file_line_counts)
 
             if needs_chunking:
                 reply = await self._run_chunked(message, user_files, session, mode="discuss")
@@ -1316,7 +1331,7 @@ Set via:
             timeout = min(900, 300 + max(0, (total_lines - MEDIUM_FILE) * 60 // 1000))
 
             # stall_timeout: gpt-5.4/high variant can take 2+ min before first token
-            stall_timeout = min(300, max(120, total_lines // 10))
+            stall_timeout = min(300, max(240, total_lines // 10))
             output, code = await self._run_opencode(*args, timeout=timeout, stall_timeout=stall_timeout)
 
             if code != 0:
@@ -1407,7 +1422,7 @@ Set via:
             total_lines = sum(i.get("lines", 0) for i in file_infos)
 
             # Chunking gate for large reviews
-            if total_lines > CHUNK_THRESHOLD:
+            if any(i.get("lines", 0) > CHUNK_THRESHOLD for i in file_infos):
                 prompt = build_review_prompt(file_infos, focus)
                 session = self.sessions[sid]
                 session.add_message("user", f"[code review] {focus}")
@@ -2596,10 +2611,124 @@ Error: {e}"""
         return "\n\n---\n\n".join(parts)
 
 
+# ---------------------------------------------------------------------------
+# Discussion Room — async multi-agent roundtable
+# ---------------------------------------------------------------------------
+
+@dataclass
+class DiscussionRoom:
+    """Shared message board where multiple agents post and read asynchronously."""
+    id: str
+    topic: str
+    participants: list  # [{name, backend, session_id}]
+    messages: list = field(default_factory=list)  # [{name, content, ts}]
+    created: str = field(default_factory=lambda: datetime.now().isoformat())
+
+
+class RoomManager:
+    """Manage discussion rooms and run async multi-agent conversations."""
+
+    def __init__(self, opencode_bridge: "OpenCodeBridge", codex_bridge: "CodexBridge"):
+        self.opencode = opencode_bridge
+        self.codex = codex_bridge
+        self.rooms: dict[str, DiscussionRoom] = {}
+
+    def create(self, room_id: str, topic: str, participants: list[dict]) -> str:
+        if room_id in self.rooms:
+            return f"Room '{room_id}' already exists."
+        room = DiscussionRoom(id=room_id, topic=topic, participants=participants)
+        room.messages.append({"name": "TOPIC", "content": topic, "ts": datetime.now().isoformat()})
+        self.rooms[room_id] = room
+        names = ", ".join(p["name"] for p in participants)
+        return f"Room '{room_id}' created with {len(participants)} participants: {names}"
+
+    def add_participant(self, room_id: str, participant: dict) -> str:
+        if room_id not in self.rooms:
+            return f"Room '{room_id}' not found."
+        room = self.rooms[room_id]
+        room.participants.append(participant)
+        return f"Added '{participant['name']}' to room '{room_id}'. Now {len(room.participants)} participants."
+
+    def read(self, room_id: str) -> str:
+        if room_id not in self.rooms:
+            return f"Room '{room_id}' not found."
+        room = self.rooms[room_id]
+        lines = [f"# Discussion Room: {room_id}", f"**Topic:** {room.topic}", ""]
+        for msg in room.messages:
+            ts = msg["ts"][11:19]  # HH:MM:SS
+            lines.append(f"**[{ts}] {msg['name']}:**")
+            lines.append(msg["content"])
+            lines.append("")
+        return "\n".join(lines)
+
+    def _build_thread_context(self, room: DiscussionRoom, my_name: str) -> str:
+        """Build the full thread context to show a participant before they respond."""
+        parts = [
+            f"You are **{my_name}** in a multi-agent discussion room.",
+            f"**Topic:** {room.topic}",
+            "",
+            "## Discussion so far",
+        ]
+        for msg in room.messages:
+            if msg["name"] == "TOPIC":
+                continue
+            parts.append(f"**{msg['name']}:** {msg['content']}")
+            parts.append("")
+        parts += [
+            "## Your turn",
+            f"You are {my_name}. Read the full discussion above and contribute your perspective.",
+            "Be direct and specific. React to what others said — agree, challenge, or add something new.",
+            "Keep it to 2-4 paragraphs.",
+        ]
+        return "\n".join(parts)
+
+    async def _participant_respond(self, room: DiscussionRoom, participant: dict) -> dict:
+        """Get one participant's response to the current thread state."""
+        name = participant["name"]
+        backend = participant["backend"]
+        sid = participant.get("session_id")
+        prompt = self._build_thread_context(room, name)
+
+        try:
+            if backend == "codex":
+                if sid and sid in self.codex.sessions:
+                    reply = await self.codex.send_message(prompt, sid)
+                else:
+                    reply = await self.codex.run_task(prompt)
+            else:  # opencode
+                if sid and sid in self.opencode.sessions:
+                    reply = await self.opencode.send_message(prompt, sid, _raw=True)
+                else:
+                    tmp = f"room-{room.id}-{name.lower().replace(' ', '-')}"
+                    await self.opencode.start_session(tmp, model=participant.get("model"))
+                    reply = await self.opencode.send_message(prompt, tmp, _raw=True)
+                    self.opencode.end_session(tmp)
+        except Exception as e:
+            reply = f"[error: {e}]"
+
+        return {"name": name, "content": reply, "ts": datetime.now().isoformat()}
+
+    async def run_rounds(self, room_id: str, rounds: int = 2) -> str:
+        """Run N rounds of async discussion — all participants respond in parallel each round."""
+        if room_id not in self.rooms:
+            return f"Room '{room_id}' not found."
+        room = self.rooms[room_id]
+
+        for round_num in range(1, rounds + 1):
+            # Snapshot the thread before this round starts so all see the same state
+            coros = [self._participant_respond(room, p) for p in room.participants]
+            responses = await asyncio.gather(*coros)
+            for resp in responses:
+                room.messages.append(resp)
+
+        return self.read(room_id)
+
+
 # MCP Server setup
 bridge = OpenCodeBridge()
 codex_bridge = CodexBridge()
 orchestrator = Orchestrator(bridge, codex_bridge)
+rooms = RoomManager(bridge, codex_bridge)
 server = Server("opencode-bridge")
 
 
@@ -3093,6 +3222,64 @@ async def list_tools():
             }
         ),
         Tool(
+            name="room_create",
+            description="Create a discussion room where multiple AI agents post asynchronously and see each other's messages. "
+                        "Participants can be opencode sessions (any model) or codex sessions. "
+                        "Pass participants as a JSON string: "
+                        '[{"name":"Codex","backend":"codex","session_id":"sid1"},{"name":"Gemini","backend":"opencode","session_id":"sid2"}]',
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "room_id": {"type": "string", "description": "Unique room identifier"},
+                    "topic": {"type": "string", "description": "The discussion topic or opening question"},
+                    "participants": {
+                        "type": "string",
+                        "description": 'JSON array of participants: [{"name":"...","backend":"opencode|codex","session_id":"...","model":"..."}]'
+                    }
+                },
+                "required": ["room_id", "topic", "participants"]
+            }
+        ),
+        Tool(
+            name="room_add_participant",
+            description="Add a participant to an existing discussion room.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "room_id": {"type": "string", "description": "Room ID"},
+                    "participant": {
+                        "type": "string",
+                        "description": 'JSON object: {"name":"...","backend":"opencode|codex","session_id":"...","model":"..."}'
+                    }
+                },
+                "required": ["room_id", "participant"]
+            }
+        ),
+        Tool(
+            name="room_run",
+            description="Run N rounds of async discussion in a room. All participants respond in parallel each round, "
+                        "seeing the full thread before they respond.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "room_id": {"type": "string", "description": "Room ID to run"},
+                    "rounds": {"type": "integer", "description": "Number of discussion rounds (default: 2)"}
+                },
+                "required": ["room_id"]
+            }
+        ),
+        Tool(
+            name="room_read",
+            description="Read the full transcript of a discussion room.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "room_id": {"type": "string", "description": "Room ID to read"}
+                },
+                "required": ["room_id"]
+            }
+        ),
+        Tool(
             name="opencode_cleanup",
             description="Remove stale tmp_pack_* files from OpenCode's snapshot directory. "
                         "These files accumulate when OpenCode is killed mid-operation and can "
@@ -3344,6 +3531,27 @@ async def call_tool(name: str, arguments: dict):
             )
         elif name == "parallel_agents":
             result = await orchestrator.parallel_agents(tasks=arguments["tasks"])
+        elif name == "room_create":
+            participants = arguments["participants"]
+            if isinstance(participants, str):
+                participants = json.loads(participants)
+            result = rooms.create(
+                room_id=arguments["room_id"],
+                topic=arguments["topic"],
+                participants=participants,
+            )
+        elif name == "room_add_participant":
+            p = arguments["participant"]
+            if isinstance(p, str):
+                p = json.loads(p)
+            result = rooms.add_participant(room_id=arguments["room_id"], participant=p)
+        elif name == "room_run":
+            result = await rooms.run_rounds(
+                room_id=arguments["room_id"],
+                rounds=arguments.get("rounds", 2),
+            )
+        elif name == "room_read":
+            result = rooms.read(room_id=arguments["room_id"])
         elif name == "opencode_cleanup":
             result = cleanup_opencode_snapshot()
         elif name == "opencode_ping":
