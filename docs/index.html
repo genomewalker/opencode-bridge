@@ -57,100 +57,108 @@
         </div>
 
         <!-- TOPOLOGY ANIMATION -->
-        <div class="topology" aria-label="opencode-bridge topology: Claude Code connected to OpenCode, Codex, and discussion rooms">
-          <svg class="topo-svg" viewBox="0 0 720 210" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <div class="topology" aria-label="opencode-bridge topology">
+          <svg class="topo-svg" viewBox="0 0 780 228" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
             <defs>
-              <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
-                <feGaussianBlur stdDeviation="3" result="blur"/>
+              <filter id="pkt-glow" x="-100%" y="-100%" width="300%" height="300%">
+                <feGaussianBlur stdDeviation="2" result="blur"/>
                 <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
               </filter>
-              <filter id="glow-sm" x="-40%" y="-40%" width="180%" height="180%">
-                <feGaussianBlur stdDeviation="1.5" result="blur"/>
+              <filter id="node-glow" x="-40%" y="-40%" width="180%" height="180%">
+                <feGaussianBlur stdDeviation="6" result="blur"/>
                 <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
               </filter>
             </defs>
 
-            <!-- Routing lines -->
-            <!-- trunk: Claude → junction -->
-            <path d="M 110,105 H 340" stroke="rgba(148,163,184,0.12)" stroke-width="1.5" fill="none"/>
-            <!-- branch up → OpenCode -->
-            <path d="M 340,105 V 45 H 540" stroke="rgba(148,163,184,0.12)" stroke-width="1.5" fill="none"/>
-            <!-- branch straight → Codex -->
-            <path d="M 340,105 H 540" stroke="rgba(148,163,184,0.12)" stroke-width="1.5" fill="none"/>
-            <!-- branch down → Room -->
-            <path d="M 340,105 V 170 H 540" stroke="rgba(148,163,184,0.12)" stroke-width="1.5" fill="none"/>
-            <!-- junction dot -->
-            <circle cx="340" cy="105" r="3" fill="rgba(148,163,184,0.25)"/>
+            <!-- Claude glow halo -->
+            <circle cx="88" cy="114" r="52" fill="rgba(245,158,11,0.06)" filter="url(#node-glow)"/>
 
-            <!-- Animated packets: Claude → OpenCode -->
-            <circle r="3" fill="#22d3ee" filter="url(#glow-sm)">
-              <animateMotion dur="3s" repeatCount="indefinite" begin="0s" path="M 110,105 H 340 V 45 H 540"/>
+            <!-- Trunk: Claude → junction (310,114) -->
+            <path d="M 128,114 H 310" stroke="rgba(255,255,255,0.1)" stroke-width="1.5" fill="none"/>
+            <!-- Branch → OpenCode (y=52) -->
+            <path d="M 310,114 V 52 H 490" stroke="rgba(34,211,238,0.25)" stroke-width="1.5" fill="none"/>
+            <!-- Branch → Codex (y=114) -->
+            <path d="M 310,114 H 490" stroke="rgba(52,211,153,0.25)" stroke-width="1.5" fill="none"/>
+            <!-- Branch → Room (y=176) -->
+            <path d="M 310,114 V 176 H 490" stroke="rgba(167,139,250,0.25)" stroke-width="1.5" fill="none"/>
+            <!-- Junction -->
+            <circle cx="310" cy="114" r="3.5" fill="rgba(255,255,255,0.18)"/>
+
+            <!-- Packets → OpenCode -->
+            <circle r="3.5" fill="#22d3ee" filter="url(#pkt-glow)">
+              <animateMotion dur="2.8s" repeatCount="indefinite" begin="0s"   path="M 128,114 H 310 V 52 H 490"/>
             </circle>
-            <circle r="3" fill="#22d3ee" filter="url(#glow-sm)">
-              <animateMotion dur="3s" repeatCount="indefinite" begin="1.5s" path="M 540,45 V 45 H 340 V 105 H 110"/>
+            <circle r="3.5" fill="#22d3ee" filter="url(#pkt-glow)" opacity="0.6">
+              <animateMotion dur="2.8s" repeatCount="indefinite" begin="1.4s" path="M 490,52 H 310 V 114 H 128"/>
             </circle>
-            <!-- Claude → Codex -->
-            <circle r="3" fill="#34d399" filter="url(#glow-sm)">
-              <animateMotion dur="2.4s" repeatCount="indefinite" begin="0.4s" path="M 110,105 H 540"/>
+            <!-- Packets → Codex -->
+            <circle r="3.5" fill="#34d399" filter="url(#pkt-glow)">
+              <animateMotion dur="2.2s" repeatCount="indefinite" begin="0.3s" path="M 128,114 H 490"/>
             </circle>
-            <circle r="3" fill="#34d399" filter="url(#glow-sm)">
-              <animateMotion dur="2.4s" repeatCount="indefinite" begin="1.6s" path="M 540,105 H 110"/>
+            <circle r="3.5" fill="#34d399" filter="url(#pkt-glow)" opacity="0.6">
+              <animateMotion dur="2.2s" repeatCount="indefinite" begin="1.4s" path="M 490,114 H 128"/>
             </circle>
-            <!-- Claude → Room -->
-            <circle r="3" fill="#a78bfa" filter="url(#glow-sm)">
-              <animateMotion dur="3.4s" repeatCount="indefinite" begin="0.8s" path="M 110,105 H 340 V 170 H 540"/>
+            <!-- Packets → Room -->
+            <circle r="3.5" fill="#a78bfa" filter="url(#pkt-glow)">
+              <animateMotion dur="3.2s" repeatCount="indefinite" begin="0.6s" path="M 128,114 H 310 V 176 H 490"/>
             </circle>
-            <circle r="3" fill="#a78bfa" filter="url(#glow-sm)">
-              <animateMotion dur="3.4s" repeatCount="indefinite" begin="2.5s" path="M 540,170 H 340 V 105 H 110"/>
+            <circle r="3.5" fill="#a78bfa" filter="url(#pkt-glow)" opacity="0.6">
+              <animateMotion dur="3.2s" repeatCount="indefinite" begin="2.2s" path="M 490,176 H 310 V 114 H 128"/>
             </circle>
 
-            <!-- NODE: Claude Code -->
-            <rect x="10" y="78" width="100" height="54" rx="6" fill="#080d15" stroke="rgba(245,158,11,0.5)" stroke-width="1.5"/>
-            <rect x="10" y="78" width="100" height="54" rx="6" fill="rgba(245,158,11,0.03)"/>
-            <text x="60" y="101" text-anchor="middle" font-size="11" font-weight="600" fill="#f1f5f9" font-family="JetBrains Mono,monospace">Claude</text>
-            <text x="60" y="116" text-anchor="middle" font-size="9" fill="#64748b" font-family="JetBrains Mono,monospace">Code</text>
-            <text x="60" y="126" text-anchor="middle" font-size="7" fill="rgba(245,158,11,0.6)" font-family="JetBrains Mono,monospace">primary</text>
+            <!-- ═══ NODE: Claude Code ═══ -->
+            <circle cx="88" cy="114" r="42" fill="#04070e" stroke="rgba(245,158,11,0.45)" stroke-width="1.5"/>
+            <!-- pulsing outer ring -->
+            <circle cx="88" cy="114" r="50" fill="none" stroke="rgba(245,158,11,0.12)" stroke-width="1">
+              <animate attributeName="r" values="46;56;46" dur="4s" repeatCount="indefinite"/>
+              <animate attributeName="opacity" values="0.5;0.05;0.5" dur="4s" repeatCount="indefinite"/>
+            </circle>
+            <text x="88" y="110" text-anchor="middle" font-size="12" font-weight="700" fill="#f1f5f9" font-family="JetBrains Mono,monospace">Claude</text>
+            <text x="88" y="126" text-anchor="middle" font-size="9" fill="#94a3b8" font-family="JetBrains Mono,monospace">Code</text>
 
-            <!-- NODE: OpenCode -->
-            <rect x="540" y="18" width="160" height="54" rx="6" fill="#080d15" stroke="rgba(34,211,238,0.45)" stroke-width="1.5"/>
-            <rect x="540" y="18" width="160" height="54" rx="6" fill="rgba(34,211,238,0.02)"/>
-            <text x="620" y="41" text-anchor="middle" font-size="11" font-weight="600" fill="#f1f5f9" font-family="JetBrains Mono,monospace">OpenCode</text>
-            <text x="620" y="56" text-anchor="middle" font-size="8" fill="#64748b" font-family="JetBrains Mono,monospace">GPT-5 · Gemini · Claude</text>
-            <text x="620" y="66" text-anchor="middle" font-size="7" fill="rgba(34,211,238,0.5)" font-family="JetBrains Mono,monospace">companion</text>
+            <!-- ═══ NODE: OpenCode ═══ -->
+            <!-- left accent bar -->
+            <rect x="490" y="26" width="4" height="52" rx="2" fill="#22d3ee" opacity="0.7"/>
+            <!-- card -->
+            <rect x="494" y="26" width="272" height="52" rx="0 7 7 0" fill="#0d1a2e" stroke="rgba(34,211,238,0.18)" stroke-width="1"/>
+            <text x="508" y="46" font-size="12" font-weight="700" fill="#f1f5f9" font-family="JetBrains Mono,monospace">OpenCode</text>
+            <text x="508" y="61" font-size="9" fill="#64748b" font-family="JetBrains Mono,monospace">GPT-5.4 · Gemini · Claude · variant</text>
+            <text x="752" y="42" text-anchor="end" font-size="8" fill="rgba(34,211,238,0.55)" font-family="JetBrains Mono,monospace">companion</text>
 
-            <!-- NODE: Codex -->
-            <rect x="540" y="78" width="160" height="54" rx="6" fill="#080d15" stroke="rgba(52,211,153,0.45)" stroke-width="1.5"/>
-            <rect x="540" y="78" width="160" height="54" rx="6" fill="rgba(52,211,153,0.02)"/>
-            <text x="620" y="101" text-anchor="middle" font-size="11" font-weight="600" fill="#f1f5f9" font-family="JetBrains Mono,monospace">Codex</text>
-            <text x="620" y="116" text-anchor="middle" font-size="8" fill="#64748b" font-family="JetBrains Mono,monospace">o3 · o4-mini · gpt-4.1</text>
-            <text x="620" y="126" text-anchor="middle" font-size="7" fill="rgba(52,211,153,0.5)" font-family="JetBrains Mono,monospace">agent</text>
+            <!-- ═══ NODE: Codex ═══ -->
+            <rect x="490" y="88" width="4" height="52" rx="2" fill="#34d399" opacity="0.7"/>
+            <rect x="494" y="88" width="272" height="52" rx="0 7 7 0" fill="#0d1a2e" stroke="rgba(52,211,153,0.18)" stroke-width="1"/>
+            <text x="508" y="108" font-size="12" font-weight="700" fill="#f1f5f9" font-family="JetBrains Mono,monospace">Codex</text>
+            <text x="508" y="123" font-size="9" fill="#64748b" font-family="JetBrains Mono,monospace">o3 · o4-mini · gpt-4.1 · full-auto</text>
+            <text x="752" y="104" text-anchor="end" font-size="8" fill="rgba(52,211,153,0.55)" font-family="JetBrains Mono,monospace">agent</text>
 
-            <!-- NODE: Discussion Room -->
-            <rect x="540" y="143" width="170" height="58" rx="6" fill="#080d15" stroke="rgba(167,139,250,0.45)" stroke-width="1.5" stroke-dasharray="5 3"/>
-            <rect x="540" y="143" width="170" height="58" rx="6" fill="rgba(167,139,250,0.02)"/>
-            <text x="548" y="159" font-size="7" font-weight="600" fill="rgba(167,139,250,0.7)" font-family="JetBrains Mono,monospace" letter-spacing="0.08em">ROOM · parallel · async</text>
-            <!-- Room participant nodes -->
-            <circle cx="565" cy="178" r="7" fill="#080d15" stroke="rgba(245,158,11,0.5)" stroke-width="1.2"/>
-            <text x="565" y="196" text-anchor="middle" font-size="7" fill="#64748b" font-family="JetBrains Mono,monospace">Claude</text>
-            <circle cx="625" cy="178" r="7" fill="#080d15" stroke="rgba(34,211,238,0.5)" stroke-width="1.2"/>
-            <text x="625" y="196" text-anchor="middle" font-size="7" fill="#64748b" font-family="JetBrains Mono,monospace">Codex</text>
-            <circle cx="685" cy="178" r="7" fill="#080d15" stroke="rgba(52,211,153,0.5)" stroke-width="1.2"/>
-            <text x="685" y="196" text-anchor="middle" font-size="7" fill="#64748b" font-family="JetBrains Mono,monospace">Gemini</text>
-            <!-- Room internal connections -->
-            <line x1="572" y1="178" x2="618" y2="178" stroke="rgba(167,139,250,0.2)" stroke-width="1"/>
-            <line x1="632" y1="178" x2="678" y2="178" stroke="rgba(167,139,250,0.2)" stroke-width="1"/>
+            <!-- ═══ NODE: Room ═══ -->
+            <rect x="490" y="150" width="4" height="68" rx="2" fill="#a78bfa" opacity="0.7"/>
+            <rect x="494" y="150" width="272" height="68" rx="0 7 7 0" fill="#0d1a2e" stroke="rgba(167,139,250,0.18)" stroke-width="1" stroke-dasharray="6 3"/>
+            <text x="508" y="168" font-size="10" font-weight="700" fill="#f1f5f9" font-family="JetBrains Mono,monospace">Discussion Room</text>
+            <text x="752" y="165" text-anchor="end" font-size="8" fill="rgba(167,139,250,0.55)" font-family="JetBrains Mono,monospace">parallel · async</text>
+            <!-- 3 participant nodes -->
+            <circle cx="524" cy="190" r="8" fill="#04070e" stroke="rgba(245,158,11,0.55)" stroke-width="1.5"/>
+            <text x="524" y="210" text-anchor="middle" font-size="8" fill="#64748b" font-family="JetBrains Mono,monospace">Claude</text>
+            <circle cx="596" cy="190" r="8" fill="#04070e" stroke="rgba(34,211,238,0.55)" stroke-width="1.5"/>
+            <text x="596" y="210" text-anchor="middle" font-size="8" fill="#64748b" font-family="JetBrains Mono,monospace">Codex</text>
+            <circle cx="668" cy="190" r="8" fill="#04070e" stroke="rgba(52,211,153,0.55)" stroke-width="1.5"/>
+            <text x="668" y="210" text-anchor="middle" font-size="8" fill="#64748b" font-family="JetBrains Mono,monospace">Gemini</text>
+            <!-- Room internal lines -->
+            <line x1="532" y1="190" x2="588" y2="190" stroke="rgba(167,139,250,0.25)" stroke-width="1"/>
+            <line x1="604" y1="190" x2="660" y2="190" stroke="rgba(167,139,250,0.25)" stroke-width="1"/>
             <!-- Room internal packets -->
-            <circle r="2" fill="#a78bfa" opacity="0.8">
-              <animateMotion dur="1.8s" repeatCount="indefinite" begin="0s" path="M 572,178 H 618"/>
+            <circle r="2.5" fill="#a78bfa" filter="url(#pkt-glow)">
+              <animateMotion dur="1.6s" repeatCount="indefinite" begin="0s"   path="M 532,190 H 588"/>
             </circle>
-            <circle r="2" fill="#a78bfa" opacity="0.8">
-              <animateMotion dur="1.8s" repeatCount="indefinite" begin="0.9s" path="M 618,178 H 572"/>
+            <circle r="2.5" fill="#a78bfa" filter="url(#pkt-glow)">
+              <animateMotion dur="1.6s" repeatCount="indefinite" begin="0.8s" path="M 588,190 H 532"/>
             </circle>
-            <circle r="2" fill="#a78bfa" opacity="0.8">
-              <animateMotion dur="1.8s" repeatCount="indefinite" begin="0.3s" path="M 632,178 H 678"/>
+            <circle r="2.5" fill="#a78bfa" filter="url(#pkt-glow)">
+              <animateMotion dur="1.6s" repeatCount="indefinite" begin="0.4s" path="M 604,190 H 660"/>
             </circle>
-            <circle r="2" fill="#a78bfa" opacity="0.8">
-              <animateMotion dur="1.8s" repeatCount="indefinite" begin="1.2s" path="M 678,178 H 632"/>
+            <circle r="2.5" fill="#a78bfa" filter="url(#pkt-glow)">
+              <animateMotion dur="1.6s" repeatCount="indefinite" begin="1.2s" path="M 660,190 H 604"/>
             </circle>
           </svg>
         </div>
