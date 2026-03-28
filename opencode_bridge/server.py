@@ -646,6 +646,7 @@ def find_codex() -> Optional[Path]:
 
 OPENCODE_BIN = find_opencode()
 CODEX_BIN = find_codex()
+CLAUDE_BIN = shutil.which("claude")
 
 _STARTUP_WARNING_PREFIXES = (
     "WARNING: failed to clean up stale",
@@ -2682,6 +2683,31 @@ class RoomManager:
         ]
         return "\n".join(parts)
 
+    async def _run_claude_p(self, prompt: str, timeout: int = 300) -> str:
+        """Run `claude -p` with prompt via stdin and return the text response."""
+        global CLAUDE_BIN
+        if not CLAUDE_BIN:
+            CLAUDE_BIN = shutil.which("claude")
+        if not CLAUDE_BIN:
+            return "[error: claude binary not found]"
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                CLAUDE_BIN, "-p",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(prompt.encode()), timeout=timeout
+            )
+            if proc.returncode == 0 and stdout:
+                return stdout.decode(errors="replace").strip()
+            return f"[error: {stderr.decode(errors='replace').strip() or 'empty response'}]"
+        except asyncio.TimeoutError:
+            return f"[error: claude -p timed out after {timeout}s]"
+        except Exception as e:
+            return f"[error: {e}]"
+
     async def _participant_respond(self, room: DiscussionRoom, participant: dict) -> dict:
         """Get one participant's response to the current thread state."""
         name = participant["name"]
@@ -2690,7 +2716,9 @@ class RoomManager:
         prompt = self._build_thread_context(room, name)
 
         try:
-            if backend == "codex":
+            if backend == "claude":
+                reply = await self._run_claude_p(prompt)
+            elif backend == "codex":
                 if sid and sid in self.codex.sessions:
                     reply = await self.codex.send_message(prompt, sid)
                 else:
@@ -3234,7 +3262,7 @@ async def list_tools():
                     "topic": {"type": "string", "description": "The discussion topic or opening question"},
                     "participants": {
                         "type": "string",
-                        "description": 'JSON array of participants: [{"name":"...","backend":"opencode|codex","session_id":"...","model":"..."}]'
+                        "description": 'JSON array of participants: [{"name":"...","backend":"opencode|codex|claude","session_id":"...","model":"..."}]. Use backend="claude" to add Claude itself via claude -p.'
                     }
                 },
                 "required": ["room_id", "topic", "participants"]

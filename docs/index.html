@@ -110,6 +110,68 @@
           </div>
         </div>
 
+        <!-- Discussion Room Orbit -->
+        <div class="room-viz" aria-label="Discussion room with multiple AI participants">
+          <div class="room-header">
+            <span class="room-tag">discussion room</span>
+            <span class="room-tag-desc">all participants respond in parallel &middot; see full thread each round</span>
+          </div>
+          <div class="room-stage">
+            <!-- Claude connector line (left) -->
+            <div class="room-claude-connector">
+              <div class="room-claude-node">
+                <div class="rn-dot rn-claude"></div>
+                <div class="rn-label">Claude</div>
+                <div class="rn-sublabel">orchestrator</div>
+              </div>
+              <div class="room-connector-line">
+                <div class="room-connector-track"></div>
+                <div class="rpkt rpkt-ctrl rpkt-c1"></div>
+                <div class="rpkt rpkt-ctrl rpkt-c2"></div>
+              </div>
+            </div>
+            <!-- Room orbit -->
+            <div class="room-orbit-wrap">
+              <div class="room-orbit-ring"></div>
+              <!-- Participant nodes at 3 positions -->
+              <div class="room-participant rp-top">
+                <div class="rn-dot rn-gpt"></div>
+                <div class="rn-label">Codex</div>
+                <div class="rn-sublabel">gpt-5.4</div>
+              </div>
+              <div class="room-participant rp-bot-left">
+                <div class="rn-dot rn-gemini"></div>
+                <div class="rn-label">Gemini</div>
+                <div class="rn-sublabel">2.5-pro</div>
+              </div>
+              <div class="room-participant rp-bot-right">
+                <div class="rn-dot rn-claude"></div>
+                <div class="rn-label">Claude</div>
+                <div class="rn-sublabel">claude -p</div>
+              </div>
+              <!-- Cross-connect packets (SVG lines) -->
+              <svg class="room-lines" viewBox="0 0 200 180" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                <!-- top → bot-left -->
+                <line x1="100" y1="28" x2="44" y2="148" stroke="rgba(155,123,255,0.18)" stroke-width="1"/>
+                <!-- top → bot-right -->
+                <line x1="100" y1="28" x2="156" y2="148" stroke="rgba(155,123,255,0.18)" stroke-width="1"/>
+                <!-- bot-left → bot-right -->
+                <line x1="44" y1="148" x2="156" y2="148" stroke="rgba(155,123,255,0.18)" stroke-width="1"/>
+                <!-- Animated packets on each edge -->
+                <circle class="rl-pkt rl-p1" r="3" fill="#9b7bff" filter="url(#glow)"/>
+                <circle class="rl-pkt rl-p2" r="3" fill="#66d9ff" filter="url(#glow)"/>
+                <circle class="rl-pkt rl-p3" r="3" fill="#5ee38b" filter="url(#glow)"/>
+                <circle class="rl-pkt rl-p4" r="3" fill="#9b7bff" filter="url(#glow)"/>
+                <circle class="rl-pkt rl-p5" r="3" fill="#66d9ff" filter="url(#glow)"/>
+                <circle class="rl-pkt rl-p6" r="3" fill="#5ee38b" filter="url(#glow)"/>
+                <defs>
+                  <filter id="glow"><feGaussianBlur stdDeviation="2" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+                </defs>
+              </svg>
+            </div>
+          </div>
+        </div>
+
         <!-- Flow trace -->
         <div class="flow-trace" aria-label="Signal flow path">
           <span class="ft-node ft-claude">Claude&nbsp;Code</span>
