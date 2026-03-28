@@ -19,12 +19,14 @@ opencode-bridge-install
 
 - **Dual backend support**: OpenCode and Codex CLI
 - **Continuous sessions**: Conversation history persists across messages
+- **Session warmup**: `opencode_start` fires a background ping to capture the session ID — subsequent calls skip cold start
 - **Multiple models**: OpenCode (GPT-5.x, Claude, Gemini) + Codex (o3, o4-mini, gpt-4.1)
 - **Agent support**: plan, build, explore, general agents (OpenCode)
 - **Agentic execution**: Full-auto mode with sandboxed file operations (Codex)
 - **Variant control**: Set reasoning effort (minimal to max)
 - **File/image attachment**: Share code files and images for context
 - **Session continuity**: Conversations continue across tool calls
+- **Discussion rooms**: Async multi-agent roundtables — multiple AI participants post in parallel, see the full thread
 
 ## Installation
 
@@ -65,11 +67,12 @@ opencode-bridge-uninstall
 
 | Tool | Description |
 |------|-------------|
-| `opencode_start` | Start a new session |
+| `opencode_start` | Start a new session (auto-warms up, captures session ID) |
 | `opencode_discuss` | Send a message |
 | `opencode_plan` | Start planning discussion |
 | `opencode_brainstorm` | Open-ended brainstorming |
 | `opencode_review` | Review code |
+| `opencode_ping` | Check if model is reachable |
 | `opencode_models` | List available models |
 | `opencode_agents` | List available agents |
 | `opencode_model` | Change session model |
@@ -82,6 +85,39 @@ opencode-bridge-uninstall
 | `opencode_switch` | Switch to another session |
 | `opencode_end` | End current session |
 | `opencode_health` | Server health check |
+
+## Discussion Rooms
+
+Async multi-agent roundtable — multiple AI participants (any mix of OpenCode/Codex sessions and models) post in parallel each round, each seeing the full thread before responding.
+
+```python
+# Create a room with 3 participants
+room_create(
+    room_id="my-room",
+    topic="What's the best way to design a cache invalidation strategy?",
+    participants='[
+        {"name":"Codex-GPT54","backend":"codex","session_id":"existing-codex-session"},
+        {"name":"Gemini","backend":"opencode","session_id":"existing-gemini-session"},
+        {"name":"GPT54","backend":"opencode","model":"openai/gpt-5.4"}
+    ]'
+)
+
+# Run 2 rounds (all participants respond in parallel each round)
+room_run(room_id="my-room", rounds=2)
+
+# Add a participant mid-discussion
+room_add_participant(room_id="my-room", participant='{"name":"Claude","backend":"opencode","model":"anthropic/claude-opus-4"}')
+
+# Read the full transcript
+room_read(room_id="my-room")
+```
+
+| Tool | Description |
+|------|-------------|
+| `room_create` | Create a discussion room with named participants |
+| `room_add_participant` | Add a participant to an existing room |
+| `room_run` | Run N rounds — all participants respond in parallel |
+| `room_read` | Read the full transcript |
 
 ## Codex Tools
 

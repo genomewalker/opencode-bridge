@@ -28,6 +28,7 @@
         <a href="#flow">flow</a>
         <a href="#tools">tools</a>
         <a href="#orchestration">orchestration</a>
+        <a href="#rooms">rooms</a>
         <a href="docs.html">docs</a>
       </nav>
       <button class="nav-toggle" aria-label="Toggle menu" aria-expanded="false">
@@ -175,6 +176,14 @@
             <div class="spec-val">2K+ line files split, processed in parallel, synthesized</div>
           </div>
           <div class="spec-card">
+            <div class="spec-key">session warmup</div>
+            <div class="spec-val">opencode_start pre-initializes the session — all subsequent calls skip cold start</div>
+          </div>
+          <div class="spec-card">
+            <div class="spec-key">discussion rooms</div>
+            <div class="spec-val">async multi-agent roundtable &middot; all participants respond in parallel each round</div>
+          </div>
+          <div class="spec-card">
             <div class="spec-key">sessions</div>
             <div class="spec-val">start, switch, end, export conversation history</div>
           </div>
@@ -240,7 +249,7 @@
     <section id="tools" class="section">
       <div class="wrap">
         <div class="section-label">04</div>
-        <h2>MCP Tools <span class="tool-count">34</span></h2>
+        <h2>MCP Tools <span class="tool-count">39</span></h2>
 
         <div class="tool-group">
           <h3 class="tool-group-label">Core</h3>
@@ -269,7 +278,11 @@
           <div class="tool-grid">
             <div class="tool-card">
               <code class="tool-name">opencode_start</code>
-              <span class="tool-desc">start a new session</span>
+              <span class="tool-desc">start a new session (auto-warms up, captures session ID)</span>
+            </div>
+            <div class="tool-card">
+              <code class="tool-name">opencode_ping</code>
+              <span class="tool-desc">check if model is reachable</span>
             </div>
             <div class="tool-card">
               <code class="tool-name">opencode_end</code>
@@ -574,10 +587,79 @@
       </div>
     </section>
 
+    <!-- ===== DISCUSSION ROOMS ===== -->
+    <section id="rooms" class="section">
+      <div class="wrap">
+        <div class="section-label">08</div>
+        <h2>Discussion Rooms</h2>
+        <p class="section-desc">An async multi-agent roundtable — any mix of OpenCode and Codex sessions, any models. All participants respond in parallel each round, each seeing the full thread before posting.</p>
+
+        <div class="chunk-specs">
+          <div class="chunk-row">
+            <span class="chunk-key">room_create</span>
+            <span class="chunk-val">create a room with named participants &middot; reuse existing sessions or spin up new ones</span>
+          </div>
+          <div class="chunk-row">
+            <span class="chunk-key">room_add_participant</span>
+            <span class="chunk-val">add a new agent to an ongoing discussion</span>
+          </div>
+          <div class="chunk-row">
+            <span class="chunk-key">room_run</span>
+            <span class="chunk-val">run N rounds &middot; all agents respond concurrently &middot; full thread visible to each</span>
+          </div>
+          <div class="chunk-row">
+            <span class="chunk-key">room_read</span>
+            <span class="chunk-val">read full transcript at any time</span>
+          </div>
+        </div>
+
+        <div class="code-block" style="margin-top: 1.5rem;">
+          <div class="code-bar">
+            <span class="code-dot red"></span>
+            <span class="code-dot yellow"></span>
+            <span class="code-dot green"></span>
+            <span class="code-title">discussion room example</span>
+          </div>
+          <pre><code>room_create(
+  room_id="arch-review",
+  topic="Should we use event sourcing here?",
+  participants='[
+    {"name":"Codex","backend":"codex","session_id":"codex-1"},
+    {"name":"Gemini","backend":"opencode","session_id":"gemini-1"},
+    {"name":"GPT54","backend":"opencode","model":"openai/gpt-5.4"}
+  ]'
+)
+room_run(room_id="arch-review")   <span class="comment"># all 3 respond in parallel</span>
+room_read(room_id="arch-review")  <span class="comment"># full transcript</span></code></pre>
+        </div>
+
+        <div class="tool-group" style="margin-top: 1.5rem;">
+          <div class="tool-grid">
+            <div class="tool-card">
+              <code class="tool-name">room_create</code>
+              <span class="tool-desc">create a room with named participants</span>
+            </div>
+            <div class="tool-card">
+              <code class="tool-name">room_add_participant</code>
+              <span class="tool-desc">add agent to ongoing discussion</span>
+            </div>
+            <div class="tool-card">
+              <code class="tool-name">room_run</code>
+              <span class="tool-desc">run N parallel rounds</span>
+            </div>
+            <div class="tool-card">
+              <code class="tool-name">room_read</code>
+              <span class="tool-desc">read full transcript</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- ===== LINKS ===== -->
     <section id="links" class="section section-links">
       <div class="wrap">
-        <div class="section-label">08</div>
+        <div class="section-label">09</div>
         <h2>Links</h2>
         <div class="link-list">
           <a href="https://github.com/genomewalker/opencode-bridge" class="link-item">
