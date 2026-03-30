@@ -28,7 +28,7 @@ jobs:
         run: uv pip install --system -e ".[dev]"
 
       - name: Check import
-        run: python -c "from opencode_bridge.server import OpenCodeBridge; print('OK')"
+        run: python -c "from chitta_bridge.server import OpenCodeBridge; print('OK')"
 
   lint:
     runs-on: ubuntu-latest
@@ -47,4 +47,4 @@ jobs:
         run: uv pip install --system ruff
 
       - name: Lint
-        run: ruff check opencode_bridge/
+        run: ruff check chitta_bridge/

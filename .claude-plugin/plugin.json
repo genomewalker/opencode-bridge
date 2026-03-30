@@ -1,15 +1,15 @@
 {
   "name": "chitta-bridge",
   "version": "0.4.3",
-  "description": "Continuous discussion sessions with OpenCode (GPT-5, Claude, Gemini)",
+  "description": "Multi-agent discussion sessions with OpenCode, Codex, and local GPU models",
   "author": "Antonio Fernandez-Guerra",
-  "repository": "https://github.com/genomewalker/opencode-bridge",
+  "repository": "https://github.com/genomewalker/chitta-bridge",
   "license": "MIT",
-  "keywords": ["opencode", "gpt", "discussion", "code-review", "mcp"],
+  "keywords": ["chitta", "opencode", "codex", "local-llm", "discussion", "mcp"],
   "mcpServers": {
     "chitta-bridge": {
       "command": "chitta-bridge",
-      "description": "Continuous OpenCode discussion sessions"
+      "description": "Multi-agent discussion sessions — OpenCode, Codex, local GPU models"
     }
   },
   "skills": [
