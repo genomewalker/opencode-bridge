@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Docs — opencode-bridge</title>
-  <meta name="description" content="Full documentation for opencode-bridge MCP tools, auto-framing, chunked processing, and configuration." />
+  <title>Docs — chitta-bridge</title>
+  <meta name="description" content="Full documentation for chitta-bridge MCP tools, auto-framing, chunked processing, and configuration." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300;0,400;0,600;0,700;1,400&display=swap" rel="stylesheet" />
@@ -18,7 +18,7 @@
     <div class="wrap header-inner">
       <a href="index.html" class="brand">
         <span class="brand-icon" aria-hidden="true">&lt;/&gt;</span>
-        <span>opencode-bridge</span>
+        <span>chitta-bridge</span>
         <span class="brand-sep">/</span>
         <span class="brand-section">docs</span>
       </a>
@@ -36,7 +36,7 @@
       <button class="nav-toggle" aria-label="Toggle menu" aria-expanded="false">
         <span></span><span></span><span></span>
       </button>
-      <a href="https://github.com/genomewalker/opencode-bridge" class="nav-github" aria-label="GitHub repository">
+      <a href="https://github.com/genomewalker/chitta-bridge" class="nav-github" aria-label="GitHub repository">
         <svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
       </a>
     </div>
@@ -47,7 +47,7 @@
     <section class="docs-hero">
       <div class="wrap">
         <div class="hero-eyebrow">DOCUMENTATION</div>
-        <h1 class="docs-title">opencode-bridge <span class="version">v0.4.3</span></h1>
+        <h1 class="docs-title">chitta-bridge <span class="version">v0.4.3</span></h1>
         <p class="hero-subtitle">MCP server for multi-model consultation</p>
       </div>
     </section>
@@ -56,7 +56,7 @@
     <section id="overview" class="doc-section">
       <div class="wrap">
         <h2>Overview</h2>
-        <p>opencode-bridge is an <a href="https://modelcontextprotocol.io">MCP</a> server that gives Claude Code access to OpenCode's models (GPT-5, Gemini, and others) as a companion brain. It exposes 18 tools through the Model Context Protocol, enabling multi-model consultation, code review, planning, and brainstorming directly from Claude Code sessions.</p>
+        <p>chitta-bridge is an <a href="https://modelcontextprotocol.io">MCP</a> server that gives Claude Code access to OpenCode's models (GPT-5, Gemini, and others) as a companion brain. It exposes 18 tools through the Model Context Protocol, enabling multi-model consultation, code review, planning, and brainstorming directly from Claude Code sessions.</p>
 
         <div class="feature-box">
           <h3>Key Features</h3>
@@ -90,7 +90,7 @@
             <span class="code-dot red"></span><span class="code-dot yellow"></span><span class="code-dot green"></span>
             <span class="code-title">terminal</span>
           </div>
-          <pre><code><span class="prompt">$</span> pip install opencode-bridge</code></pre>
+          <pre><code><span class="prompt">$</span> pip install chitta-bridge</code></pre>
         </div>
 
         <h3>Add to your MCP config</h3>
@@ -102,8 +102,8 @@
           </div>
           <pre><code>{
   <span class="json-key">"mcpServers"</span>: {
-    <span class="json-key">"opencode-bridge"</span>: {
-      <span class="json-key">"command"</span>: <span class="json-val">"opencode-bridge"</span>
+    <span class="json-key">"chitta-bridge"</span>: {
+      <span class="json-key">"command"</span>: <span class="json-val">"chitta-bridge"</span>
     }
   }
 }</code></pre>
@@ -240,7 +240,7 @@ Use opencode_health to check the server status</code></pre>
               </table>
             </div>
             <div class="tool-notes">
-              <p>Sessions are persisted to <code>~/.opencode-bridge/sessions/</code> as JSON files. They survive server restarts.</p>
+              <p>Sessions are persisted to <code>~/.chitta-bridge/sessions/</code> as JSON files. They survive server restarts.</p>
             </div>
           </article>
 
@@ -407,7 +407,7 @@ Use opencode_health to check the server status</code></pre>
               <code class="tool-ref-name">opencode_configure</code>
               <span class="tool-tag tag-config">config</span>
             </div>
-            <p class="tool-summary">Set default model, agent, and/or variant. Persisted to <code>~/.opencode-bridge/config.json</code>.</p>
+            <p class="tool-summary">Set default model, agent, and/or variant. Persisted to <code>~/.chitta-bridge/config.json</code>.</p>
             <div class="params">
               <h4>Parameters</h4>
               <table class="param-table">
@@ -549,7 +549,7 @@ opencode_discuss(
         </div>
 
         <h3>Language detection</h3>
-        <p>opencode-bridge detects 50+ languages by file extension and includes language metadata in review prompts. Supported languages include:</p>
+        <p>chitta-bridge detects 50+ languages by file extension and includes language metadata in review prompts. Supported languages include:</p>
         <div class="lang-chips">
           <span class="chip chip-cool">Python</span>
           <span class="chip chip-cool">JavaScript</span>
@@ -582,7 +582,7 @@ opencode_discuss(
         <p>Sessions provide persistent conversation context with OpenCode. Each session tracks its model, agent, variant, and full message history.</p>
 
         <h3>Storage</h3>
-        <p>Sessions are saved as JSON files in <code>~/.opencode-bridge/sessions/</code>. They persist across server restarts.</p>
+        <p>Sessions are saved as JSON files in <code>~/.chitta-bridge/sessions/</code>. They persist across server restarts.</p>
 
         <h3>Lifecycle</h3>
         <ol class="step-list">
@@ -602,12 +602,12 @@ opencode_discuss(
     <section id="config" class="doc-section">
       <div class="wrap">
         <h2>Configuration</h2>
-        <p>Defaults are stored in <code>~/.opencode-bridge/config.json</code> and can be modified with <code>opencode_configure</code>.</p>
+        <p>Defaults are stored in <code>~/.chitta-bridge/config.json</code> and can be modified with <code>opencode_configure</code>.</p>
 
         <div class="code-block">
           <div class="code-bar">
             <span class="code-dot red"></span><span class="code-dot yellow"></span><span class="code-dot green"></span>
-            <span class="code-title">~/.opencode-bridge/config.json</span>
+            <span class="code-title">~/.chitta-bridge/config.json</span>
           </div>
           <pre><code>{
   <span class="json-key">"model"</span>: <span class="json-val">"openai/gpt-5.2-codex"</span>,
@@ -648,7 +648,7 @@ opencode_discuss(
 
   <footer class="site-footer">
     <div class="wrap footer-inner">
-      <span>opencode-bridge</span>
+      <span>chitta-bridge</span>
       <span class="footer-sep" aria-hidden="true">&middot;</span>
       <span>v0.4.3</span>
       <span class="footer-sep" aria-hidden="true">&middot;</span>

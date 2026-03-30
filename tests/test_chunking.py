@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from opencode_bridge.server import (
+from chitta_bridge.server import (
     CHUNK_OVERLAP,
     CHUNK_SIZE,
     CHUNK_THRESHOLD,

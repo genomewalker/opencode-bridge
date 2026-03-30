@@ -1,4 +1,4 @@
-# OpenCode Bridge
+# Chitta Bridge
 
 MCP server for continuous discussion sessions with OpenCode and Codex. Collaborate with GPT-5, Claude, Gemini, o3, and other models through Claude Code.
 
@@ -6,10 +6,10 @@ MCP server for continuous discussion sessions with OpenCode and Codex. Collabora
 
 ```bash
 # 1. Install
-uv pip install git+https://github.com/genomewalker/opencode-bridge.git
+uv pip install git+https://github.com/genomewalker/chitta-bridge.git
 
 # 2. Register with Claude Code
-opencode-bridge-install
+chitta-bridge-install
 
 # 3. Use in Claude Code
 # The tools are now available - Claude will use them automatically
@@ -33,20 +33,20 @@ opencode-bridge-install
 ### With uv (recommended)
 
 ```bash
-uv pip install git+https://github.com/genomewalker/opencode-bridge.git
+uv pip install git+https://github.com/genomewalker/chitta-bridge.git
 ```
 
 ### With pip
 
 ```bash
-pip install git+https://github.com/genomewalker/opencode-bridge.git
+pip install git+https://github.com/genomewalker/chitta-bridge.git
 ```
 
 ### From source
 
 ```bash
-git clone https://github.com/genomewalker/opencode-bridge.git
-cd opencode-bridge
+git clone https://github.com/genomewalker/chitta-bridge.git
+cd chitta-bridge
 pip install -e .
 ```
 
@@ -54,13 +54,13 @@ pip install -e .
 
 ```bash
 # Install (registers MCP server)
-opencode-bridge-install
+chitta-bridge-install
 
 # Verify
 claude mcp list
 
 # Uninstall
-opencode-bridge-uninstall
+chitta-bridge-uninstall
 ```
 
 ## OpenCode Tools
@@ -159,7 +159,7 @@ local_start(session_id="llm2", model="qwen3:30b-a3b", endpoint="http://gpunode01
 
 1. `/tmp/ollama-server-*.url` cache files (written by `slurm-serve-ollama.sh`)
 2. Your running Slurm GPU jobs (`squeue --me`)
-3. `OPENCODE_BRIDGE_GPU_NODES=node1,node2` environment variable
+3. `CHITTA_BRIDGE_GPU_NODES=node1,node2` environment variable
 4. `localhost:11434` fallback
 
 | Tool | Description |
@@ -228,7 +228,7 @@ export CODEX_SANDBOX="workspace-write"
 
 ### Config file
 
-`~/.opencode-bridge/config.json`:
+`~/.chitta-bridge/config.json`:
 ```json
 {
   "model": "openai/gpt-5.2-codex",

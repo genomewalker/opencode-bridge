@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "opencode-bridge"
+name = "chitta-bridge"
 version = "0.6.4"
 description = "MCP server for continuous OpenCode and Codex discussion sessions"
 readme = "README.md"
@@ -12,7 +12,7 @@ requires-python = ">=3.10"
 authors = [
     {name = "Antonio Fernandez-Guerra"}
 ]
-keywords = ["opencode", "codex", "mcp", "claude", "gpt", "code-review", "discussion", "agents"]
+keywords = ["chitta", "codex", "mcp", "claude", "gpt", "code-review", "discussion", "agents"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
@@ -34,13 +34,13 @@ dev = [
 ]
 
 [project.urls]
-Repository = "https://github.com/genomewalker/opencode-bridge"
+Repository = "https://github.com/genomewalker/chitta-bridge"
 
 [project.scripts]
-opencode-bridge = "opencode_bridge.server:main"
-opencode-bridge-install = "opencode_bridge.install:install"
-opencode-bridge-uninstall = "opencode_bridge.install:uninstall"
+chitta-bridge = "chitta_bridge.server:main"
+chitta-bridge-install = "chitta_bridge.install:install"
+chitta-bridge-uninstall = "chitta_bridge.install:uninstall"
 
 [tool.hatch.build.targets.wheel]
-packages = ["opencode_bridge"]
+packages = ["chitta_bridge"]
 

@@ -14,7 +14,7 @@ Configuration:
 - OPENCODE_MODEL: Default model for OpenCode
 - OPENCODE_AGENT: Default agent (plan, build, explore, general)
 - CODEX_MODEL: Default model for Codex (e.g., o3, gpt-4.1)
-- ~/.opencode-bridge/config.json: Persistent config
+- ~/.chitta-bridge/config.json: Persistent config
 """
 
 import os
@@ -36,7 +36,7 @@ from mcp.server import Server, InitializationOptions
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent, ServerCapabilities, ToolsCapability
 
-from opencode_bridge import __version__
+from chitta_bridge import __version__
 
 
 _SAFE_ID_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")
@@ -576,7 +576,7 @@ class Config:
         config = cls()
 
         # Load from config file
-        config_path = Path.home() / ".opencode-bridge" / "config.json"
+        config_path = Path.home() / ".chitta-bridge" / "config.json"
         if config_path.exists():
             try:
                 data = json.loads(config_path.read_text())
@@ -598,7 +598,7 @@ class Config:
         return config
 
     def save(self):
-        config_dir = Path.home() / ".opencode-bridge"
+        config_dir = Path.home() / ".chitta-bridge"
         config_dir.mkdir(parents=True, exist_ok=True)
         config_path = config_dir / "config.json"
         data = {
@@ -846,7 +846,7 @@ class OpenCodeBridge:
         self.config = Config.load()
         self.sessions: dict[str, Session] = {}
         self.active_session: Optional[str] = None
-        self.sessions_dir = Path.home() / ".opencode-bridge" / "sessions"
+        self.sessions_dir = Path.home() / ".chitta-bridge" / "sessions"
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self.available_models: list[str] = []
         self.available_agents: list[str] = []
@@ -1236,7 +1236,7 @@ class OpenCodeBridge:
   Variant: {self.config.variant}
 
 Set via:
-  - ~/.opencode-bridge/config.json
+  - ~/.chitta-bridge/config.json
   - OPENCODE_MODEL, OPENCODE_AGENT, OPENCODE_VARIANT env vars
   - opencode_configure tool"""
 
@@ -1737,7 +1737,7 @@ class CodexBridge:
         self.config = Config.load()
         self.sessions: dict[str, CodexSession] = {}
         self.active_session: Optional[str] = None
-        self.sessions_dir = Path.home() / ".opencode-bridge" / "codex-sessions"
+        self.sessions_dir = Path.home() / ".chitta-bridge" / "codex-sessions"
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self._load_sessions()
 
@@ -1869,7 +1869,7 @@ class CodexBridge:
   Sandbox: {self.config.codex_sandbox}
 
 Set via:
-  - ~/.opencode-bridge/config.json
+  - ~/.chitta-bridge/config.json
   - CODEX_MODEL, CODEX_SANDBOX env vars
   - codex_configure tool"""
 
@@ -2343,8 +2343,8 @@ class GpuNodeDiscovery:
     """Discover GPU nodes reachable via Slurm or direct hostname and probe for Ollama/vLLM."""
 
     # Well-known node hostnames to probe (can be extended via environment variable
-    # OPENCODE_BRIDGE_GPU_NODES=node1,node2,...)
-    _ENV_NODES_VAR = "OPENCODE_BRIDGE_GPU_NODES"
+    # CHITTA_BRIDGE_GPU_NODES=node1,node2,...)
+    _ENV_NODES_VAR = "CHITTA_BRIDGE_GPU_NODES"
 
     @staticmethod
     def _probe_ollama(base_url: str, timeout: int = 4) -> Optional[list[str]]:
@@ -2397,7 +2397,7 @@ class GpuNodeDiscovery:
 
     @classmethod
     def _env_nodes(cls) -> list[str]:
-        """Return nodes from the OPENCODE_BRIDGE_GPU_NODES env variable."""
+        """Return nodes from the CHITTA_BRIDGE_GPU_NODES env variable."""
         val = os.environ.get(cls._ENV_NODES_VAR, "")
         return [n.strip() for n in val.split(",") if n.strip()]
 
@@ -3122,7 +3122,7 @@ codex_bridge = CodexBridge()
 local_bridge = LocalModelBridge()
 orchestrator = Orchestrator(bridge, codex_bridge)
 rooms = RoomManager(bridge, codex_bridge, local_bridge)
-server = Server("opencode-bridge")
+server = Server("chitta-bridge")
 
 
 @server.list_tools()
@@ -3695,7 +3695,7 @@ async def list_tools():
             name="local_discover",
             description="Discover GPU nodes with running Ollama/vLLM servers. "
                         "Checks /tmp/ollama-server-*.url cache files (written by slurm-serve-ollama.sh), "
-                        "your own running Slurm GPU jobs, nodes in OPENCODE_BRIDGE_GPU_NODES env var, "
+                        "your own running Slurm GPU jobs, nodes in CHITTA_BRIDGE_GPU_NODES env var, "
                         "and localhost. Returns available endpoints and their loaded models.",
             inputSchema={"type": "object", "properties": {}}
         ),
@@ -4061,7 +4061,7 @@ async def call_tool(name: str, arguments: dict):
             if not nodes:
                 result = "No local model endpoints found.\n\nTo make a GPU node discoverable:\n" \
                          "  1. Run slurm-serve-ollama.sh <model> to start Ollama on a Slurm GPU node\n" \
-                         "  2. Or set OPENCODE_BRIDGE_GPU_NODES=node1,node2 env var\n" \
+                         "  2. Or set CHITTA_BRIDGE_GPU_NODES=node1,node2 env var\n" \
                          "  3. Or run Ollama locally (localhost:11434)"
             else:
                 lines = ["Available local model endpoints:\n"]
@@ -4178,7 +4178,7 @@ def main():
 
     async def run():
         init_options = InitializationOptions(
-            server_name="opencode-bridge",
+            server_name="chitta-bridge",
             server_version=__version__,
             capabilities=ServerCapabilities(tools=ToolsCapability()),
             instructions=(
