@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#06090c" />
-  <title>opencode-bridge — MCP server linking Claude Code to OpenCode &amp; Codex</title>
+  <title>chitta-bridge — MCP server linking Claude Code to OpenCode &amp; Codex</title>
   <meta name="description" content="MCP server that connects Claude Code to OpenCode and Codex for multi-model consultation. GPT-5, o3, Gemini, and more as companion brains." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -20,7 +20,7 @@
     <div class="wrap header-inner">
       <a href="#" class="brand">
         <span class="brand-icon" aria-hidden="true">&lt;/&gt;</span>
-        <span>opencode-bridge</span>
+        <span>chitta-bridge</span>
       </a>
       <nav class="nav" aria-label="Primary">
         <a href="#install">install</a>
@@ -35,7 +35,7 @@
       <button class="nav-toggle" aria-label="Toggle menu" aria-expanded="false">
         <span></span><span></span><span></span>
       </button>
-      <a href="https://github.com/genomewalker/opencode-bridge" class="nav-github" aria-label="GitHub repository">
+      <a href="https://github.com/genomewalker/chitta-bridge" class="nav-github" aria-label="GitHub repository">
         <svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
       </a>
     </div>
@@ -46,19 +46,19 @@
     <section class="hero" aria-labelledby="hero-title">
       <div class="wrap">
         <div class="hero-eyebrow">MCP SERVER</div>
-        <h1 id="hero-title" class="hero-title">opencode-bridge</h1>
+        <h1 id="hero-title" class="hero-title">chitta-bridge</h1>
         <p class="hero-subtitle">linking Claude Code to OpenCode &amp; Codex</p>
         <p class="hero-micro">multi-model consultation &middot; agentic execution &middot; local GPU models &middot; discussion rooms</p>
 
         <div class="hero-install">
-          <code>pip install opencode-bridge</code>
-          <button class="copy-btn" aria-label="Copy install command" data-copy="pip install opencode-bridge">
+          <code>pip install chitta-bridge</code>
+          <button class="copy-btn" aria-label="Copy install command" data-copy="pip install chitta-bridge">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
           </button>
         </div>
 
         <!-- TOPOLOGY ANIMATION -->
-        <div class="topology" aria-label="opencode-bridge topology">
+        <div class="topology" aria-label="chitta-bridge topology">
           <svg class="topo-svg" viewBox="0 0 780 290" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
             <defs>
               <filter id="pkt-glow" x="-100%" y="-100%" width="300%" height="300%">
@@ -184,12 +184,12 @@
             <span class="code-dot green"></span>
             <span class="code-title">claude-code</span>
           </div>
-          <pre><code><span class="prompt">$</span> pip install opencode-bridge</code></pre>
+          <pre><code><span class="prompt">$</span> pip install chitta-bridge</code></pre>
         </div>
         <p class="section-note">requires: Python 3.10+ &middot; Claude Code &middot; OpenCode CLI and/or Codex CLI</p>
         <p class="section-note" style="margin-top:8px">then add to your MCP config:</p>
         <div class="code-block" style="margin-top:8px">
-          <pre><code><span class="prompt">{</span> "opencode-bridge": { "command": "opencode-bridge" } <span class="prompt">}</span></code></pre>
+          <pre><code><span class="prompt">{</span> "chitta-bridge": { "command": "chitta-bridge" } <span class="prompt">}</span></code></pre>
         </div>
       </div>
     </section>
@@ -268,7 +268,7 @@
           </div>
           <div class="flow-step">
             <div class="flow-num">2</div>
-            <div class="flow-box fb-bridge">opencode-bridge auto-detects domain</div>
+            <div class="flow-box fb-bridge">chitta-bridge auto-detects domain</div>
           </div>
           <div class="flow-connector" aria-hidden="true">
             <div class="fc-line"></div>
@@ -493,7 +493,7 @@
       <div class="wrap">
         <div class="section-label">05</div>
         <h2>Auto-Framing</h2>
-        <p class="section-desc">When Claude sends a message, opencode-bridge detects the domain and frames OpenCode as a specialized expert.</p>
+        <p class="section-desc">When Claude sends a message, chitta-bridge detects the domain and frames OpenCode as a specialized expert.</p>
         <div class="domain-chips">
           <span class="chip chip-hot">architecture</span>
           <span class="chip chip-hot">debugging</span>
@@ -809,15 +809,15 @@ local_start(session_id="gpu2", model="qwen2.5:32b",
         <div class="section-label">10</div>
         <h2>Links</h2>
         <div class="link-list">
-          <a href="https://github.com/genomewalker/opencode-bridge" class="link-item">
+          <a href="https://github.com/genomewalker/chitta-bridge" class="link-item">
             <span class="link-key">repo</span>
-            <span class="link-val">github.com/genomewalker/opencode-bridge</span>
+            <span class="link-val">github.com/genomewalker/chitta-bridge</span>
           </a>
-          <a href="https://github.com/genomewalker/opencode-bridge/issues" class="link-item">
+          <a href="https://github.com/genomewalker/chitta-bridge/issues" class="link-item">
             <span class="link-key">issues</span>
-            <span class="link-val">github.com/genomewalker/opencode-bridge/issues</span>
+            <span class="link-val">github.com/genomewalker/chitta-bridge/issues</span>
           </a>
-          <a href="https://github.com/genomewalker/opencode-bridge/blob/main/LICENSE" class="link-item">
+          <a href="https://github.com/genomewalker/chitta-bridge/blob/main/LICENSE" class="link-item">
             <span class="link-key">license</span>
             <span class="link-val">MIT</span>
           </a>
@@ -828,7 +828,7 @@ local_start(session_id="gpu2", model="qwen2.5:32b",
 
   <footer class="site-footer">
     <div class="wrap footer-inner">
-      <span>opencode-bridge</span>
+      <span>chitta-bridge</span>
       <span class="footer-sep" aria-hidden="true">&middot;</span>
       <span>MCP server</span>
       <span class="footer-sep" aria-hidden="true">&middot;</span>

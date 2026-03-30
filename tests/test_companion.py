@@ -1,6 +1,6 @@
 """Tests for the auto-framing companion prompt system."""
 
-from opencode_bridge.server import build_companion_prompt
+from chitta_bridge.server import build_companion_prompt
 
 
 # ---------------------------------------------------------------------------

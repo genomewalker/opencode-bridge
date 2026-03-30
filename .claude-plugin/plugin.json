@@ -1,5 +1,5 @@
 {
-  "name": "opencode-bridge",
+  "name": "chitta-bridge",
   "version": "0.4.3",
   "description": "Continuous discussion sessions with OpenCode (GPT-5, Claude, Gemini)",
   "author": "Antonio Fernandez-Guerra",
@@ -7,8 +7,8 @@
   "license": "MIT",
   "keywords": ["opencode", "gpt", "discussion", "code-review", "mcp"],
   "mcpServers": {
-    "opencode-bridge": {
-      "command": "opencode-bridge",
+    "chitta-bridge": {
+      "command": "chitta-bridge",
       "description": "Continuous OpenCode discussion sessions"
     }
   },

@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
-"""Install/uninstall opencode-bridge MCP server with Claude Code."""
+"""Install/uninstall chitta-bridge MCP server with Claude Code."""
 
 import subprocess
 import sys
 
 
 def install():
-    """Register opencode-bridge as an MCP server with Claude Code."""
+    """Register chitta-bridge as an MCP server with Claude Code."""
     try:
         result = subprocess.run(
             ["claude", "mcp", "add", "--transport", "stdio", "--scope", "user",
-             "opencode-bridge", "--", "opencode-bridge"],
+             "chitta-bridge", "--", "chitta-bridge"],
             capture_output=True,
             text=True
         )
         if result.returncode == 0:
-            print("opencode-bridge registered with Claude Code")
+            print("chitta-bridge registered with Claude Code")
             print(result.stdout)
         else:
             if "already exists" in result.stderr.lower():
-                print("opencode-bridge already registered")
+                print("chitta-bridge already registered")
             else:
                 print(f"Failed to register: {result.stderr}")
                 sys.exit(1)
@@ -29,19 +29,19 @@ def install():
 
 
 def uninstall():
-    """Remove opencode-bridge MCP server from Claude Code."""
+    """Remove chitta-bridge MCP server from Claude Code."""
     try:
         result = subprocess.run(
-            ["claude", "mcp", "remove", "opencode-bridge"],
+            ["claude", "mcp", "remove", "chitta-bridge"],
             capture_output=True,
             text=True
         )
         if result.returncode == 0:
-            print("opencode-bridge removed from Claude Code")
+            print("chitta-bridge removed from Claude Code")
             print(result.stdout)
         else:
             if "not found" in result.stderr.lower():
-                print("opencode-bridge not registered")
+                print("chitta-bridge not registered")
             else:
                 print(f"Failed to remove: {result.stderr}")
                 sys.exit(1)
