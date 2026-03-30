@@ -91,14 +91,14 @@ opencode-bridge-uninstall
 Async multi-agent roundtable — multiple AI participants (any mix of OpenCode/Codex sessions and models) post in parallel each round, each seeing the full thread before responding.
 
 ```python
-# Create a room with 3 participants
+# Create a room with 3 participants (including a local GPU model)
 room_create(
     room_id="my-room",
     topic="What's the best way to design a cache invalidation strategy?",
     participants='[
         {"name":"Codex-GPT54","backend":"codex","session_id":"existing-codex-session"},
         {"name":"Gemini","backend":"opencode","session_id":"existing-gemini-session"},
-        {"name":"GPT54","backend":"opencode","model":"openai/gpt-5.4"}
+        {"name":"Llama","backend":"local","model":"llama3.3:70b","base_url":"http://gpunode01:11434/v1"}
     ]'
 )
 
@@ -106,7 +106,7 @@ room_create(
 room_run(room_id="my-room", rounds=2)
 
 # Add a participant mid-discussion
-room_add_participant(room_id="my-room", participant='{"name":"Claude","backend":"opencode","model":"anthropic/claude-opus-4"}')
+room_add_participant(room_id="my-room", participant='{"name":"Claude","backend":"claude"}')
 
 # Read the full transcript
 room_read(room_id="my-room")
@@ -118,6 +118,46 @@ room_read(room_id="my-room")
 | `room_add_participant` | Add a participant to an existing room |
 | `room_run` | Run N rounds — all participants respond in parallel |
 | `room_read` | Read the full transcript |
+
+## Local Models (GPU Nodes)
+
+Chat with local LLMs (Ollama / vLLM) running on GPU nodes — via Slurm auto-discovery or direct hostname.
+
+```bash
+# 1. Start Ollama on a Slurm GPU node (writes URL to /tmp/ollama-server-<model>.url)
+slurm-serve-ollama.sh llama3.3:70b
+
+# 2. Discover available nodes and models
+local_discover()
+
+# 3. Start a session (auto-discovers endpoint if omitted)
+local_start(session_id="llm1", model="llama3.3:70b")
+
+# 4. Chat
+local_discuss(message="Explain cache invalidation strategies")
+
+# Or specify node explicitly
+local_start(session_id="llm2", model="qwen3:30b-a3b", endpoint="http://gpunode01:11434/v1")
+```
+
+### Discovery order
+
+1. `/tmp/ollama-server-*.url` cache files (written by `slurm-serve-ollama.sh`)
+2. Your running Slurm GPU jobs (`squeue --me`)
+3. `OPENCODE_BRIDGE_GPU_NODES=node1,node2` environment variable
+4. `localhost:11434` fallback
+
+| Tool | Description |
+|------|-------------|
+| `local_discover` | Find GPU nodes with Ollama/vLLM running |
+| `local_start` | Start a session (auto-discovers endpoint) |
+| `local_discuss` | Chat with the local model |
+| `local_models` | List models available at an endpoint |
+| `local_sessions` | List active local sessions |
+| `local_switch` | Switch active session |
+| `local_end` | End a session |
+| `local_history` | Show conversation history |
+| `local_health` | Health check |
 
 ## Codex Tools
 

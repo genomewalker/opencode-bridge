@@ -24,6 +24,9 @@ import json
 import asyncio
 import shutil
 import tempfile
+import glob as _glob
+import urllib.request
+import urllib.error
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -2325,6 +2328,270 @@ Set via:
         }
 
 
+# ---------------------------------------------------------------------------
+# GPU Node Auto-Discovery
+# ---------------------------------------------------------------------------
+
+# Default port for Ollama / vLLM (OpenAI-compatible)
+_LOCAL_LLM_PORT = 11434
+
+# URL cache files written by slurm-serve-ollama.sh
+_OLLAMA_URL_GLOB = "/tmp/ollama-server-*.url"
+
+
+class GpuNodeDiscovery:
+    """Discover GPU nodes reachable via Slurm or direct hostname and probe for Ollama/vLLM."""
+
+    # Well-known node hostnames to probe (can be extended via environment variable
+    # OPENCODE_BRIDGE_GPU_NODES=node1,node2,...)
+    _ENV_NODES_VAR = "OPENCODE_BRIDGE_GPU_NODES"
+
+    @staticmethod
+    def _probe_ollama(base_url: str, timeout: int = 4) -> Optional[list[str]]:
+        """Return list of available model names at base_url, or None if unreachable."""
+        # base_url ends with /v1; Ollama's tag endpoint is at the parent /api/tags
+        tags_url = base_url.rstrip("/v1").rstrip("/") + "/api/tags"
+        try:
+            req = urllib.request.urlopen(tags_url, timeout=timeout)
+            data = json.loads(req.read().decode())
+            return [m.get("name", "") for m in data.get("models", [])]
+        except Exception:
+            return None
+
+    @classmethod
+    def _cached_urls(cls) -> list[tuple[str, str]]:
+        """Return list of (model_hint, base_url) from /tmp/ollama-server-*.url files."""
+        results = []
+        for path in _glob.glob(_OLLAMA_URL_GLOB):
+            try:
+                url = Path(path).read_text().strip()
+                if url:
+                    # Extract model hint from filename: /tmp/ollama-server-<model>.url
+                    hint = Path(path).stem.removeprefix("ollama-server-")
+                    results.append((hint, url))
+            except OSError:
+                pass
+        return results
+
+    @classmethod
+    def _slurm_gpu_nodes(cls) -> list[str]:
+        """Return hostnames of running Slurm jobs that allocated GPU resources."""
+        if not shutil.which("squeue"):
+            return []
+        try:
+            import subprocess
+            out = subprocess.check_output(
+                ["squeue", "--format=%T %N %b", "--noheader", "--me"],
+                timeout=8,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            nodes = []
+            for line in out.strip().splitlines():
+                parts = line.split()
+                if len(parts) >= 3 and parts[0] == "RUNNING" and "gpu" in parts[2].lower():
+                    nodes.append(parts[1])
+            return nodes
+        except Exception:
+            return []
+
+    @classmethod
+    def _env_nodes(cls) -> list[str]:
+        """Return nodes from the OPENCODE_BRIDGE_GPU_NODES env variable."""
+        val = os.environ.get(cls._ENV_NODES_VAR, "")
+        return [n.strip() for n in val.split(",") if n.strip()]
+
+    @classmethod
+    def discover(cls) -> list[dict]:
+        """
+        Return a list of reachable LLM endpoints:
+          [{"base_url": "http://node:11434/v1", "node": "nodename", "models": [...], "source": "..."}]
+        """
+        seen: dict[str, dict] = {}  # base_url -> entry
+
+        # 1. Cached URL files (highest priority — already health-checked at launch time)
+        for hint, base_url in cls._cached_urls():
+            models = cls._probe_ollama(base_url)
+            if models is not None:
+                node = base_url.split("//")[-1].split(":")[0]
+                seen[base_url] = {"base_url": base_url, "node": node, "models": models, "source": "cached"}
+
+        # 2. Slurm running GPU jobs (my own jobs that allocated a GPU)
+        for node in cls._slurm_gpu_nodes():
+            base_url = f"http://{node}:{_LOCAL_LLM_PORT}/v1"
+            if base_url not in seen:
+                models = cls._probe_ollama(base_url)
+                if models is not None:
+                    seen[base_url] = {"base_url": base_url, "node": node, "models": models, "source": "slurm"}
+
+        # 3. Env-configured nodes
+        for node in cls._env_nodes():
+            base_url = f"http://{node}:{_LOCAL_LLM_PORT}/v1"
+            if base_url not in seen:
+                models = cls._probe_ollama(base_url)
+                if models is not None:
+                    seen[base_url] = {"base_url": base_url, "node": node, "models": models, "source": "env"}
+
+        # 4. Localhost fallback
+        local_url = f"http://localhost:{_LOCAL_LLM_PORT}/v1"
+        if local_url not in seen:
+            models = cls._probe_ollama(local_url)
+            if models is not None:
+                seen[local_url] = {"base_url": local_url, "node": "localhost", "models": models, "source": "local"}
+
+        return list(seen.values())
+
+
+# ---------------------------------------------------------------------------
+# Local Model Bridge (OpenAI-compatible: Ollama / vLLM)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class LocalSession:
+    id: str
+    endpoint: str          # e.g. http://node:11434/v1
+    model: str
+    messages: list = field(default_factory=list)
+    created: str = field(default_factory=lambda: datetime.now().isoformat())
+    attached_claude_sessions: list = field(default_factory=list)
+
+
+class LocalModelBridge:
+    """Chat with local LLMs (Ollama/vLLM) running on GPU nodes via OpenAI-compatible API."""
+
+    def __init__(self):
+        self.sessions: dict[str, LocalSession] = {}
+        self._active_id: Optional[str] = None
+        self._start_time = datetime.now()
+
+    # ------------------------------------------------------------------
+    # Session management
+    # ------------------------------------------------------------------
+
+    def start_session(self, session_id: str, model: str, endpoint: str) -> str:
+        _sanitize_session_id(session_id)
+        if session_id in self.sessions:
+            return f"Session '{session_id}' already exists."
+        s = LocalSession(id=session_id, endpoint=endpoint.rstrip("/"), model=model)
+        self.sessions[session_id] = s
+        self._active_id = session_id
+        return f"Started local session '{session_id}' → {endpoint} model={model}"
+
+    def _active(self) -> Optional[LocalSession]:
+        if self._active_id and self._active_id in self.sessions:
+            return self.sessions[self._active_id]
+        return None
+
+    def set_active(self, session_id: str) -> str:
+        if session_id not in self.sessions:
+            return f"Session '{session_id}' not found."
+        self._active_id = session_id
+        s = self.sessions[session_id]
+        return f"Switched to local session '{session_id}' ({s.model} @ {s.endpoint})"
+
+    def end_session(self, session_id: Optional[str] = None) -> str:
+        sid = session_id or self._active_id
+        if not sid or sid not in self.sessions:
+            return "No session to end."
+        del self.sessions[sid]
+        if self._active_id == sid:
+            self._active_id = next(iter(self.sessions), None)
+        return f"Ended local session '{sid}'."
+
+    def list_sessions(self) -> str:
+        if not self.sessions:
+            return "No local model sessions."
+        lines = []
+        for sid, s in self.sessions.items():
+            marker = " [active]" if sid == self._active_id else ""
+            lines.append(f"  {sid}{marker} — {s.model} @ {s.endpoint} ({len(s.messages)} messages)")
+        return "\n".join(lines)
+
+    def get_history(self, session_id: Optional[str] = None, last_n: int = 20) -> str:
+        sid = session_id or self._active_id
+        if not sid or sid not in self.sessions:
+            return "No session found."
+        s = self.sessions[sid]
+        msgs = s.messages[-last_n:]
+        if not msgs:
+            return "No messages yet."
+        return "\n".join(f"[{m['role']}]: {m['content'][:300]}" for m in msgs)
+
+    def get_config(self) -> str:
+        s = self._active()
+        if not s:
+            return "No active local session."
+        return f"Session: {s.id}\nEndpoint: {s.endpoint}\nModel: {s.model}\nMessages: {len(s.messages)}"
+
+    def health_check(self) -> dict:
+        uptime = int((datetime.now() - self._start_time).total_seconds())
+        return {"status": "ok", "sessions": len(self.sessions), "uptime": uptime}
+
+    # ------------------------------------------------------------------
+    # Messaging
+    # ------------------------------------------------------------------
+
+    async def send_message(
+        self,
+        message: str,
+        session_id: Optional[str] = None,
+        system_prompt: Optional[str] = None,
+    ) -> str:
+        sid = session_id or self._active_id
+        if not sid or sid not in self.sessions:
+            return "Error: no active local session."
+        s = self.sessions[sid]
+        s.messages.append({"role": "user", "content": message})
+
+        payload: dict = {
+            "model": s.model,
+            "messages": s.messages.copy(),
+            "stream": False,
+        }
+        if system_prompt:
+            payload["messages"] = [{"role": "system", "content": system_prompt}] + payload["messages"]
+
+        try:
+            reply = await asyncio.get_event_loop().run_in_executor(
+                None, self._post_completion, s.endpoint, payload
+            )
+        except Exception as e:
+            s.messages.pop()  # roll back user message on error
+            return f"Error calling local model: {e}"
+
+        s.messages.append({"role": "assistant", "content": reply})
+        return reply
+
+    @staticmethod
+    def _post_completion(endpoint: str, payload: dict, timeout: int = 300) -> str:
+        url = f"{endpoint}/chat/completions"
+        data = json.dumps(payload).encode()
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/json", "Authorization": "Bearer local"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            result = json.loads(resp.read().decode())
+        return result["choices"][0]["message"]["content"]
+
+    # ------------------------------------------------------------------
+    # Model listing
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def list_models_at(endpoint: str, timeout: int = 8) -> list[str]:
+        tags_url = endpoint.rstrip("/v1").rstrip("/") + "/api/tags"
+        try:
+            req = urllib.request.urlopen(tags_url, timeout=timeout)
+            data = json.loads(req.read().decode())
+            return [m.get("name", "") for m in data.get("models", [])]
+        except Exception:
+            return []
+
+
 class Orchestrator:
     """Multi-agent orchestration for complex workflows."""
 
@@ -2629,9 +2896,10 @@ class DiscussionRoom:
 class RoomManager:
     """Manage discussion rooms and run async multi-agent conversations."""
 
-    def __init__(self, opencode_bridge: "OpenCodeBridge", codex_bridge: "CodexBridge"):
+    def __init__(self, opencode_bridge: "OpenCodeBridge", codex_bridge: "CodexBridge", local_bridge: "LocalModelBridge"):
         self.opencode = opencode_bridge
         self.codex = codex_bridge
+        self.local = local_bridge
         self.rooms: dict[str, DiscussionRoom] = {}
 
     def create(self, room_id: str, topic: str, participants: list[dict]) -> str:
@@ -2718,6 +2986,28 @@ class RoomManager:
         try:
             if backend == "claude":
                 reply = await self._run_claude_p(prompt)
+            elif backend == "local":
+                # Local model via OpenAI-compatible API (Ollama/vLLM on GPU node)
+                base_url = participant.get("base_url") or participant.get("endpoint")
+                model = participant.get("model", "")
+                if not base_url:
+                    # Auto-discover if no endpoint specified
+                    nodes = await asyncio.get_event_loop().run_in_executor(None, GpuNodeDiscovery.discover)
+                    if not nodes:
+                        reply = "[error: no local model endpoint found; specify base_url or run local_discover]"
+                    else:
+                        node = nodes[0]
+                        base_url = node["base_url"]
+                        if not model and node["models"]:
+                            model = node["models"][0]
+                if base_url:
+                    if sid and sid in self.local.sessions:
+                        reply = await self.local.send_message(prompt, sid)
+                    else:
+                        tmp = f"room-{room.id}-{name.lower().replace(' ', '-')}"
+                        self.local.start_session(tmp, model=model or "default", endpoint=base_url)
+                        reply = await self.local.send_message(prompt, tmp)
+                        self.local.end_session(tmp)
             elif backend == "codex":
                 if sid and sid in self.codex.sessions:
                     reply = await self.codex.send_message(prompt, sid)
@@ -2755,8 +3045,9 @@ class RoomManager:
 # MCP Server setup
 bridge = OpenCodeBridge()
 codex_bridge = CodexBridge()
+local_bridge = LocalModelBridge()
 orchestrator = Orchestrator(bridge, codex_bridge)
-rooms = RoomManager(bridge, codex_bridge)
+rooms = RoomManager(bridge, codex_bridge, local_bridge)
 server = Server("opencode-bridge")
 
 
@@ -3307,6 +3598,93 @@ async def list_tools():
                 "required": ["room_id"]
             }
         ),
+        # Local model tools (Ollama / vLLM on GPU nodes)
+        Tool(
+            name="local_discover",
+            description="Discover GPU nodes with running Ollama/vLLM servers. "
+                        "Checks /tmp/ollama-server-*.url cache files (written by slurm-serve-ollama.sh), "
+                        "your own running Slurm GPU jobs, nodes in OPENCODE_BRIDGE_GPU_NODES env var, "
+                        "and localhost. Returns available endpoints and their loaded models.",
+            inputSchema={"type": "object", "properties": {}}
+        ),
+        Tool(
+            name="local_start",
+            description="Start a session with a local model (Ollama/vLLM) on a GPU node.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "Unique session identifier"},
+                    "model": {"type": "string", "description": "Model name (e.g. llama3.3:70b, qwen3:30b-a3b)"},
+                    "endpoint": {"type": "string", "description": "Base URL of the OpenAI-compatible server (e.g. http://node:11434/v1). Auto-discovered if omitted."}
+                },
+                "required": ["session_id", "model"]
+            }
+        ),
+        Tool(
+            name="local_discuss",
+            description="Send a message to the active local model session and get a response.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string", "description": "Message to send"},
+                    "session_id": {"type": "string", "description": "Session ID (defaults to active session)"},
+                    "system_prompt": {"type": "string", "description": "Optional system prompt to prepend"}
+                },
+                "required": ["message"]
+            }
+        ),
+        Tool(
+            name="local_sessions",
+            description="List all active local model sessions.",
+            inputSchema={"type": "object", "properties": {}}
+        ),
+        Tool(
+            name="local_switch",
+            description="Switch the active local model session.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "Session to activate"}
+                },
+                "required": ["session_id"]
+            }
+        ),
+        Tool(
+            name="local_end",
+            description="End a local model session.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "Session to end (defaults to active)"}
+                }
+            }
+        ),
+        Tool(
+            name="local_history",
+            description="Show conversation history for a local model session.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "Session ID (defaults to active)"},
+                    "last_n": {"type": "integer", "description": "Number of messages to show (default: 20)"}
+                }
+            }
+        ),
+        Tool(
+            name="local_models",
+            description="List models available at a local model endpoint.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "endpoint": {"type": "string", "description": "Base URL (e.g. http://node:11434/v1). Auto-discovers if omitted."}
+                }
+            }
+        ),
+        Tool(
+            name="local_health",
+            description="Health check for local model sessions.",
+            inputSchema={"type": "object", "properties": {}}
+        ),
         Tool(
             name="opencode_cleanup",
             description="Remove stale tmp_pack_* files from OpenCode's snapshot directory. "
@@ -3580,6 +3958,76 @@ async def call_tool(name: str, arguments: dict):
             )
         elif name == "room_read":
             result = rooms.read(room_id=arguments["room_id"])
+        # Local model tools
+        elif name == "local_discover":
+            nodes = await asyncio.get_event_loop().run_in_executor(None, GpuNodeDiscovery.discover)
+            if not nodes:
+                result = "No local model endpoints found.\n\nTo make a GPU node discoverable:\n" \
+                         "  1. Run slurm-serve-ollama.sh <model> to start Ollama on a Slurm GPU node\n" \
+                         "  2. Or set OPENCODE_BRIDGE_GPU_NODES=node1,node2 env var\n" \
+                         "  3. Or run Ollama locally (localhost:11434)"
+            else:
+                lines = ["Available local model endpoints:\n"]
+                for n in nodes:
+                    lines.append(f"  [{n['source']}] {n['node']} — {n['base_url']}")
+                    if n["models"]:
+                        lines.append(f"    Models: {', '.join(n['models'])}")
+                    else:
+                        lines.append("    Models: (none loaded)")
+                result = "\n".join(lines)
+        elif name == "local_start":
+            endpoint = arguments.get("endpoint")
+            if not endpoint:
+                nodes = await asyncio.get_event_loop().run_in_executor(None, GpuNodeDiscovery.discover)
+                if not nodes:
+                    result = "No local endpoint found. Run local_discover or specify endpoint."
+                else:
+                    endpoint = nodes[0]["base_url"]
+                    result = local_bridge.start_session(
+                        session_id=arguments["session_id"],
+                        model=arguments["model"],
+                        endpoint=endpoint,
+                    )
+            else:
+                result = local_bridge.start_session(
+                    session_id=arguments["session_id"],
+                    model=arguments["model"],
+                    endpoint=endpoint,
+                )
+        elif name == "local_discuss":
+            result = await local_bridge.send_message(
+                message=arguments["message"],
+                session_id=arguments.get("session_id"),
+                system_prompt=arguments.get("system_prompt"),
+            )
+        elif name == "local_sessions":
+            result = local_bridge.list_sessions()
+        elif name == "local_switch":
+            result = local_bridge.set_active(arguments["session_id"])
+        elif name == "local_end":
+            result = local_bridge.end_session(arguments.get("session_id"))
+        elif name == "local_history":
+            result = local_bridge.get_history(
+                session_id=arguments.get("session_id"),
+                last_n=arguments.get("last_n", 20),
+            )
+        elif name == "local_models":
+            endpoint = arguments.get("endpoint")
+            if not endpoint:
+                nodes = await asyncio.get_event_loop().run_in_executor(None, GpuNodeDiscovery.discover)
+                if not nodes:
+                    result = "No local endpoint found. Run local_discover or specify endpoint."
+                else:
+                    models = nodes[0]["models"]
+                    result = f"Models at {nodes[0]['base_url']}:\n" + "\n".join(f"  - {m}" for m in models) if models else "No models loaded."
+            else:
+                models = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: LocalModelBridge.list_models_at(endpoint)
+                )
+                result = f"Models at {endpoint}:\n" + "\n".join(f"  - {m}" for m in models) if models else "No models found or endpoint unreachable."
+        elif name == "local_health":
+            h = local_bridge.health_check()
+            result = f"Status: {h['status']}\nSessions: {h['sessions']}\nUptime: {h['uptime']}s"
         elif name == "opencode_cleanup":
             result = cleanup_opencode_snapshot()
         elif name == "opencode_ping":
