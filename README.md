@@ -1,6 +1,6 @@
 # Chitta Bridge
 
-MCP server for continuous discussion sessions with OpenCode and Codex. Collaborate with GPT-5, Claude, Gemini, o3, and other models through Claude Code.
+MCP server for multi-model AI discussions — connect Claude Code to any AI backend: cloud providers, agentic CLIs, and local GPU models.
 
 ## Quick Start
 
@@ -17,16 +17,16 @@ chitta-bridge-install
 
 ## Features
 
-- **Dual backend support**: OpenCode and Codex CLI
+- **Multiple backends**: OpenCode, Codex CLI, and local GPU models (Ollama/vLLM)
 - **Continuous sessions**: Conversation history persists across messages
-- **Session warmup**: `opencode_start` fires a background ping to capture the session ID — subsequent calls skip cold start
+- **Session warmup**: background ping captures session ID — subsequent calls skip cold start
 - **Multiple models**: OpenCode (GPT-5.x, Claude, Gemini) + Codex (o3, o4-mini, gpt-4.1)
 - **Agent support**: plan, build, explore, general agents (OpenCode)
 - **Agentic execution**: Full-auto mode with sandboxed file operations (Codex)
 - **Variant control**: Set reasoning effort (minimal to max)
 - **File/image attachment**: Share code files and images for context
 - **Session continuity**: Conversations continue across tool calls
-- **Discussion rooms**: Async multi-agent roundtables — multiple AI participants post in parallel, see the full thread
+- **Discussion rooms**: async multi-agent roundtables — any mix of backends respond in parallel, see the full thread, synthesize into one answer
 
 ## Installation
 
@@ -63,7 +63,7 @@ claude mcp list
 chitta-bridge-uninstall
 ```
 
-## OpenCode Tools
+## OpenCode Backend
 
 | Tool | Description |
 |------|-------------|
@@ -88,7 +88,7 @@ chitta-bridge-uninstall
 
 ## Discussion Rooms
 
-Async multi-agent roundtable — multiple AI participants (any mix of OpenCode/Codex sessions and models) post in parallel each round, each seeing the full thread before responding.
+Async multi-agent roundtable — any mix of backends (OpenCode, Codex, local GPU models, Claude) post in parallel each round, each seeing the full thread before responding.
 
 ```python
 # Create a room with 3 participants (including a local GPU model)
@@ -122,7 +122,7 @@ room_read(room_id="my-room")
 
 ### Synthesis
 
-After running a room, distill the full discussion into a single answer. Defaults to Claude as synthesizer; any backend (local, opencode, codex) can be used instead.
+After running a room, distill the full discussion into a single answer. Any backend can act as synthesizer — Claude (default), local GPU model, OpenCode, or Codex.
 
 ```python
 room_synthesize(room_id="my-room")
@@ -174,7 +174,7 @@ local_start(session_id="llm2", model="qwen3:30b-a3b", endpoint="http://gpunode01
 | `local_history` | Show conversation history |
 | `local_health` | Health check |
 
-## Codex Tools
+## Codex Backend
 
 | Tool | Description |
 |------|-------------|
@@ -258,8 +258,9 @@ The `full_auto` option (default: true) enables low-friction execution with `work
 ## Requirements
 
 - Python 3.10+
-- [OpenCode CLI](https://opencode.ai) installed (for opencode_* tools)
-- [Codex CLI](https://github.com/openai/codex) installed (for codex_* tools)
+- [OpenCode CLI](https://opencode.ai) for `opencode_*` tools
+- [Codex CLI](https://github.com/openai/codex) for `codex_*` tools
+- Ollama or vLLM on a GPU node for `local_*` tools
 - Claude Code
 
 ## License
