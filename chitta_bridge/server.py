@@ -25,8 +25,10 @@ import asyncio
 import shutil
 import tempfile
 import glob as _glob
+import html as _html
 import urllib.request
 import urllib.error
+import urllib.parse
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -2604,6 +2606,76 @@ class LocalModelBridge:
             return []
 
 
+# ---------------------------------------------------------------------------
+# Web Search (DuckDuckGo – no API key, stdlib only)
+# ---------------------------------------------------------------------------
+
+class WebSearch:
+    """Search the web via DuckDuckGo HTML and return parsed results."""
+
+    _DDG_URL = "https://html.duckduckgo.com/html/"
+    _HEADERS = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    }
+    _RESULT_RE = re.compile(
+        r'<a rel="nofollow" class="result__a" href="([^"]+)"[^>]*>(.*?)</a>'
+        r'.*?<a class="result__snippet"[^>]*>(.*?)</a>',
+        re.DOTALL,
+    )
+
+    @classmethod
+    def search(cls, query: str, max_results: int = 8, timeout: int = 10) -> list[dict]:
+        data = urllib.parse.urlencode({"q": query}).encode()
+        req = urllib.request.Request(cls._DDG_URL, data=data, headers=cls._HEADERS)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+        results = []
+        for url, title, snippet in cls._RESULT_RE.findall(body):
+            if "/y.js?" in url:
+                # DuckDuckGo redirect — extract actual URL
+                m = re.search(r"uddg=([^&]+)", url)
+                if m:
+                    url = urllib.parse.unquote(m.group(1))
+            title = re.sub(r"<[^>]+>", "", title).strip()
+            snippet = re.sub(r"<[^>]+>", "", snippet).strip()
+            title = _html.unescape(title)
+            snippet = _html.unescape(snippet)
+            if url and title:
+                results.append({"url": url, "title": title, "snippet": snippet})
+            if len(results) >= max_results:
+                break
+        return results
+
+    @classmethod
+    def search_formatted(cls, query: str, max_results: int = 8) -> str:
+        results = cls.search(query, max_results)
+        if not results:
+            return f"No results found for: {query}"
+        lines = [f"Web search: {query}\n"]
+        for i, r in enumerate(results, 1):
+            lines.append(f"{i}. **{r['title']}**")
+            lines.append(f"   {r['url']}")
+            if r["snippet"]:
+                lines.append(f"   {r['snippet']}")
+            lines.append("")
+        return "\n".join(lines)
+
+    @classmethod
+    def fetch_page(cls, url: str, max_chars: int = 12000, timeout: int = 15) -> str:
+        req = urllib.request.Request(url, headers=cls._HEADERS)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+        text = re.sub(r"<script[^>]*>.*?</script>", "", body, flags=re.DOTALL)
+        text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        text = _html.unescape(text)
+        if len(text) > max_chars:
+            text = text[:max_chars] + "\n\n[truncated]"
+        return text
+
+
 class Orchestrator:
     """Multi-agent orchestration for complex workflows."""
 
@@ -3895,6 +3967,46 @@ async def list_tools():
                 }
             }
         ),
+
+        # ── Web Search ─────────────────────────────────────────────
+        Tool(
+            name="web_search",
+            description="Search the web via DuckDuckGo. Returns titles, URLs, and snippets. No API key needed.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query"
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum results to return (default 8)",
+                        "default": 8
+                    }
+                },
+                "required": ["query"]
+            }
+        ),
+        Tool(
+            name="web_fetch",
+            description="Fetch a web page and return its text content (HTML stripped). Useful for reading articles, docs, or search results.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "URL to fetch"
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "Max characters to return (default 12000)",
+                        "default": 12000
+                    }
+                },
+                "required": ["url"]
+            }
+        ),
     ]
 
 
@@ -4162,6 +4274,22 @@ async def call_tool(name: str, arguments: dict):
             result = codex_bridge.end_all(
                 session_ids=arguments.get("session_ids"),
                 exclude_model=arguments.get("exclude_model")
+            )
+        elif name == "web_search":
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: WebSearch.search_formatted(
+                    arguments["query"],
+                    arguments.get("max_results", 8),
+                ),
+            )
+        elif name == "web_fetch":
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: WebSearch.fetch_page(
+                    arguments["url"],
+                    arguments.get("max_chars", 12000),
+                ),
             )
         else:
             result = f"Unknown tool: {name}"

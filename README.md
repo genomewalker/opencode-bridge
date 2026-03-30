@@ -174,6 +174,23 @@ local_start(session_id="llm2", model="qwen3:30b-a3b", endpoint="http://gpunode01
 | `local_history` | Show conversation history |
 | `local_health` | Health check |
 
+## Web Search
+
+Search the web and fetch pages directly from Claude Code — no API key needed (DuckDuckGo).
+
+```python
+# Search
+web_search(query="ancient metagenomics DNA damage authentication")
+
+# Fetch a page
+web_fetch(url="https://example.com/article", max_chars=12000)
+```
+
+| Tool | Description |
+|------|-------------|
+| `web_search` | Search via DuckDuckGo — returns titles, URLs, snippets |
+| `web_fetch` | Fetch a web page as plain text (HTML stripped) |
+
 ## Codex Backend
 
 | Tool | Description |
