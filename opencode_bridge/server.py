@@ -2565,17 +2565,29 @@ class LocalModelBridge:
 
     @staticmethod
     def _post_completion(endpoint: str, payload: dict, timeout: int = 300) -> str:
+        """POST to /v1/chat/completions with retries for model-loading connection drops."""
+        import http.client
         url = f"{endpoint}/chat/completions"
         data = json.dumps(payload).encode()
-        req = urllib.request.Request(
-            url,
-            data=data,
-            headers={"Content-Type": "application/json", "Authorization": "Bearer local"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            result = json.loads(resp.read().decode())
-        return result["choices"][0]["message"]["content"]
+        last_exc: Exception = RuntimeError("no attempts made")
+        for attempt in range(4):
+            if attempt:
+                import time
+                time.sleep(10 * attempt)  # 10s, 20s, 30s back-off while model loads
+            try:
+                req = urllib.request.Request(
+                    url,
+                    data=data,
+                    headers={"Content-Type": "application/json", "Authorization": "Bearer local"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    result = json.loads(resp.read().decode())
+                return result["choices"][0]["message"]["content"]
+            except (http.client.RemoteDisconnected, ConnectionResetError, urllib.error.URLError) as e:
+                last_exc = e
+                continue
+        raise last_exc
 
     # ------------------------------------------------------------------
     # Model listing
@@ -2929,6 +2941,68 @@ class RoomManager:
             lines.append(msg["content"])
             lines.append("")
         return "\n".join(lines)
+
+    async def synthesize(self, room_id: str, synthesizer: Optional[dict] = None) -> str:
+        """Run a final synthesis pass over the full transcript — distills all responses into one answer."""
+        if room_id not in self.rooms:
+            return f"Room '{room_id}' not found."
+        room = self.rooms[room_id]
+
+        transcript = self.read(room_id)
+        prompt = (
+            f"You are a neutral synthesizer reviewing a multi-agent discussion.\n\n"
+            f"{transcript}\n\n"
+            f"## Synthesis Task\n"
+            f"Distill the discussion above into a single, coherent answer:\n"
+            f"1. **Core consensus** — what all participants agreed on\n"
+            f"2. **Key disagreements** — where they diverged and why\n"
+            f"3. **Best answer** — your integrated recommendation, drawing on the strongest points\n"
+            f"4. **Open questions** — what remains unresolved\n"
+        )
+
+        # Use synthesizer config or default to claude
+        synth = synthesizer or {"name": "Synthesizer", "backend": "claude"}
+        synth_name = synth.get("name", "Synthesizer")
+        backend = synth.get("backend", "claude")
+        sid = synth.get("session_id")
+
+        try:
+            if backend == "claude":
+                reply = await self._run_claude_p(prompt)
+            elif backend == "local":
+                base_url = synth.get("base_url") or synth.get("endpoint")
+                model = synth.get("model", "")
+                if not base_url:
+                    nodes = await asyncio.get_event_loop().run_in_executor(None, GpuNodeDiscovery.discover)
+                    if nodes:
+                        base_url = nodes[0]["base_url"]
+                        if not model and nodes[0]["models"]:
+                            model = nodes[0]["models"][0]
+                if base_url:
+                    tmp = f"synth-{room_id}"
+                    self.local.start_session(tmp, model=model or "default", endpoint=base_url)
+                    reply = await self.local.send_message(prompt, tmp)
+                    self.local.end_session(tmp)
+                else:
+                    reply = "[error: no local endpoint found for synthesis]"
+            elif backend == "codex":
+                if sid and sid in self.codex.sessions:
+                    reply = await self.codex.send_message(prompt, sid)
+                else:
+                    reply = await self.codex.run_task(prompt)
+            else:  # opencode
+                if sid and sid in self.opencode.sessions:
+                    reply = await self.opencode.send_message(prompt, sid, _raw=True)
+                else:
+                    tmp = f"synth-{room_id}"
+                    await self.opencode.start_session(tmp, model=synth.get("model"))
+                    reply = await self.opencode.send_message(prompt, tmp, _raw=True)
+                    self.opencode.end_session(tmp)
+        except Exception as e:
+            reply = f"[synthesis error: {e}]"
+
+        room.messages.append({"name": f"⟳ {synth_name}", "content": reply, "ts": datetime.now().isoformat()})
+        return f"## Synthesis by {synth_name}\n\n{reply}"
 
     def _build_thread_context(self, room: DiscussionRoom, my_name: str) -> str:
         """Build the full thread context to show a participant before they respond."""
@@ -3588,6 +3662,24 @@ async def list_tools():
             }
         ),
         Tool(
+            name="room_synthesize",
+            description="Distill a discussion room's full transcript into a single coherent answer. "
+                        "Runs a final synthesis pass (like MoE output combination) — extracts consensus, "
+                        "key disagreements, best answer, and open questions. "
+                        "Defaults to claude backend; pass synthesizer JSON to use another model.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "room_id": {"type": "string", "description": "Room ID to synthesize"},
+                    "synthesizer": {
+                        "type": "string",
+                        "description": 'Optional JSON: {"name":"Synthesizer","backend":"claude|opencode|codex|local","model":"...","base_url":"...","session_id":"..."}. Defaults to claude.'
+                    }
+                },
+                "required": ["room_id"]
+            }
+        ),
+        Tool(
             name="room_read",
             description="Read the full transcript of a discussion room.",
             inputSchema={
@@ -3958,6 +4050,11 @@ async def call_tool(name: str, arguments: dict):
             )
         elif name == "room_read":
             result = rooms.read(room_id=arguments["room_id"])
+        elif name == "room_synthesize":
+            synth = arguments.get("synthesizer")
+            if isinstance(synth, str):
+                synth = json.loads(synth)
+            result = await rooms.synthesize(room_id=arguments["room_id"], synthesizer=synth)
         # Local model tools
         elif name == "local_discover":
             nodes = await asyncio.get_event_loop().run_in_executor(None, GpuNodeDiscovery.discover)
