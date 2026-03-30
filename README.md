@@ -118,6 +118,21 @@ room_read(room_id="my-room")
 | `room_add_participant` | Add a participant to an existing room |
 | `room_run` | Run N rounds — all participants respond in parallel |
 | `room_read` | Read the full transcript |
+| `room_synthesize` | Distill the transcript — consensus, disagreements, best answer, open questions |
+
+### Synthesis
+
+After running a room, distill the full discussion into a single answer. Defaults to Claude as synthesizer; any backend (local, opencode, codex) can be used instead.
+
+```python
+room_synthesize(room_id="my-room")
+
+# Use a local model as synthesizer
+room_synthesize(
+    room_id="my-room",
+    synthesizer='{"name":"Qwen3","backend":"local","model":"qwen3:30b-a3b","base_url":"http://gpunode01:11434/v1"}'
+)
+```
 
 ## Local Models (GPU Nodes)
 
