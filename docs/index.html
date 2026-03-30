@@ -4,8 +4,8 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#06090c" />
-  <title>chitta-bridge — MCP server linking Claude Code to OpenCode &amp; Codex</title>
-  <meta name="description" content="MCP server that connects Claude Code to OpenCode and Codex for multi-model consultation. GPT-5, o3, Gemini, and more as companion brains." />
+  <title>chitta-bridge — multi-model AI discussions for Claude Code</title>
+  <meta name="description" content="MCP server that connects Claude Code to any AI backend — cloud providers, agentic CLIs, and local GPU models. Multi-agent discussion rooms with synthesis." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300;0,400;0,600;0,700;1,400&display=swap" rel="stylesheet" />
@@ -47,8 +47,8 @@
       <div class="wrap">
         <div class="hero-eyebrow">MCP SERVER</div>
         <h1 id="hero-title" class="hero-title">chitta-bridge</h1>
-        <p class="hero-subtitle">linking Claude Code to OpenCode &amp; Codex</p>
-        <p class="hero-micro">multi-model consultation &middot; agentic execution &middot; local GPU models &middot; discussion rooms</p>
+        <p class="hero-subtitle">multi-model AI discussions for Claude Code</p>
+        <p class="hero-micro">any backend &middot; discussion rooms &middot; local GPU models &middot; synthesis</p>
 
         <div class="hero-install">
           <code>pip install chitta-bridge</code>
@@ -161,7 +161,7 @@
           <span class="ft-arrow" aria-hidden="true">&rarr;</span>
           <span class="ft-node ft-mcp">MCP</span>
           <span class="ft-arrow" aria-hidden="true">&rarr;</span>
-          <span class="ft-node ft-hub">OpenCode&nbsp;Hub</span>
+          <span class="ft-node ft-hub">backend</span>
           <span class="ft-arrow" aria-hidden="true">&rarr;</span>
           <span class="ft-node ft-model">Model</span>
           <span class="ft-arrow" aria-hidden="true">&rarr;</span>
@@ -186,7 +186,7 @@
           </div>
           <pre><code><span class="prompt">$</span> pip install chitta-bridge</code></pre>
         </div>
-        <p class="section-note">requires: Python 3.10+ &middot; Claude Code &middot; OpenCode CLI and/or Codex CLI</p>
+        <p class="section-note">requires: Python 3.10+ &middot; Claude Code &middot; one or more backends (OpenCode, Codex, Ollama)</p>
         <p class="section-note" style="margin-top:8px">then add to your MCP config:</p>
         <div class="code-block" style="margin-top:8px">
           <pre><code><span class="prompt">{</span> "chitta-bridge": { "command": "chitta-bridge" } <span class="prompt">}</span></code></pre>
@@ -201,8 +201,8 @@
         <h2>Capabilities</h2>
         <div class="spec-grid">
           <div class="spec-card">
-            <div class="spec-key">dual backends</div>
-            <div class="spec-val">OpenCode (GPT-5, Gemini) + Codex (o3, o4-mini)</div>
+            <div class="spec-key">multiple backends</div>
+            <div class="spec-val">OpenCode · Codex · local GPU (Ollama/vLLM) · any mix</div>
           </div>
           <div class="spec-card">
             <div class="spec-key">auto-framing</div>
@@ -222,7 +222,7 @@
           </div>
           <div class="spec-card">
             <div class="spec-key">session warmup</div>
-            <div class="spec-val">opencode_start pre-initializes the session — all subsequent calls skip cold start</div>
+            <div class="spec-val">background ping pre-initializes sessions — all subsequent calls skip cold start</div>
           </div>
           <div class="spec-card">
             <div class="spec-key">discussion rooms</div>
@@ -276,7 +276,7 @@
           </div>
           <div class="flow-step">
             <div class="flow-num">3</div>
-            <div class="flow-box fb-bridge">routes to OpenCode with expert framing</div>
+            <div class="flow-box fb-bridge">routes to backend with expert framing</div>
           </div>
           <div class="flow-connector" aria-hidden="true">
             <div class="fc-line"></div>
@@ -284,7 +284,7 @@
           </div>
           <div class="flow-step">
             <div class="flow-num">4</div>
-            <div class="flow-box fb-opencode">OpenCode consults model</div>
+            <div class="flow-box fb-opencode">backend consults model</div>
           </div>
           <div class="flow-connector" aria-hidden="true">
             <div class="fc-line"></div>
@@ -493,7 +493,7 @@
       <div class="wrap">
         <div class="section-label">05</div>
         <h2>Auto-Framing</h2>
-        <p class="section-desc">When Claude sends a message, chitta-bridge detects the domain and frames OpenCode as a specialized expert.</p>
+        <p class="section-desc">When Claude sends a message, chitta-bridge detects the domain and frames the request as a specialized expert prompt.</p>
         <div class="domain-chips">
           <span class="chip chip-hot">architecture</span>
           <span class="chip chip-hot">debugging</span>
@@ -576,7 +576,7 @@
         <div class="chunk-specs">
           <div class="chunk-row">
             <span class="chunk-key">multi_consult</span>
-            <span class="chunk-val">fan-out question to OpenCode + Codex in parallel &middot; synthesize results</span>
+            <span class="chunk-val">fan-out question to multiple backends in parallel &middot; synthesize results</span>
           </div>
           <div class="chunk-row">
             <span class="chunk-key">agent_chain</span>
@@ -584,11 +584,11 @@
           </div>
           <div class="chunk-row">
             <span class="chunk-key">delegate_codex</span>
-            <span class="chunk-val">delegate to Codex &middot; optional OpenCode review &middot; Claude → Codex → OpenCode</span>
+            <span class="chunk-val">delegate to Codex agent &middot; optional review pass &middot; chain across backends</span>
           </div>
           <div class="chunk-row">
             <span class="chunk-key">parallel_agents</span>
-            <span class="chunk-val">run multiple tasks concurrently &middot; across both backends</span>
+            <span class="chunk-val">run multiple tasks concurrently &middot; across any backends</span>
           </div>
         </div>
 
@@ -645,7 +645,7 @@
       <div class="wrap">
         <div class="section-label">08</div>
         <h2>Discussion Rooms</h2>
-        <p class="section-desc">An async multi-agent roundtable — any mix of OpenCode, Codex, Claude, and local GPU models. All participants respond in parallel each round, each seeing the full thread before posting. A synthesis pass then distills consensus, disagreements, and the best answer.</p>
+        <p class="section-desc">An async multi-agent roundtable — any mix of backends and models. All participants respond in parallel each round, each seeing the full thread before posting. A synthesis pass distills consensus, disagreements, and the best answer.</p>
 
         <div class="chunk-specs">
           <div class="chunk-row">
@@ -735,7 +735,7 @@ room_synthesize(room_id="arch-review") <span class="comment"># distill into one 
           </div>
           <div class="chunk-row">
             <span class="chunk-key">env var</span>
-            <span class="chunk-val">OPENCODE_BRIDGE_GPU_NODES=node1,node2</span>
+            <span class="chunk-val">CHITTA_BRIDGE_GPU_NODES=node1,node2</span>
           </div>
           <div class="chunk-row">
             <span class="chunk-key">fallback</span>
