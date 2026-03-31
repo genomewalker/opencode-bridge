@@ -191,6 +191,35 @@ web_fetch(url="https://example.com/article", max_chars=12000)
 | `web_search` | Search via DuckDuckGo — returns titles, URLs, snippets |
 | `web_fetch` | Fetch a web page as plain text (HTML stripped) |
 
+## Soul Memory (chittad)
+
+Bidirectional memory bridge to the cc-soul daemon. Room discussions automatically pull relevant memories as context, and syntheses are stored back as episodes.
+
+```python
+# Check if soul is running
+soul_status()
+
+# Recall memories
+soul_recall(query="cache invalidation strategies", limit=5)
+
+# Store a memory
+soul_remember(content="Room discussion concluded X is better than Y", kind="episode")
+
+# Smart context (memories + code symbols + graph)
+soul_context(task="refactor authentication middleware")
+```
+
+| Tool | Description |
+|------|-------------|
+| `soul_recall` | Search memories by query |
+| `soul_remember` | Store a new memory |
+| `soul_context` | Smart context assembly (memories + symbols + graph) |
+| `soul_status` | Check if chittad is available |
+
+Discussion rooms automatically:
+- **Inject soul context** at creation — participants see relevant memories
+- **Store synthesis back** — room conclusions become soul episodes
+
 ## Codex Backend
 
 | Tool | Description |

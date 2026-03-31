@@ -23,6 +23,7 @@ import sys
 import json
 import asyncio
 import shutil
+import socket
 import tempfile
 import glob as _glob
 import html as _html
@@ -31,7 +32,7 @@ import urllib.error
 import urllib.parse
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 from dataclasses import dataclass, field, asdict
 
 from mcp.server import Server, InitializationOptions
@@ -2676,6 +2677,84 @@ class WebSearch:
         return text
 
 
+# ---------------------------------------------------------------------------
+# Soul Integration (chittad Unix socket — bidirectional memory bridge)
+# ---------------------------------------------------------------------------
+
+class SoulClient:
+    """Connect to chittad daemon for memory recall and storage."""
+
+    @staticmethod
+    def _djb2_hash(s: str) -> int:
+        h = 5381
+        for c in s:
+            h = ((h << 5) + h + ord(c)) & 0xFFFFFFFF
+        return h
+
+    @classmethod
+    def _socket_path(cls) -> str:
+        home = os.environ.get("HOME", "")
+        mind_path = os.path.join(home, ".claude", "mind")
+        hash_val = cls._djb2_hash(mind_path)
+        xdg = os.environ.get("XDG_RUNTIME_DIR")
+        if xdg and os.access(xdg, os.W_OK):
+            base = os.path.join(xdg, "chitta")
+        elif home:
+            base = os.path.join(home, ".cache", "chitta")
+        else:
+            base = "/tmp"
+        return os.path.join(base, f"chitta-{hash_val}.sock")
+
+    @classmethod
+    def _call(cls, method: str, arguments: dict, timeout: float = 5.0) -> Optional[str]:
+        path = cls._socket_path()
+        if not os.path.exists(path):
+            return None
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            sock.connect(path)
+            req = json.dumps({
+                "jsonrpc": "2.0", "id": 1,
+                "method": "tools/call",
+                "params": {"name": method, "arguments": arguments},
+            })
+            sock.sendall((req + "\n").encode())
+            response = b""
+            while True:
+                chunk = sock.recv(8192)
+                if not chunk:
+                    break
+                response += chunk
+                if b"\n" in response:
+                    break
+            sock.close()
+            data = json.loads(response.decode().strip())
+            result = data.get("result", {})
+            content = result.get("content", [])
+            if content and isinstance(content, list):
+                return content[0].get("text", "")
+            return str(result)
+        except Exception:
+            return None
+
+    @classmethod
+    def recall(cls, query: str, limit: int = 5) -> Optional[str]:
+        return cls._call("recall", {"query": query, "limit": limit})
+
+    @classmethod
+    def smart_context(cls, task: str) -> Optional[str]:
+        return cls._call("smart_context", {"task": task}, timeout=10.0)
+
+    @classmethod
+    def remember(cls, content: str, kind: str = "episode") -> Optional[str]:
+        return cls._call("remember", {"content": content, "kind": kind})
+
+    @classmethod
+    def is_available(cls) -> bool:
+        return os.path.exists(cls._socket_path())
+
+
 class Orchestrator:
     """Multi-agent orchestration for complex workflows."""
 
@@ -2991,9 +3070,19 @@ class RoomManager:
             return f"Room '{room_id}' already exists."
         room = DiscussionRoom(id=room_id, topic=topic, participants=participants)
         room.messages.append({"name": "TOPIC", "content": topic, "ts": datetime.now().isoformat()})
+        # Inject soul context if chittad is running
+        if SoulClient.is_available():
+            ctx = SoulClient.recall(topic, limit=5)
+            if ctx and len(ctx.strip()) > 20:
+                room.messages.append({
+                    "name": "CONTEXT",
+                    "content": f"[Soul memory context]\n{ctx}",
+                    "ts": datetime.now().isoformat(),
+                })
         self.rooms[room_id] = room
         names = ", ".join(p["name"] for p in participants)
-        return f"Room '{room_id}' created with {len(participants)} participants: {names}"
+        soul_tag = " (with soul context)" if len(room.messages) > 1 else ""
+        return f"Room '{room_id}' created with {len(participants)} participants: {names}{soul_tag}"
 
     def add_participant(self, room_id: str, participant: dict) -> str:
         if room_id not in self.rooms:
@@ -3074,6 +3163,15 @@ class RoomManager:
             reply = f"[synthesis error: {e}]"
 
         room.messages.append({"name": f"⟳ {synth_name}", "content": reply, "ts": datetime.now().isoformat()})
+        # Store synthesis back to soul memory
+        if SoulClient.is_available():
+            participants = ", ".join(p["name"] for p in room.participants)
+            memory = (
+                f"[room:{room_id}] Topic: {room.topic}\n"
+                f"Participants: {participants}\n"
+                f"Synthesizer: {synth_name}\n\n{reply[:2000]}"
+            )
+            SoulClient.remember(memory, kind="episode")
         return f"## Synthesis by {synth_name}\n\n{reply}"
 
     def _build_thread_context(self, room: DiscussionRoom, my_name: str) -> str:
@@ -4007,6 +4105,65 @@ async def list_tools():
                 "required": ["url"]
             }
         ),
+
+        # ── Soul Memory ────────────────────────────────────────────
+        Tool(
+            name="soul_recall",
+            description="Recall memories from the soul (chittad). Returns relevant memories for a query. Requires chittad daemon running.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "What to search for in memory"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max memories to return (default 5)",
+                        "default": 5
+                    }
+                },
+                "required": ["query"]
+            }
+        ),
+        Tool(
+            name="soul_remember",
+            description="Store a memory in the soul (chittad). Use for saving insights, corrections, or discoveries.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "Memory content to store"
+                    },
+                    "kind": {
+                        "type": "string",
+                        "description": "Memory kind: episode, wisdom, correction, symbol (default: episode)",
+                        "default": "episode"
+                    }
+                },
+                "required": ["content"]
+            }
+        ),
+        Tool(
+            name="soul_context",
+            description="Get smart context from the soul — combines memories, code symbols, and graph relationships relevant to a task.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "Task or question to get context for"
+                    }
+                },
+                "required": ["task"]
+            }
+        ),
+        Tool(
+            name="soul_status",
+            description="Check if the soul (chittad daemon) is available.",
+            inputSchema={"type": "object", "properties": {}}
+        ),
     ]
 
 
@@ -4291,6 +4448,31 @@ async def call_tool(name: str, arguments: dict):
                     arguments.get("max_chars", 12000),
                 ),
             )
+        elif name == "soul_recall":
+            r = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: SoulClient.recall(arguments["query"], arguments.get("limit", 5)),
+            )
+            result = r or "Soul not available (chittad not running)"
+        elif name == "soul_remember":
+            r = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: SoulClient.remember(arguments["content"], arguments.get("kind", "episode")),
+            )
+            result = r or "Soul not available (chittad not running)"
+        elif name == "soul_context":
+            r = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: SoulClient.smart_context(arguments["task"]),
+            )
+            result = r or "Soul not available (chittad not running)"
+        elif name == "soul_status":
+            available = SoulClient.is_available()
+            if available:
+                r = SoulClient._call("health_check", {})
+                result = f"Soul: connected\n{r}" if r else "Soul: socket exists but no response"
+            else:
+                result = "Soul: not available (chittad not running)"
         else:
             result = f"Unknown tool: {name}"
 
