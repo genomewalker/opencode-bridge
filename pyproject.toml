@@ -40,6 +40,7 @@ Repository = "https://github.com/genomewalker/chitta-bridge"
 chitta-bridge = "chitta_bridge.server:main"
 chitta-bridge-install = "chitta_bridge.install:install"
 chitta-bridge-uninstall = "chitta_bridge.install:uninstall"
+chitta-gpu = "chitta_bridge.gpu_serve:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["chitta_bridge"]
