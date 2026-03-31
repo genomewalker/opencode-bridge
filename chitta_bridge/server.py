@@ -2747,8 +2747,12 @@ class SoulClient:
         return cls._call("smart_context", {"task": task}, timeout=10.0)
 
     @classmethod
-    def remember(cls, content: str, kind: str = "episode") -> Optional[str]:
-        return cls._call("remember", {"content": content, "kind": kind})
+    def remember(cls, content: str, kind: str = "episode",
+                 tags: str = "", confidence: float = 0.8) -> Optional[str]:
+        args: dict[str, Any] = {"content": content, "type": kind, "confidence": confidence}
+        if tags:
+            args["tags"] = tags
+        return cls._call("remember", args)
 
     @classmethod
     def is_available(cls) -> bool:
@@ -3166,12 +3170,16 @@ class RoomManager:
         # Store synthesis back to soul memory
         if SoulClient.is_available():
             participants = ", ".join(p["name"] for p in room.participants)
+            # Extract key terms from topic for tags
+            topic_words = re.sub(r"[^\w\s]", "", room.topic.lower()).split()
+            stop = {"the", "a", "an", "is", "are", "was", "were", "what", "how", "and", "or", "of", "in", "to", "for", "with", "on", "at", "by", "from", "do", "does"}
+            tags = ",".join(dict.fromkeys(w for w in topic_words if w not in stop and len(w) > 2))[:200]
             memory = (
-                f"[room:{room_id}] Topic: {room.topic}\n"
-                f"Participants: {participants}\n"
-                f"Synthesizer: {synth_name}\n\n{reply[:2000]}"
+                f"[room-synthesis:{room_id}] {room.topic}\n"
+                f"Participants: {participants} | Synthesizer: {synth_name}\n\n"
+                f"{reply[:2000]}"
             )
-            SoulClient.remember(memory, kind="episode")
+            SoulClient.remember(memory, kind="wisdom", tags=f"room,synthesis,{tags}", confidence=0.85)
         return f"## Synthesis by {synth_name}\n\n{reply}"
 
     def _build_thread_context(self, room: DiscussionRoom, my_name: str) -> str:
@@ -4140,6 +4148,10 @@ async def list_tools():
                         "type": "string",
                         "description": "Memory kind: episode, wisdom, correction, symbol (default: episode)",
                         "default": "episode"
+                    },
+                    "tags": {
+                        "type": "string",
+                        "description": "Comma-separated tags for searchability (e.g. 'room,metagenomics,decay')",
                     }
                 },
                 "required": ["content"]
@@ -4457,7 +4469,11 @@ async def call_tool(name: str, arguments: dict):
         elif name == "soul_remember":
             r = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: SoulClient.remember(arguments["content"], arguments.get("kind", "episode")),
+                lambda: SoulClient.remember(
+                    arguments["content"],
+                    arguments.get("kind", "episode"),
+                    arguments.get("tags", ""),
+                ),
             )
             result = r or "Soul not available (chittad not running)"
         elif name == "soul_context":
