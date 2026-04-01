@@ -3149,35 +3149,45 @@ AGENT_TOOL_DEFINITIONS = [
           ["url"]),
 
     # ── File operations ────────────────────────────────────────────────
-    _tool("read_file", "Read a file's contents. Returns numbered lines.",
+    _tool("read_file", "Read a file's contents with line numbers. Handles text, PDF, Jupyter notebooks, and images.",
           {"path": {"type": "string", "description": "Absolute or relative file path"},
            "offset": {"type": "integer", "description": "Start line (0-based, default 0)"},
-           "limit": {"type": "integer", "description": "Max lines to read (default 200)"}},
+           "limit": {"type": "integer", "description": "Max lines to read (default 200, max 500)"},
+           "pages": {"type": "string", "description": "Page range for PDF files (e.g. '1-5', '3')"}},
           ["path"]),
-    _tool("write_file", "Create or overwrite a file with new content.",
+    _tool("write_file", "Create or overwrite a file with new content. Must read_file first for existing files.",
           {"path": {"type": "string", "description": "File path to write"},
            "content": {"type": "string", "description": "Content to write"}},
           ["path", "content"]),
-    _tool("edit_file", "Replace a specific string in a file. Fails if old_string is not found.",
+    _tool("edit_file", "Replace a specific string in a file. Shows match locations if ambiguous, unified diff on success.",
           {"path": {"type": "string", "description": "File path to edit"},
            "old_string": {"type": "string", "description": "Exact text to find"},
-           "new_string": {"type": "string", "description": "Replacement text"}},
+           "new_string": {"type": "string", "description": "Replacement text"},
+           "replace_all": {"type": "boolean", "description": "Replace all occurrences (default false)"}},
           ["path", "old_string", "new_string"]),
-    _tool("glob", "Find files matching a glob pattern. Returns file paths sorted by modification time.",
+    _tool("glob", "Find files matching a glob pattern. Returns paths with size and age, sorted by mtime.",
           {"pattern": {"type": "string", "description": "Glob pattern (e.g., '**/*.py', 'src/**/*.ts')"},
            "path": {"type": "string", "description": "Base directory (default: cwd)"}},
           ["pattern"]),
-    _tool("grep", "Search file contents for a regex pattern. Returns matching lines with context.",
+    _tool("grep", "Search file contents for a regex pattern. Supports multiline, output modes, pagination.",
           {"pattern": {"type": "string", "description": "Regex pattern to search for"},
            "path": {"type": "string", "description": "File or directory to search (default: cwd)"},
            "glob": {"type": "string", "description": "Glob filter for files (e.g., '*.py')"},
-           "context": {"type": "integer", "description": "Lines of context around matches (default 2)"}},
+           "type": {"type": "string", "description": "File type filter (e.g., 'py', 'js', 'rust')"},
+           "context": {"type": "integer", "description": "Lines of context around matches (default 2)"},
+           "multiline": {"type": "boolean", "description": "Enable multiline matching (default false)"},
+           "output_mode": {"type": "string", "enum": ["content", "files_with_matches", "count"],
+                           "description": "Output mode (default: content)"},
+           "offset": {"type": "integer", "description": "Skip first N results (default 0)"},
+           "head_limit": {"type": "integer", "description": "Max results to return (default 50)"}},
           ["pattern"]),
 
     # ── Shell ──────────────────────────────────────────────────────────
-    _tool("bash", "Execute a shell command and return stdout/stderr. Sandboxed: no network, 30s timeout.",
+    _tool("bash", "Execute a shell command. Sandboxed: no network, persistent cwd per participant.",
           {"command": {"type": "string", "description": "Shell command to execute"},
-           "timeout": {"type": "integer", "description": "Timeout in seconds (default 30, max 60)"}},
+           "timeout": {"type": "integer", "description": "Timeout in seconds (default 30, max 60)"},
+           "description": {"type": "string", "description": "What this command does (for audit trail)"},
+           "background": {"type": "boolean", "description": "Run in background, return immediately (default false)"}},
           ["command"]),
 
     # ── Code intelligence (via chitta) ─────────────────────────────────
@@ -3489,19 +3499,56 @@ class RoomManager:
     # ------------------------------------------------------------------
 
     _TOOL_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
+    # Fallback: bare JSON with "tool" key — greedy enough for nested args
+    _BARE_TOOL_RE = re.compile(
+        r'(\{\s*"tool"\s*:\s*"[^"]+"\s*,\s*"args"\s*:\s*\{.*?\}\s*\})', re.DOTALL,
+    )
     _FINAL_RESPONSE_RE = re.compile(r"<final_response>(.*?)</final_response>", re.DOTALL)
 
     def _extract_tool_call(self, text: str) -> Optional[dict]:
-        """Extract the first <tool_call> from model output."""
+        """Extract a tool call from model output.
+
+        Tries <tool_call> XML first, then falls back to bare JSON with
+        "tool" key — many local models output the JSON without XML wrappers.
+        """
+        # Try XML-wrapped first
         m = self._TOOL_CALL_RE.search(text)
-        if not m:
-            return None
+        if m:
+            try:
+                parsed = json.loads(m.group(1))
+                if "tool" in parsed:
+                    return {"tool": parsed["tool"], "args": parsed.get("args", {})}
+            except json.JSONDecodeError:
+                pass
+
+        # Fallback: bare JSON tool call (models often skip XML tags)
+        m = self._BARE_TOOL_RE.search(text)
+        if m:
+            try:
+                parsed = json.loads(m.group(1))
+                if "tool" in parsed:
+                    return {"tool": parsed["tool"], "args": parsed.get("args", {})}
+            except json.JSONDecodeError:
+                pass
+
+        # Last resort: try to find any JSON object with "tool" and "args" keys
+        # (handles extra whitespace, markdown code blocks, etc.)
+        stripped = text.strip()
+        # Strip markdown code fences
+        if stripped.startswith("```"):
+            lines = stripped.splitlines()
+            inner = "\n".join(
+                ln for ln in lines if not ln.strip().startswith("```")
+            ).strip()
+            if inner:
+                stripped = inner
         try:
-            parsed = json.loads(m.group(1))
-            if "tool" in parsed:
+            parsed = json.loads(stripped)
+            if isinstance(parsed, dict) and "tool" in parsed:
                 return {"tool": parsed["tool"], "args": parsed.get("args", {})}
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, ValueError):
             pass
+
         return None
 
     def _extract_final_response(self, text: str) -> Optional[str]:
@@ -3637,7 +3684,7 @@ class RoomManager:
 
             # ── Shell ──────────────────────────────────────────────────
             elif tool_name == "bash":
-                return await self._tool_bash(args)
+                return await self._tool_bash(args, participant_name=participant_name)
 
             # ── Code intelligence ──────────────────────────────────────
             elif tool_name == "read_function":
@@ -3697,13 +3744,14 @@ class RoomManager:
             return f"{n / 1024:.1f}KB"
         return f"{n}B"
 
+    # Image extensions for metadata detection
+    _IMAGE_EXTS = frozenset({
+        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".tif",
+        ".webp", ".ico", ".svg", ".heic", ".heif", ".avif",
+    })
+
     def _tool_read_file(self, args: dict, participant_name: str = "") -> str:
-        """Read a file. Beats Claude Code's Read:
-        CC: reads text only, up to 2000 lines, no binary detection.
-        Ours: detects binary/PDF, extracts PDF text via pdftotext,
-        shows encoding + size metadata, caps at 500 lines (protects
-        small-context local models), tracks reads for write safety.
-        """
+        """Read a file — handles text, PDF, Jupyter notebooks, and images."""
         path = Path(args.get("path", "")).expanduser().resolve()
         blocked = ("/proc", "/sys", "/dev", "/etc/shadow")
         if any(str(path).startswith(b) for b in blocked):
@@ -3721,14 +3769,56 @@ class RoomManager:
             RoomManager._read_files[key] = {}
         RoomManager._read_files[key][str(path)] = True
 
-        # PDF extraction via pdftotext
-        if suffix == ".pdf":
+        # ── Image metadata ────────────────────────────────────────────
+        if suffix in self._IMAGE_EXTS:
+            info = f"(image: {path}, {self._format_size(size)}, type: {suffix})"
+            # Try to get dimensions
             try:
-                import subprocess
-                result = subprocess.run(
-                    ["pdftotext", "-layout", str(path), "-"],
-                    capture_output=True, text=True, timeout=15,
-                )
+                import struct
+                with open(path, "rb") as f:
+                    head = f.read(32)
+                if suffix == ".png" and head[:8] == b"\x89PNG\r\n\x1a\n":
+                    w, h = struct.unpack(">II", head[16:24])
+                    info = f"(image: {path}, {w}x{h} PNG, {self._format_size(size)})"
+                elif suffix in (".jpg", ".jpeg"):
+                    # JPEG: scan for SOF marker
+                    with open(path, "rb") as f:
+                        data = f.read(min(size, 65536))
+                    i = 0
+                    while i < len(data) - 9:
+                        if data[i] == 0xFF and data[i + 1] in (0xC0, 0xC2):
+                            h, w = struct.unpack(">HH", data[i + 5:i + 9])
+                            info = f"(image: {path}, {w}x{h} JPEG, {self._format_size(size)})"
+                            break
+                        i += 1
+                elif suffix == ".gif" and head[:6] in (b"GIF87a", b"GIF89a"):
+                    w, h = struct.unpack("<HH", head[6:10])
+                    info = f"(image: {path}, {w}x{h} GIF, {self._format_size(size)})"
+                elif suffix == ".svg":
+                    # SVG is text — fall through to text reading
+                    pass
+                else:
+                    pass
+            except Exception:
+                pass
+            if suffix != ".svg":
+                return info
+
+        # ── PDF extraction via pdftotext ──────────────────────────────
+        if suffix == ".pdf":
+            pages_arg = args.get("pages", "")
+            try:
+                import subprocess as _sp
+                cmd = ["pdftotext", "-layout"]
+                if pages_arg:
+                    # Parse "3" or "1-5"
+                    parts = pages_arg.split("-")
+                    if len(parts) == 2:
+                        cmd += ["-f", parts[0].strip(), "-l", parts[1].strip()]
+                    elif len(parts) == 1:
+                        cmd += ["-f", parts[0].strip(), "-l", parts[0].strip()]
+                cmd += [str(path), "-"]
+                result = _sp.run(cmd, capture_output=True, text=True, timeout=15)
                 if result.returncode == 0 and result.stdout.strip():
                     text = result.stdout
                     lines = text.splitlines()
@@ -3737,15 +3827,58 @@ class RoomManager:
                     offset = int(args.get("offset", 0))
                     selected = lines[offset:offset + limit]
                     numbered = [f"{i + offset + 1:>5}\t{line}" for i, line in enumerate(selected)]
-                    header = f"# {path} (PDF, {total} text lines, {self._format_size(size)})"
+                    pg = f", pages {pages_arg}" if pages_arg else ""
+                    header = f"# {path} (PDF{pg}, {total} text lines, {self._format_size(size)})"
                     if total > offset + limit:
                         header += f" — showing {offset + 1}-{offset + len(selected)}"
                     return header + "\n" + "\n".join(numbered)
-            except (FileNotFoundError, subprocess.TimeoutExpired):
+            except (FileNotFoundError, _sp.TimeoutExpired):
                 pass
             return f"(PDF file: {path}, {self._format_size(size)} — install pdftotext to read)"
 
-        # Binary detection
+        # ── Jupyter notebook (.ipynb) ─────────────────────────────────
+        if suffix == ".ipynb":
+            try:
+                import json as _json
+                nb = _json.loads(path.read_bytes())
+                cells = nb.get("cells", [])
+                parts = []
+                for ci, cell in enumerate(cells):
+                    ctype = cell.get("cell_type", "code")
+                    src = "".join(cell.get("source", []))
+                    tag = f"[{ctype} cell {ci + 1}]"
+                    parts.append(f"{'=' * 60}\n{tag}")
+                    parts.append(src)
+                    # Show outputs for code cells
+                    outputs = cell.get("outputs", [])
+                    for out in outputs:
+                        otype = out.get("output_type", "")
+                        if otype == "stream":
+                            parts.append("[output]\n" + "".join(out.get("text", [])))
+                        elif otype in ("execute_result", "display_data"):
+                            data = out.get("data", {})
+                            if "text/plain" in data:
+                                parts.append("[result]\n" + "".join(data["text/plain"]))
+                            if "image/png" in data:
+                                parts.append("[image: embedded PNG]")
+                        elif otype == "error":
+                            parts.append("[error] " + out.get("ename", "") + ": " + out.get("evalue", ""))
+                text = "\n".join(parts)
+                lines = text.splitlines()
+                total = len(lines)
+                offset = int(args.get("offset", 0))
+                limit = min(int(args.get("limit", 200)), 500)
+                selected = lines[offset:offset + limit]
+                numbered = [f"{i + offset + 1:>5}\t{line}" for i, line in enumerate(selected)]
+                kernel = nb.get("metadata", {}).get("kernelspec", {}).get("display_name", "?")
+                header = f"# {path} (Jupyter notebook, {len(cells)} cells, kernel: {kernel}, {self._format_size(size)})"
+                if total > offset + limit:
+                    header += f" — showing {offset + 1}-{offset + len(selected)}"
+                return header + "\n" + "\n".join(numbered)
+            except Exception as exc:
+                return f"(notebook parse error: {exc})"
+
+        # ── Binary detection ──────────────────────────────────────────
         if self._is_binary(path):
             return f"(binary file: {path}, {self._format_size(size)}, type: {suffix or 'unknown'})"
 
@@ -3947,30 +4080,48 @@ class RoomManager:
 
     @staticmethod
     async def _tool_grep(args: dict) -> str:
-        """Search files. Beats Claude Code's Grep:
-        CC: uses ripgrep, fast but returns raw output.
-        Ours: tries ripgrep first (fast), falls back to grep, formats
-        output with file headers, match counts per file, and truncates
-        intelligently at match boundaries (not mid-line).
-        """
+        """Search files — multiline, output modes, type filter, pagination."""
         pattern = args.get("pattern", "")
         path = args.get("path", ".")
         file_glob = args.get("glob", "")
+        file_type = args.get("type", "")
         context = min(int(args.get("context", 2)), 5)
+        multiline = args.get("multiline", False)
+        output_mode = args.get("output_mode", "content")
+        skip = int(args.get("offset", 0))
+        head_limit = int(args.get("head_limit", 50))
         if not pattern:
             return "(no pattern provided)"
 
-        # Try ripgrep first, fall back to grep
         import shutil
         rg = shutil.which("rg")
+
+        # Build command based on output mode
         if rg:
-            cmd = [rg, "--no-heading", "--line-number", f"--context={context}",
-                   "--color=never", "--max-count=50"]
+            cmd = [rg, "--color=never"]
+            if output_mode == "files_with_matches":
+                cmd += ["--files-with-matches"]
+            elif output_mode == "count":
+                cmd += ["--count"]
+            else:
+                cmd += ["--no-heading", "--line-number", f"--context={context}",
+                        f"--max-count={head_limit + skip}"]
+            if multiline:
+                cmd += ["-U", "--multiline-dotall"]
             if file_glob:
                 cmd += [f"--glob={file_glob}"]
+            if file_type:
+                cmd += [f"--type={file_type}"]
             cmd += [pattern, path]
         else:
-            cmd = ["grep", "-rn", f"--context={context}", "--color=never", "-m", "50"]
+            # Fallback to grep (no multiline or type support)
+            cmd = ["grep", "-rn", "--color=never"]
+            if output_mode == "files_with_matches":
+                cmd += ["-l"]
+            elif output_mode == "count":
+                cmd += ["-c"]
+            else:
+                cmd += [f"--context={context}", "-m", str(head_limit + skip)]
             if file_glob:
                 cmd += [f"--include={file_glob}"]
             cmd += [pattern, path]
@@ -3978,9 +4129,7 @@ class RoomManager:
         try:
             proc = await asyncio.wait_for(
                 asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
+                    *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 ),
                 timeout=15,
             )
@@ -3989,21 +4138,66 @@ class RoomManager:
             if not output:
                 return f"(no matches for /{pattern}/ in {path})"
 
-            # Count matches and files
-            match_lines = [ln for ln in output.splitlines() if ln and not ln.startswith("--")]
+            all_lines = output.splitlines()
+
+            # ── files_with_matches mode ───────────────────────────────
+            if output_mode == "files_with_matches":
+                files = all_lines[skip:skip + head_limit]
+                total = len(all_lines)
+                header = f"# {total} files match /{pattern}/"
+                if skip > 0:
+                    header += f" (offset {skip})"
+                if total > skip + head_limit:
+                    header += f" — showing {len(files)}"
+                return header + "\n" + "\n".join(f"  {f}" for f in files)
+
+            # ── count mode ────────────────────────────────────────────
+            if output_mode == "count":
+                entries = all_lines[skip:skip + head_limit]
+                total_matches = 0
+                for entry in entries:
+                    if ":" in entry:
+                        try:
+                            total_matches += int(entry.rsplit(":", 1)[1])
+                        except ValueError:
+                            pass
+                header = f"# {total_matches} matches across {len(entries)} file(s)"
+                return header + "\n" + "\n".join(f"  {e}" for e in entries)
+
+            # ── content mode (default) ────────────────────────────────
+            # Extract match entries (groups separated by --)
+            match_lines = [ln for ln in all_lines if ln and not ln.startswith("--")]
             files_seen = set()
             for ln in match_lines:
                 if ":" in ln:
                     files_seen.add(ln.split(":")[0])
+
+            # Apply offset/limit on entries
+            if skip > 0 or head_limit < len(all_lines):
+                # Split output into entry groups
+                groups: list[list[str]] = []
+                current: list[str] = []
+                for ln in all_lines:
+                    if ln == "--":
+                        if current:
+                            groups.append(current)
+                            current = []
+                    else:
+                        current.append(ln)
+                if current:
+                    groups.append(current)
+                selected = groups[skip:skip + head_limit]
+                output = "\n--\n".join("\n".join(g) for g in selected)
+
             header = f"# {len(match_lines)} matches in {len(files_seen)} file(s)"
 
-            # Truncate at match boundary, not mid-line
-            if len(output) > 3000:
+            # Truncate at match boundary
+            if len(output) > 4000:
                 lines = output.splitlines()
                 truncated = []
                 total_len = 0
                 for line in lines:
-                    if total_len + len(line) > 2800:
+                    if total_len + len(line) > 3800:
                         break
                     truncated.append(line)
                     total_len += len(line) + 1
@@ -4017,31 +4211,26 @@ class RoomManager:
         except Exception as e:
             return f"(grep error: {e})"
 
-    @staticmethod
-    async def _tool_bash(args: dict) -> str:
-        """Execute a command. Beats Claude Code's Bash:
-        CC: relies on user approval for safety, 120s timeout, string blocklist.
-        Ours: structural command analysis (catches evasion like 'rm -r -f /'),
-        blocks sudo/su/eval tricks, network isolation via unshare when available,
-        SIGKILL on timeout (no zombie processes), capped output.
-        """
+    # Per-participant persistent working directory and background tasks
+    _agent_cwd: dict[str, str] = {}   # {participant: cwd_path}
+    _bg_tasks: dict[str, dict] = {}   # {task_id: {proc, command, started, participant}}
+
+    async def _tool_bash(self, args: dict, participant_name: str = "") -> str:
+        """Execute a command — persistent cwd, background support, structural safety."""
         command = args.get("command", "")
         timeout = min(int(args.get("timeout", 30)), 60)
+        background = args.get("background", False)
         if not command:
             return "(no command provided)"
 
-        # Structural safety: normalize and check for dangerous patterns
-        # This catches evasion like "rm  -r  -f  /", $(cmd), backticks, etc.
+        # ── Safety checks ─────────────────────────────────────────────
         import shlex
-        normalized = " ".join(command.split())  # collapse whitespace
+        normalized = " ".join(command.split())
         lower = normalized.lower()
 
-        # Block privilege escalation
         if any(lower.startswith(p) for p in ("sudo ", "su ", "su\n", "doas ")):
             return "(blocked: privilege escalation)"
 
-        # Block destructive filesystem operations
-        # Parse tokens to catch flag reordering: rm -rf /, rm -r -f /, rm --force -r /
         try:
             tokens = shlex.split(command)
         except ValueError:
@@ -4062,11 +4251,7 @@ class RoomManager:
             has_root = any(p in ("/", "/*", "/.", "/..") for p in paths)
             if is_recursive and is_force and has_root:
                 return "(blocked: recursive forced deletion of root)"
-            if is_recursive and not paths:
-                # rm -rf with no explicit path is suspicious but allowed
-                pass
 
-        # Block fork bombs and common exploits
         bomb_patterns = [
             ":(){ :", "|:&", "fork()", "./$0|./$0",
             "dd if=/dev/zero of=/dev/sd", "mkfs.", "> /dev/sd",
@@ -4077,18 +4262,35 @@ class RoomManager:
             if bp in normalized:
                 return "(blocked: dangerous pattern detected)"
 
-        # Block eval/exec wrapping common evasion
         if re.search(r'\beval\s', command) or re.search(r'\bexec\s', command):
-            # Allow simple eval but block if it contains rm, dd, mkfs
             inner = command.split("eval", 1)[-1] if "eval" in command else ""
             inner += command.split("exec", 1)[-1] if "exec" in command else ""
             if any(d in inner.lower() for d in ("rm ", "dd ", "mkfs", "/dev/")):
                 return "(blocked: eval/exec wrapping dangerous command)"
 
-        # Build the subprocess — use unshare for network isolation if available
+        # ── Working directory persistence ─────────────────────────────
+        key = participant_name or "_global"
+        cwd = RoomManager._agent_cwd.get(key, os.getcwd())
+
+        # Detect cd commands and update persistent cwd
+        cd_match = re.match(r'^cd\s+(.+?)(?:\s*&&|\s*;|\s*$)', command)
+        if cd_match:
+            target = cd_match.group(1).strip().strip("'\"")
+            target_path = Path(target).expanduser()
+            if not target_path.is_absolute():
+                target_path = Path(cwd) / target_path
+            target_path = target_path.resolve()
+            if target_path.is_dir():
+                RoomManager._agent_cwd[key] = str(target_path)
+                cwd = str(target_path)
+                # If bare "cd <dir>", just update cwd
+                if re.match(r'^cd\s+\S+\s*$', command):
+                    return f"(cwd: {cwd})"
+
+        # ── Build subprocess ──────────────────────────────────────────
         import shutil
         env = os.environ.copy()
-        env["PATH"] = "/usr/local/bin:/usr/bin:/bin"  # restricted PATH
+        env["PATH"] = "/usr/local/bin:/usr/bin:/bin"
 
         use_unshare = shutil.which("unshare") is not None
         if use_unshare:
@@ -4096,20 +4298,40 @@ class RoomManager:
         else:
             shell_cmd = ["bash", "-c", command]
 
+        # ── Background execution ──────────────────────────────────────
+        if background:
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *shell_cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=env, cwd=cwd,
+                )
+                from datetime import datetime
+                task_id = f"bg-{proc.pid}"
+                RoomManager._bg_tasks[task_id] = {
+                    "proc": proc, "command": command,
+                    "started": datetime.now().isoformat(),
+                    "participant": participant_name,
+                }
+                return f"(started background task {task_id}: {command[:60]})"
+            except Exception as e:
+                return f"(background start error: {e})"
+
+        # ── Foreground execution ──────────────────────────────────────
         try:
             proc = await asyncio.wait_for(
                 asyncio.create_subprocess_exec(
                     *shell_cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
-                    env=env,
+                    env=env, cwd=cwd,
                 ),
                 timeout=5,
             )
             try:
                 stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             except asyncio.TimeoutError:
-                # SIGKILL to prevent zombies
                 try:
                     proc.kill()
                     await proc.wait()
@@ -4128,7 +4350,6 @@ class RoomManager:
                 parts.append(f"[exit code: {proc.returncode}]")
             result = "\n".join(parts) if parts else "(no output)"
             if len(result) > 4000:
-                # Truncate at line boundary
                 lines = result.splitlines()
                 truncated = []
                 total_len = 0
