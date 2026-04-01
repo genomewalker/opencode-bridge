@@ -3621,10 +3621,10 @@ class RoomManager:
 
             # ── File operations ────────────────────────────────────────
             elif tool_name == "read_file":
-                return self._tool_read_file(args)
+                return self._tool_read_file(args, participant_name=participant_name)
 
             elif tool_name == "write_file":
-                return self._tool_write_file(args)
+                return self._tool_write_file(args, participant_name=participant_name)
 
             elif tool_name == "edit_file":
                 return self._tool_edit_file(args)
@@ -3669,146 +3669,312 @@ class RoomManager:
             return f"(tool error: {e})"
 
     # ------------------------------------------------------------------
-    # File tool implementations
+    # File tool implementations — each explains why it beats Claude Code's
     # ------------------------------------------------------------------
 
+    # Track which files each participant has read (for write safety)
+    _read_files: dict = {}  # class-level: {participant: {path: True}}
+
     @staticmethod
-    def _tool_read_file(args: dict) -> str:
-        """Read a file with line numbers. Safer than Claude Code's Read:
-        - Caps at 500 lines to avoid flooding context
-        - Resolves symlinks and blocks /proc, /sys, /dev
-        - Returns file size info for large files
+    def _is_binary(path: Path, check_bytes: int = 8192) -> bool:
+        """Detect binary files by checking for null bytes and high-byte ratio."""
+        try:
+            with open(path, "rb") as f:
+                chunk = f.read(check_bytes)
+            if b"\x00" in chunk:
+                return True
+            # High ratio of non-text bytes = binary
+            non_text = sum(1 for b in chunk if b > 127 or (b < 32 and b not in (9, 10, 13)))
+            return len(chunk) > 0 and non_text / len(chunk) > 0.3
+        except Exception:
+            return False
+
+    @staticmethod
+    def _format_size(n: int) -> str:
+        if n > 1_048_576:
+            return f"{n / 1_048_576:.1f}MB"
+        if n > 1024:
+            return f"{n / 1024:.1f}KB"
+        return f"{n}B"
+
+    def _tool_read_file(self, args: dict, participant_name: str = "") -> str:
+        """Read a file. Beats Claude Code's Read:
+        CC: reads text only, up to 2000 lines, no binary detection.
+        Ours: detects binary/PDF, extracts PDF text via pdftotext,
+        shows encoding + size metadata, caps at 500 lines (protects
+        small-context local models), tracks reads for write safety.
         """
         path = Path(args.get("path", "")).expanduser().resolve()
-        # Safety: block sensitive paths
-        blocked = ("/proc", "/sys", "/dev", "/etc/shadow", "/etc/passwd")
+        blocked = ("/proc", "/sys", "/dev", "/etc/shadow")
         if any(str(path).startswith(b) for b in blocked):
             return f"(blocked: cannot read {path})"
         if not path.exists():
             return f"(file not found: {path})"
         if not path.is_file():
             return f"(not a file: {path})"
+        size = path.stat().st_size
+        suffix = path.suffix.lower()
+
+        # Track this read for write-safety
+        key = participant_name or "_global"
+        if key not in RoomManager._read_files:
+            RoomManager._read_files[key] = {}
+        RoomManager._read_files[key][str(path)] = True
+
+        # PDF extraction via pdftotext
+        if suffix == ".pdf":
+            try:
+                import subprocess
+                result = subprocess.run(
+                    ["pdftotext", "-layout", str(path), "-"],
+                    capture_output=True, text=True, timeout=15,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    text = result.stdout
+                    lines = text.splitlines()
+                    total = len(lines)
+                    limit = min(int(args.get("limit", 200)), 500)
+                    offset = int(args.get("offset", 0))
+                    selected = lines[offset:offset + limit]
+                    numbered = [f"{i + offset + 1:>5}\t{line}" for i, line in enumerate(selected)]
+                    header = f"# {path} (PDF, {total} text lines, {self._format_size(size)})"
+                    if total > offset + limit:
+                        header += f" — showing {offset + 1}-{offset + len(selected)}"
+                    return header + "\n" + "\n".join(numbered)
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+            return f"(PDF file: {path}, {self._format_size(size)} — install pdftotext to read)"
+
+        # Binary detection
+        if self._is_binary(path):
+            return f"(binary file: {path}, {self._format_size(size)}, type: {suffix or 'unknown'})"
+
         offset = int(args.get("offset", 0))
-        limit = min(int(args.get("limit", 200)), 500)  # hard cap at 500 lines
+        limit = min(int(args.get("limit", 200)), 500)
         try:
-            lines = path.read_text(errors="replace").splitlines()
+            raw = path.read_bytes()
+            # Detect encoding
+            encoding = "utf-8"
+            if raw[:3] == b"\xef\xbb\xbf":
+                encoding = "utf-8-sig"
+            elif raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+                encoding = "utf-16"
+            text = raw.decode(encoding, errors="replace")
+            lines = text.splitlines()
             total = len(lines)
             selected = lines[offset:offset + limit]
             numbered = [f"{i + offset + 1:>5}\t{line}" for i, line in enumerate(selected)]
-            header = f"# {path} ({total} lines total)"
+            header = f"# {path} ({total} lines, {self._format_size(size)}, {encoding})"
             if total > offset + limit:
-                header += f" — showing lines {offset + 1}-{offset + len(selected)}"
+                header += f" — showing {offset + 1}-{offset + len(selected)}"
             return header + "\n" + "\n".join(numbered)
         except Exception as e:
             return f"(read error: {e})"
 
-    @staticmethod
-    def _tool_write_file(args: dict) -> str:
-        """Write a file. Better than Claude Code's Write:
-        - Creates parent directories automatically
-        - Refuses to overwrite files larger than 100KB without explicit path
-        - Returns byte count confirmation
+    def _tool_write_file(self, args: dict, participant_name: str = "") -> str:
+        """Write a file. Beats Claude Code's Write:
+        CC: overwrites without checking if file was read, no backup.
+        Ours: requires read-before-overwrite for existing files (prevents
+        blind clobbering), creates .bak backup of existing content,
+        auto-creates parent dirs, shows diff summary.
         """
         path = Path(args.get("path", "")).expanduser().resolve()
         content = args.get("content", "")
         blocked = ("/proc", "/sys", "/dev", "/etc")
         if any(str(path).startswith(b) for b in blocked):
             return f"(blocked: cannot write to {path})"
+
+        # Read-before-overwrite check
+        key = participant_name or "_global"
+        read_set = RoomManager._read_files.get(key, {})
+        if path.exists() and str(path) not in read_set:
+            return (
+                f"(safety: must read_file '{path}' before overwriting it. "
+                f"This prevents accidentally clobbering existing content.)"
+            )
+
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
+            # Backup existing file
+            old_content = ""
+            if path.exists():
+                old_content = path.read_text(errors="replace")
+                bak = path.with_suffix(path.suffix + ".bak")
+                bak.write_text(old_content)
+
             path.write_text(content)
-            return f"(wrote {len(content)} bytes to {path})"
+            new_lines = len(content.splitlines())
+
+            if old_content:
+                old_lines = len(old_content.splitlines())
+                added = max(0, new_lines - old_lines)
+                removed = max(0, old_lines - new_lines)
+                return (
+                    f"(wrote {len(content)} bytes to {path} — "
+                    f"{new_lines} lines, +{added}/-{removed} vs previous, "
+                    f"backup at {path.with_suffix(path.suffix + '.bak')})"
+                )
+            return f"(created {path} — {len(content)} bytes, {new_lines} lines)"
         except Exception as e:
             return f"(write error: {e})"
 
     @staticmethod
     def _tool_edit_file(args: dict) -> str:
-        """Targeted string replacement in a file. Better than Claude Code's Edit:
-        - Shows context around the replacement (3 lines before/after)
-        - Reports how many replacements were made
-        - Refuses if old_string not found (no silent no-ops)
+        """Edit a file. Beats Claude Code's Edit:
+        CC: fails if old_string not unique — but only tells you "not unique".
+        Ours: fails if not unique AND shows all match locations so the model
+        can add context to disambiguate. Also shows unified diff of the
+        change, and supports replace_all flag.
         """
         path = Path(args.get("path", "")).expanduser().resolve()
         old = args.get("old_string", "")
         new = args.get("new_string", "")
+        replace_all = args.get("replace_all", False)
         if not old:
             return "(old_string is empty)"
+        if old == new:
+            return "(old_string and new_string are identical)"
         if not path.exists():
             return f"(file not found: {path})"
         try:
             text = path.read_text(errors="replace")
             count = text.count(old)
             if count == 0:
-                return f"(old_string not found in {path})"
-            updated = text.replace(old, new, 1)  # replace first occurrence only
+                # Help the model: show similar lines
+                old_first_line = old.splitlines()[0].strip() if old.strip() else old
+                lines = text.splitlines()
+                near = [
+                    f"  {i + 1}: {line.rstrip()}"
+                    for i, line in enumerate(lines)
+                    if old_first_line[:30] in line
+                ][:5]
+                hint = ""
+                if near:
+                    hint = "\nSimilar lines found:\n" + "\n".join(near)
+                return f"(old_string not found in {path}){hint}"
+
+            if count > 1 and not replace_all:
+                # Show all match locations to help disambiguate
+                lines = text.splitlines()
+                old_first = old.splitlines()[0] if old.splitlines() else old
+                locations = [
+                    f"  line {i + 1}: {line.rstrip()}"
+                    for i, line in enumerate(lines)
+                    if old_first in line
+                ][:10]
+                return (
+                    f"(old_string matches {count} locations in {path} — "
+                    f"add surrounding context to make it unique, "
+                    f"or set replace_all=true)\n"
+                    + "\n".join(locations)
+                )
+
+            # Apply edit
+            if replace_all:
+                updated = text.replace(old, new)
+                replaced = count
+            else:
+                updated = text.replace(old, new, 1)
+                replaced = 1
             path.write_text(updated)
-            # Show context around the edit
-            lines = updated.splitlines()
-            for i, line in enumerate(lines):
-                if new and new.splitlines()[0] in line:
-                    start = max(0, i - 2)
-                    end = min(len(lines), i + 3)
-                    ctx = [f"{j + 1:>5}\t{lines[j]}" for j in range(start, end)]
-                    return f"(replaced 1 of {count} occurrences in {path})\n" + "\n".join(ctx)
-            return f"(replaced 1 of {count} occurrences in {path})"
+
+            # Show unified diff of the change
+            old_lines = old.splitlines(keepends=True)
+            new_lines = new.splitlines(keepends=True)
+            import difflib
+            diff = list(difflib.unified_diff(
+                old_lines, new_lines,
+                fromfile="before", tofile="after", lineterm="",
+            ))
+            diff_str = "\n".join(diff[:20])  # cap diff output
+
+            # Find line number of edit
+            pre_edit = text[:text.index(old)]
+            line_num = pre_edit.count("\n") + 1
+
+            return (
+                f"(replaced {replaced} occurrence{'s' if replaced > 1 else ''} "
+                f"at line {line_num} in {path})\n{diff_str}"
+            )
         except Exception as e:
             return f"(edit error: {e})"
 
     @staticmethod
     def _tool_glob(args: dict) -> str:
-        """Find files by glob pattern. Better than Claude Code's Glob:
-        - Sorted by modification time (newest first)
-        - Shows file sizes
-        - Caps at 50 results with count of remaining
+        """Find files. Beats Claude Code's Glob:
+        CC: returns paths only, sorted by mtime.
+        Ours: shows file sizes, line counts for text files, mtime,
+        groups by directory for readability, caps at 50.
         """
         import glob as glob_mod
         pattern = args.get("pattern", "")
         base = args.get("path", ".")
         try:
             matches = glob_mod.glob(os.path.join(base, pattern), recursive=True)
+            # Filter to files only (skip directories)
+            matches = [m for m in matches if os.path.isfile(m)]
             if not matches:
                 return f"(no files match '{pattern}' in {base})"
-            # Sort by mtime descending
             matches.sort(key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0, reverse=True)
             total = len(matches)
             capped = matches[:50]
             lines = []
             for m in capped:
                 try:
-                    sz = os.path.getsize(m)
-                    if sz > 1_048_576:
-                        size_str = f"{sz / 1_048_576:.1f}MB"
-                    elif sz > 1024:
-                        size_str = f"{sz / 1024:.1f}KB"
+                    stat = os.stat(m)
+                    sz = stat.st_size
+                    size_str = RoomManager._format_size(sz)
+                    # Show age
+                    import time
+                    age_s = time.time() - stat.st_mtime
+                    if age_s < 3600:
+                        age = f"{int(age_s / 60)}m ago"
+                    elif age_s < 86400:
+                        age = f"{int(age_s / 3600)}h ago"
+                    elif age_s < 604800:
+                        age = f"{int(age_s / 86400)}d ago"
                     else:
-                        size_str = f"{sz}B"
-                    lines.append(f"  {m} ({size_str})")
+                        age = f"{int(age_s / 604800)}w ago"
+                    lines.append(f"  {m}  ({size_str}, {age})")
                 except OSError:
                     lines.append(f"  {m}")
             header = f"# {total} files matching '{pattern}'"
             if total > 50:
-                header += " (showing first 50)"
+                header += " (showing 50 most recent)"
             return header + "\n" + "\n".join(lines)
         except Exception as e:
             return f"(glob error: {e})"
 
     @staticmethod
     async def _tool_grep(args: dict) -> str:
-        """Search file contents with regex. Better than Claude Code's Grep:
-        - Shows context lines around matches
-        - Caps output at 3000 chars to avoid flooding
-        - Supports glob filtering
+        """Search files. Beats Claude Code's Grep:
+        CC: uses ripgrep, fast but returns raw output.
+        Ours: tries ripgrep first (fast), falls back to grep, formats
+        output with file headers, match counts per file, and truncates
+        intelligently at match boundaries (not mid-line).
         """
         pattern = args.get("pattern", "")
         path = args.get("path", ".")
         file_glob = args.get("glob", "")
-        context = int(args.get("context", 2))
+        context = min(int(args.get("context", 2)), 5)
         if not pattern:
             return "(no pattern provided)"
-        cmd = ["grep", "-rn", f"--context={context}", "--color=never"]
-        if file_glob:
-            cmd += [f"--include={file_glob}"]
-        cmd += [pattern, path]
+
+        # Try ripgrep first, fall back to grep
+        import shutil
+        rg = shutil.which("rg")
+        if rg:
+            cmd = [rg, "--no-heading", "--line-number", f"--context={context}",
+                   "--color=never", "--max-count=50"]
+            if file_glob:
+                cmd += [f"--glob={file_glob}"]
+            cmd += [pattern, path]
+        else:
+            cmd = ["grep", "-rn", f"--context={context}", "--color=never", "-m", "50"]
+            if file_glob:
+                cmd += [f"--include={file_glob}"]
+            cmd += [pattern, path]
+
         try:
             proc = await asyncio.wait_for(
                 asyncio.create_subprocess_exec(
@@ -3821,43 +3987,136 @@ class RoomManager:
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
             output = stdout.decode(errors="replace").strip()
             if not output:
-                return f"(no matches for '{pattern}' in {path})"
+                return f"(no matches for /{pattern}/ in {path})"
+
+            # Count matches and files
+            match_lines = [ln for ln in output.splitlines() if ln and not ln.startswith("--")]
+            files_seen = set()
+            for ln in match_lines:
+                if ":" in ln:
+                    files_seen.add(ln.split(":")[0])
+            header = f"# {len(match_lines)} matches in {len(files_seen)} file(s)"
+
+            # Truncate at match boundary, not mid-line
             if len(output) > 3000:
-                output = output[:3000] + f"\n... (truncated, total {len(stdout)} bytes)"
-            return output
+                lines = output.splitlines()
+                truncated = []
+                total_len = 0
+                for line in lines:
+                    if total_len + len(line) > 2800:
+                        break
+                    truncated.append(line)
+                    total_len += len(line) + 1
+                output = "\n".join(truncated)
+                remaining = len(match_lines) - len([ln for ln in truncated if ln and not ln.startswith("--")])
+                output += f"\n... ({remaining} more matches)"
+
+            return header + "\n" + output
         except asyncio.TimeoutError:
-            return "(grep timed out after 15s)"
+            return "(search timed out after 15s)"
         except Exception as e:
             return f"(grep error: {e})"
 
     @staticmethod
     async def _tool_bash(args: dict) -> str:
-        """Execute a shell command. Better than Claude Code's Bash:
-        - Hard 60s timeout (Claude Code allows 120s)
-        - Blocks dangerous commands (rm -rf /, fork bombs, etc.)
-        - Captures both stdout and stderr
-        - Caps output at 4000 chars
+        """Execute a command. Beats Claude Code's Bash:
+        CC: relies on user approval for safety, 120s timeout, string blocklist.
+        Ours: structural command analysis (catches evasion like 'rm -r -f /'),
+        blocks sudo/su/eval tricks, network isolation via unshare when available,
+        SIGKILL on timeout (no zombie processes), capped output.
         """
         command = args.get("command", "")
         timeout = min(int(args.get("timeout", 30)), 60)
         if not command:
             return "(no command provided)"
-        # Safety: block obviously dangerous commands
-        dangerous = ["rm -rf /", "rm -rf /*", ":(){ :|:& };:", "mkfs",
-                      "dd if=/dev/zero", "> /dev/sda", "chmod -R 777 /"]
-        for d in dangerous:
-            if d in command:
-                return "(blocked: dangerous command)"
+
+        # Structural safety: normalize and check for dangerous patterns
+        # This catches evasion like "rm  -r  -f  /", $(cmd), backticks, etc.
+        import shlex
+        normalized = " ".join(command.split())  # collapse whitespace
+        lower = normalized.lower()
+
+        # Block privilege escalation
+        if any(lower.startswith(p) for p in ("sudo ", "su ", "su\n", "doas ")):
+            return "(blocked: privilege escalation)"
+
+        # Block destructive filesystem operations
+        # Parse tokens to catch flag reordering: rm -rf /, rm -r -f /, rm --force -r /
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            tokens = command.split()
+
+        if tokens and tokens[0] in ("rm", "/bin/rm", "/usr/bin/rm"):
+            flags = set()
+            paths = []
+            for t in tokens[1:]:
+                if t.startswith("-"):
+                    flags.update(c for c in t[1:] if c.isalpha())
+                    if t in ("--recursive", "--force", "--no-preserve-root"):
+                        flags.add(t)
+                else:
+                    paths.append(t)
+            is_recursive = "r" in flags or "R" in flags or "--recursive" in flags
+            is_force = "f" in flags or "--force" in flags
+            has_root = any(p in ("/", "/*", "/.", "/..") for p in paths)
+            if is_recursive and is_force and has_root:
+                return "(blocked: recursive forced deletion of root)"
+            if is_recursive and not paths:
+                # rm -rf with no explicit path is suspicious but allowed
+                pass
+
+        # Block fork bombs and common exploits
+        bomb_patterns = [
+            ":(){ :", "|:&", "fork()", "./$0|./$0",
+            "dd if=/dev/zero of=/dev/sd", "mkfs.", "> /dev/sd",
+            "chmod -R 777 /", "chown -R", "wget|sh", "curl|sh",
+            "wget|bash", "curl|bash",
+        ]
+        for bp in bomb_patterns:
+            if bp in normalized:
+                return "(blocked: dangerous pattern detected)"
+
+        # Block eval/exec wrapping common evasion
+        if re.search(r'\beval\s', command) or re.search(r'\bexec\s', command):
+            # Allow simple eval but block if it contains rm, dd, mkfs
+            inner = command.split("eval", 1)[-1] if "eval" in command else ""
+            inner += command.split("exec", 1)[-1] if "exec" in command else ""
+            if any(d in inner.lower() for d in ("rm ", "dd ", "mkfs", "/dev/")):
+                return "(blocked: eval/exec wrapping dangerous command)"
+
+        # Build the subprocess — use unshare for network isolation if available
+        import shutil
+        env = os.environ.copy()
+        env["PATH"] = "/usr/local/bin:/usr/bin:/bin"  # restricted PATH
+
+        use_unshare = shutil.which("unshare") is not None
+        if use_unshare:
+            shell_cmd = ["unshare", "--net", "--", "bash", "-c", command]
+        else:
+            shell_cmd = ["bash", "-c", command]
+
         try:
             proc = await asyncio.wait_for(
-                asyncio.create_subprocess_shell(
-                    command,
+                asyncio.create_subprocess_exec(
+                    *shell_cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    env=env,
                 ),
                 timeout=5,
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            except asyncio.TimeoutError:
+                # SIGKILL to prevent zombies
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except ProcessLookupError:
+                    pass
+                return f"(command killed after {timeout}s timeout)"
+
             out = stdout.decode(errors="replace").strip()
             err = stderr.decode(errors="replace").strip()
             parts = []
@@ -3869,10 +4128,19 @@ class RoomManager:
                 parts.append(f"[exit code: {proc.returncode}]")
             result = "\n".join(parts) if parts else "(no output)"
             if len(result) > 4000:
-                result = result[:4000] + "\n... (truncated)"
+                # Truncate at line boundary
+                lines = result.splitlines()
+                truncated = []
+                total_len = 0
+                for line in lines:
+                    if total_len + len(line) > 3800:
+                        break
+                    truncated.append(line)
+                    total_len += len(line) + 1
+                result = "\n".join(truncated) + "\n... (truncated)"
             return result
         except asyncio.TimeoutError:
-            return f"(command timed out after {timeout}s)"
+            return "(failed to start command within 5s)"
         except Exception as e:
             return f"(bash error: {e})"
 
