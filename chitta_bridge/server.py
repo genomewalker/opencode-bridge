@@ -2587,6 +2587,12 @@ class LocalModelBridge:
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     result = json.loads(resp.read().decode())
                 return result["choices"][0]["message"]["content"]
+            except urllib.error.HTTPError as e:
+                # Retry on 500/502/503 (model loading, GPU contention)
+                if e.code in (500, 502, 503):
+                    last_exc = e
+                    continue
+                raise
             except (http.client.RemoteDisconnected, ConnectionResetError, urllib.error.URLError) as e:
                 last_exc = e
                 continue
@@ -2739,20 +2745,36 @@ class SoulClient:
             return None
 
     @classmethod
-    def recall(cls, query: str, limit: int = 5) -> Optional[str]:
-        return cls._call("recall", {"query": query, "limit": limit})
+    def recall(cls, query: str, limit: int = 5, realm: Optional[str] = None) -> Optional[str]:
+        args: dict[str, Any] = {"query": query, "limit": limit}
+        if realm:
+            args["realm"] = realm
+        return cls._call("recall", args)
 
     @classmethod
-    def smart_context(cls, task: str) -> Optional[str]:
-        return cls._call("smart_context", {"task": task}, timeout=10.0)
+    def smart_context(cls, task: str, realm: Optional[str] = None) -> Optional[str]:
+        args: dict[str, Any] = {"task": task}
+        if realm:
+            args["realm"] = realm
+        return cls._call("smart_context", args, timeout=10.0)
 
     @classmethod
     def remember(cls, content: str, kind: str = "episode",
-                 tags: str = "", confidence: float = 0.8) -> Optional[str]:
+                 tags: str = "", confidence: float = 0.8,
+                 realm: Optional[str] = None) -> Optional[str]:
         args: dict[str, Any] = {"content": content, "type": kind, "confidence": confidence}
         if tags:
             args["tags"] = tags
+        if realm:
+            args["realm"] = realm
         return cls._call("remember", args)
+
+    @classmethod
+    def hybrid_recall(cls, query: str, limit: int = 5, realm: Optional[str] = None) -> Optional[str]:
+        args: dict[str, Any] = {"query": query, "limit": limit}
+        if realm:
+            args["realm"] = realm
+        return cls._call("hybrid_recall", args)
 
     @classmethod
     def is_available(cls) -> bool:
@@ -3051,13 +3073,114 @@ Error: {e}"""
 # ---------------------------------------------------------------------------
 
 @dataclass
+class AgentSoul:
+    """Identity and capabilities for a room participant — the agent's 'soul'."""
+    system_prompt: str             # markdown body: expertise, personality, rules
+    realm: str = ""                # chitta memory namespace, e.g. "agent:critic"
+    tools: list = field(default_factory=list)  # ["recall", "remember", "web_search", ...]
+    max_tool_turns: int = 3        # max tool-use iterations per response
+    max_rounds: int = 0            # max discussion rounds (0 = unlimited)
+    response_format: str = ""      # structured output template
+    challenge_bias: float = 0.5    # 0=agreeable, 1=devil's advocate
+
+
+# Tool definitions for the mediated tool-calling loop (Ollama native + XML fallback)
+AGENT_TOOL_DEFINITIONS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "recall",
+            "description": "Search your memory for relevant knowledge. Returns semantically similar memories.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "What to search for"},
+                    "limit": {"type": "integer", "description": "Max results (default 5)"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "remember",
+            "description": "Store an important insight or fact in your memory for future recall.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string", "description": "What to remember"},
+                    "tags": {"type": "string", "description": "Comma-separated tags"},
+                },
+                "required": ["content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Search the web for current information.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                    "max_results": {"type": "integer", "description": "Max results (default 5)"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "smart_context",
+            "description": "Get contextually relevant memories for a task or topic.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string", "description": "Describe the task or topic"},
+                },
+                "required": ["task"],
+            },
+        },
+    },
+]
+
+# XML fallback instruction block for models that don't support native tool calling
+TOOL_XML_INSTRUCTIONS = """## Available Tools
+
+You can request tool calls by outputting EXACTLY this XML format:
+
+<tool_call>
+{"tool": "recall", "args": {"query": "your search query", "limit": 5}}
+</tool_call>
+
+Wait for the result before continuing. You may make multiple tool calls.
+When done with tools, output your final response inside:
+
+<final_response>
+Your contribution to the discussion goes here.
+</final_response>
+
+Available tools:
+- recall: Search your memory. Args: query (string, required), limit (int, default 5)
+- remember: Store a memory. Args: content (string, required), tags (string, optional)
+- web_search: Search the web. Args: query (string, required), max_results (int, default 5)
+- smart_context: Get relevant context for a task. Args: task (string, required)
+"""
+
+
+@dataclass
 class DiscussionRoom:
     """Shared message board where multiple agents post and read asynchronously."""
     id: str
     topic: str
-    participants: list  # [{name, backend, session_id}]
+    participants: list  # [{name, backend, session_id, soul?}]
     messages: list = field(default_factory=list)  # [{name, content, ts}]
     created: str = field(default_factory=lambda: datetime.now().isoformat())
+    turn_counts: dict = field(default_factory=dict)  # {name: int} per-participant round count
+    challenge_mode: bool = False
 
 
 class RoomManager:
@@ -3074,15 +3197,17 @@ class RoomManager:
             return f"Room '{room_id}' already exists."
         room = DiscussionRoom(id=room_id, topic=topic, participants=participants)
         room.messages.append({"name": "TOPIC", "content": topic, "ts": datetime.now().isoformat()})
-        # Inject soul context if chittad is running
+        # Inject soul context if chittad is running (filter code symbols)
         if SoulClient.is_available():
-            ctx = SoulClient.recall(topic, limit=5)
+            ctx = SoulClient.hybrid_recall(topic, limit=5)
             if ctx and len(ctx.strip()) > 20:
-                room.messages.append({
-                    "name": "CONTEXT",
-                    "content": f"[Soul memory context]\n{ctx}",
-                    "ts": datetime.now().isoformat(),
-                })
+                code_markers = ["[code]", "[symbol]", "function ", "class ", "method "]
+                if not any(m in ctx[:200] for m in code_markers):
+                    room.messages.append({
+                        "name": "CONTEXT",
+                        "content": f"[Relevant memories]\n{ctx}",
+                        "ts": datetime.now().isoformat(),
+                    })
         self.rooms[room_id] = room
         names = ", ".join(p["name"] for p in participants)
         soul_tag = " (with soul context)" if len(room.messages) > 1 else ""
@@ -3182,26 +3307,256 @@ class RoomManager:
             SoulClient.remember(memory, kind="wisdom", tags=f"room,synthesis,{tags}", confidence=0.85)
         return f"## Synthesis by {synth_name}\n\n{reply}"
 
-    def _build_thread_context(self, room: DiscussionRoom, my_name: str) -> str:
-        """Build the full thread context to show a participant before they respond."""
-        parts = [
-            f"You are **{my_name}** in a multi-agent discussion room.",
-            f"**Topic:** {room.topic}",
-            "",
-            "## Discussion so far",
-        ]
+    # ------------------------------------------------------------------
+    # Soul-aware context building
+    # ------------------------------------------------------------------
+
+    def _parse_soul(self, participant: dict) -> Optional[AgentSoul]:
+        """Parse soul from participant dict, if present."""
+        raw = participant.get("soul")
+        if not raw:
+            return None
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except json.JSONDecodeError:
+                return AgentSoul(system_prompt=raw)
+        name_slug = re.sub(r"[^a-z0-9]+", "-", participant["name"].lower()).strip("-")
+        return AgentSoul(
+            system_prompt=raw.get("system_prompt", raw.get("prompt", "")),
+            realm=raw.get("realm", f"agent:{name_slug}"),
+            tools=raw.get("tools", []),
+            max_tool_turns=raw.get("max_tool_turns", 3),
+            max_rounds=raw.get("max_rounds", 0),
+            response_format=raw.get("response_format", ""),
+            challenge_bias=raw.get("challenge_bias", 0.5),
+        )
+
+    def _build_thread_context(self, room: DiscussionRoom, participant: dict) -> tuple[str, str]:
+        """Build (system_prompt, user_message) for a participant.
+
+        If the participant has a soul, the system prompt contains their identity,
+        loaded memories, and tool instructions. Otherwise falls back to the
+        generic prompt used before.
+        """
+        name = participant["name"]
+        soul = self._parse_soul(participant)
+
+        # -- Build discussion transcript --
+        transcript_parts = []
         for msg in room.messages:
             if msg["name"] == "TOPIC":
                 continue
-            parts.append(f"**{msg['name']}:** {msg['content']}")
-            parts.append("")
-        parts += [
+            transcript_parts.append(f"**{msg['name']}:** {msg['content']}")
+            transcript_parts.append("")
+        transcript = "\n".join(transcript_parts)
+
+        # -- System prompt (the soul) --
+        if soul and soul.system_prompt:
+            sys_parts = [soul.system_prompt]
+
+            # Load relevant memories from the agent's realm
+            if soul.realm and SoulClient.is_available():
+                memories = SoulClient.hybrid_recall(room.topic, limit=5, realm=soul.realm)
+                if memories and len(memories.strip()) > 20:
+                    sys_parts.append(f"\n## Your Memories\n{memories}")
+                # Also check global memories — but filter to non-code types only
+                global_mem = SoulClient.hybrid_recall(room.topic, limit=3)
+                if global_mem and len(global_mem.strip()) > 20:
+                    # Skip if it's mostly code symbols (not useful for discussions)
+                    code_markers = ["[code]", "[symbol]", "function ", "class ", "method "]
+                    if not any(m in global_mem[:200] for m in code_markers):
+                        sys_parts.append(f"\n## Shared Knowledge\n{global_mem}")
+
+            # Tool instructions (XML fallback — always included for models that
+            # don't support native tool calling)
+            if soul.tools:
+                available = [t for t in AGENT_TOOL_DEFINITIONS
+                             if t["function"]["name"] in soul.tools]
+                if available:
+                    tool_lines = []
+                    for t in available:
+                        fn = t["function"]
+                        params = fn["parameters"]["properties"]
+                        param_desc = ", ".join(
+                            f'{k} ({v.get("type", "string")}'
+                            f'{", required" if k in fn["parameters"].get("required", []) else ""})'
+                            for k, v in params.items()
+                        )
+                        tool_lines.append(f"- **{fn['name']}**: {fn['description']}. Args: {param_desc}")
+                    sys_parts.append(TOOL_XML_INSTRUCTIONS.replace(
+                        "Available tools:\n- recall: Search your memory. Args: query (string, required), limit (int, default 5)\n- remember: Store a memory. Args: content (string, required), tags (string, optional)\n- web_search: Search the web. Args: query (string, required), max_results (int, default 5)\n- smart_context: Get relevant context for a task. Args: task (string, required)",
+                        "Available tools:\n" + "\n".join(tool_lines),
+                    ))
+
+            # Response format
+            if soul.response_format:
+                sys_parts.append(f"\n## Response Format\n{soul.response_format}")
+
+            # Challenge bias instruction
+            if soul.challenge_bias > 0.6:
+                sys_parts.append(
+                    "\n## Critical Thinking Directive\n"
+                    "You are a rigorous critic. When other participants make claims, "
+                    "ACTIVELY challenge them. Ask for evidence. Point out logical gaps. "
+                    "Do NOT agree just to be polite. If something sounds wrong or "
+                    "unsubstantiated, say so directly."
+                )
+
+            system_prompt = "\n".join(sys_parts)
+        else:
+            system_prompt = f"You are **{name}** in a multi-agent discussion room."
+
+        # -- User message --
+        user_parts = [
+            f"**Topic:** {room.topic}",
+            "",
+            "## Discussion so far",
+            transcript if transcript else "(No messages yet — you are first to respond.)",
+            "",
             "## Your turn",
-            f"You are {my_name}. Read the full discussion above and contribute your perspective.",
+            f"You are {name}. Read the full discussion above and contribute your perspective.",
             "Be direct and specific. React to what others said — agree, challenge, or add something new.",
-            "Keep it to 2-4 paragraphs.",
         ]
-        return "\n".join(parts)
+        if not (soul and soul.tools):
+            user_parts.append("Keep it to 2-4 paragraphs.")
+
+        return system_prompt, "\n".join(user_parts)
+
+    # ------------------------------------------------------------------
+    # Tool execution for room participants
+    # ------------------------------------------------------------------
+
+    _TOOL_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
+    _FINAL_RESPONSE_RE = re.compile(r"<final_response>(.*?)</final_response>", re.DOTALL)
+
+    def _extract_tool_call(self, text: str) -> Optional[dict]:
+        """Extract the first <tool_call> from model output."""
+        m = self._TOOL_CALL_RE.search(text)
+        if not m:
+            return None
+        try:
+            parsed = json.loads(m.group(1))
+            if "tool" in parsed:
+                return {"tool": parsed["tool"], "args": parsed.get("args", {})}
+        except json.JSONDecodeError:
+            pass
+        return None
+
+    def _extract_final_response(self, text: str) -> Optional[str]:
+        """Extract <final_response> content, if present."""
+        m = self._FINAL_RESPONSE_RE.search(text)
+        return m.group(1).strip() if m else None
+
+    async def _execute_agent_tool(self, tool_name: str, args: dict,
+                                   realm: Optional[str] = None) -> str:
+        """Execute a tool on behalf of a room participant."""
+        try:
+            if tool_name == "recall":
+                result = SoulClient.recall(
+                    query=args.get("query", ""),
+                    limit=int(args.get("limit", 5)),
+                    realm=realm,
+                )
+                return result or "(no memories found)"
+
+            elif tool_name == "remember":
+                result = SoulClient.remember(
+                    content=args.get("content", ""),
+                    kind=args.get("kind", "wisdom"),
+                    tags=args.get("tags", ""),
+                    confidence=float(args.get("confidence", 0.8)),
+                    realm=realm,
+                )
+                return result or "(stored)"
+
+            elif tool_name == "smart_context":
+                result = SoulClient.smart_context(
+                    task=args.get("task", ""),
+                    realm=realm,
+                )
+                return result or "(no context found)"
+
+            elif tool_name == "hybrid_recall":
+                result = SoulClient.hybrid_recall(
+                    query=args.get("query", ""),
+                    limit=int(args.get("limit", 5)),
+                    realm=realm,
+                )
+                return result or "(no results)"
+
+            elif tool_name == "web_search":
+                results = WebSearch.search(
+                    query=args.get("query", ""),
+                    max_results=int(args.get("max_results", 5)),
+                )
+                if not results:
+                    return "(no web results)"
+                lines = []
+                for r in results:
+                    lines.append(f"**{r.get('title', '')}**")
+                    lines.append(f"  {r.get('url', '')}")
+                    lines.append(f"  {r.get('snippet', '')}")
+                return "\n".join(lines)
+
+            else:
+                return f"(unknown tool: {tool_name})"
+        except Exception as e:
+            return f"(tool error: {e})"
+
+    # ------------------------------------------------------------------
+    # Backend dispatch + tool-use loop
+    # ------------------------------------------------------------------
+
+    async def _send_to_backend(self, participant: dict, message: str,
+                                system_prompt: Optional[str] = None,
+                                tools: Optional[list] = None) -> str:
+        """Send a message to a participant's backend, returning the raw reply."""
+        name = participant["name"]
+        backend = participant["backend"]
+        sid = participant.get("session_id")
+
+        if backend == "claude":
+            full_prompt = f"{system_prompt}\n\n{message}" if system_prompt else message
+            return await self._run_claude_p(full_prompt)
+
+        elif backend == "local":
+            base_url = participant.get("base_url") or participant.get("endpoint")
+            model = participant.get("model", "")
+            if not base_url:
+                nodes = await asyncio.get_event_loop().run_in_executor(None, GpuNodeDiscovery.discover)
+                if not nodes:
+                    return "[error: no local model endpoint found]"
+                node = nodes[0]
+                base_url = node["base_url"]
+                if not model and node["models"]:
+                    model = node["models"][0]
+            if base_url:
+                if sid and sid in self.local.sessions:
+                    return await self.local.send_message(message, sid, system_prompt=system_prompt)
+                else:
+                    tmp = f"room-{participant.get('_room_id', 'r')}-{name.lower().replace(' ', '-')}"
+                    if tmp not in self.local.sessions:
+                        self.local.start_session(tmp, model=model or "default", endpoint=base_url)
+                    participant["session_id"] = tmp
+                    return await self.local.send_message(message, tmp, system_prompt=system_prompt)
+            return "[error: no endpoint]"
+
+        elif backend == "codex":
+            full_prompt = f"{system_prompt}\n\n{message}" if system_prompt else message
+            if sid and sid in self.codex.sessions:
+                return await self.codex.send_message(full_prompt, sid)
+            return await self.codex.run_task(full_prompt)
+
+        else:  # opencode
+            full_prompt = f"{system_prompt}\n\n{message}" if system_prompt else message
+            if sid and sid in self.opencode.sessions:
+                return await self.opencode.send_message(full_prompt, sid, _raw=True)
+            tmp = f"room-{participant.get('_room_id', 'r')}-{name.lower().replace(' ', '-')}"
+            await self.opencode.start_session(tmp, model=participant.get("model"))
+            reply = await self.opencode.send_message(full_prompt, tmp, _raw=True)
+            self.opencode.end_session(tmp)
+            return reply
 
     async def _run_claude_p(self, prompt: str, timeout: int = 300) -> str:
         """Run `claude -p` with prompt via stdin and return the text response."""
@@ -3229,65 +3584,193 @@ class RoomManager:
             return f"[error: {e}]"
 
     async def _participant_respond(self, room: DiscussionRoom, participant: dict) -> dict:
-        """Get one participant's response to the current thread state."""
+        """Get one participant's response with optional tool-use loop."""
         name = participant["name"]
-        backend = participant["backend"]
-        sid = participant.get("session_id")
-        prompt = self._build_thread_context(room, name)
+        soul = self._parse_soul(participant)
+        participant["_room_id"] = room.id
 
-        try:
-            if backend == "claude":
-                reply = await self._run_claude_p(prompt)
-            elif backend == "local":
-                # Local model via OpenAI-compatible API (Ollama/vLLM on GPU node)
-                base_url = participant.get("base_url") or participant.get("endpoint")
-                model = participant.get("model", "")
-                if not base_url:
-                    # Auto-discover if no endpoint specified
-                    nodes = await asyncio.get_event_loop().run_in_executor(None, GpuNodeDiscovery.discover)
-                    if not nodes:
-                        reply = "[error: no local model endpoint found; specify base_url or run local_discover]"
-                    else:
-                        node = nodes[0]
-                        base_url = node["base_url"]
-                        if not model and node["models"]:
-                            model = node["models"][0]
-                if base_url:
-                    if sid and sid in self.local.sessions:
-                        reply = await self.local.send_message(prompt, sid)
-                    else:
-                        tmp = f"room-{room.id}-{name.lower().replace(' ', '-')}"
-                        self.local.start_session(tmp, model=model or "default", endpoint=base_url)
-                        reply = await self.local.send_message(prompt, tmp)
-                        self.local.end_session(tmp)
-            elif backend == "codex":
-                if sid and sid in self.codex.sessions:
-                    reply = await self.codex.send_message(prompt, sid)
+        # Seed realm on first turn if empty
+        if soul and soul.realm and SoulClient.is_available():
+            count = room.turn_counts.get(name, 0)
+            if count == 0:
+                existing = SoulClient.recall("identity role expertise", limit=1, realm=soul.realm)
+                if not existing or len(existing.strip()) < 20:
+                    SoulClient.remember(
+                        content=f"I am {name}. {soul.system_prompt[:300]}",
+                        kind="identity",
+                        tags="identity,role,seed",
+                        confidence=0.95,
+                        realm=soul.realm,
+                    )
+                    SoulClient.remember(
+                        content=f"Discussion topic: {room.topic}",
+                        kind="episode",
+                        tags="topic,room,seed",
+                        confidence=0.8,
+                        realm=soul.realm,
+                    )
+
+        # Check per-participant round limits
+        if soul and soul.max_rounds > 0:
+            count = room.turn_counts.get(name, 0)
+            if count >= soul.max_rounds:
+                return {"name": name, "content": "(max rounds reached — sitting out)",
+                        "ts": datetime.now().isoformat()}
+
+        system_prompt, user_msg = self._build_thread_context(room, participant)
+        max_tool_turns = soul.max_tool_turns if soul and soul.tools else 0
+        realm = soul.realm if soul else None
+        allowed_tools = set(soul.tools) if soul else set()
+
+        reply = ""
+        for turn in range(max_tool_turns + 1):
+            try:
+                if turn == 0:
+                    reply = await self._send_to_backend(participant, user_msg, system_prompt)
                 else:
-                    reply = await self.codex.run_task(prompt)
-            else:  # opencode
-                if sid and sid in self.opencode.sessions:
-                    reply = await self.opencode.send_message(prompt, sid, _raw=True)
-                else:
-                    tmp = f"room-{room.id}-{name.lower().replace(' ', '-')}"
-                    await self.opencode.start_session(tmp, model=participant.get("model"))
-                    reply = await self.opencode.send_message(prompt, tmp, _raw=True)
-                    self.opencode.end_session(tmp)
-        except Exception as e:
-            reply = f"[error: {e}]"
+                    reply = await self._send_to_backend(participant, user_msg, system_prompt)
+            except Exception as e:
+                reply = f"[error: {e}]"
+                break
 
-        return {"name": name, "content": reply, "ts": datetime.now().isoformat()}
+            # Check for tool call in the response
+            tool_req = self._extract_tool_call(reply)
+            if tool_req is None or turn >= max_tool_turns:
+                break
 
-    async def run_rounds(self, room_id: str, rounds: int = 2) -> str:
+            # Validate tool is allowed
+            if tool_req["tool"] not in allowed_tools:
+                break
+
+            # Execute the tool
+            tool_result = await self._execute_agent_tool(
+                tool_req["tool"], tool_req["args"], realm=realm
+            )
+
+            # Inject result and re-prompt
+            user_msg = (
+                f"{reply}\n\n"
+                f"<tool_result>\n{tool_result[:2000]}\n</tool_result>\n\n"
+                f"Continue. You may make another tool call or provide your final response."
+            )
+
+        # Extract final response if wrapped in tags, otherwise use raw reply
+        final = self._extract_final_response(reply) or reply
+
+        # Store the participant's contribution as a memory in their realm
+        if soul and soul.realm and SoulClient.is_available() and len(final) > 50:
+            SoulClient.remember(
+                content=f"[room:{room.id}] My contribution on '{room.topic[:80]}':\n{final[:500]}",
+                kind="episode",
+                tags=f"room,discussion,{room.id}",
+                confidence=0.7,
+                realm=soul.realm,
+            )
+
+        # Track round count
+        room.turn_counts[name] = room.turn_counts.get(name, 0) + 1
+
+        return {"name": name, "content": final, "ts": datetime.now().isoformat()}
+
+    # ------------------------------------------------------------------
+    # Challenge round support
+    # ------------------------------------------------------------------
+
+    def _extract_claims(self, messages: list[dict]) -> list[str]:
+        """Extract substantive claims from recent messages for challenge rounds."""
+        claims = []
+        seen = set()
+        # Match full sentences containing assertion verbs
+        assertion_re = re.compile(
+            r'([A-Z][^.!?\n]{20,}(?:is |are |should |must |requires |causes |'
+            r'leads to |results in |provides |ensures |enables |produces |'
+            r'can be |will |has been |have been )[^.!?\n]{10,}[.!?])',
+        )
+        # Skip lines that are headers, bullet markers, or code blocks
+        skip_re = re.compile(r'^(?:\s*[-*#>|`]|```|\|)')
+        for msg in messages:
+            if msg["name"] in ("TOPIC", "CONTEXT", "MODERATOR"):
+                continue
+            for line in msg["content"].split("\n"):
+                if skip_re.match(line):
+                    continue
+                for m in assertion_re.finditer(line):
+                    claim = m.group(1).strip()
+                    # Deduplicate by first 50 chars
+                    key = claim[:50].lower()
+                    if key not in seen and 40 < len(claim) < 300:
+                        seen.add(key)
+                        claims.append(f"[{msg['name']}]: {claim}")
+        # Return top 5 most substantive (longest) claims
+        claims.sort(key=lambda c: len(c), reverse=True)
+        return claims[:5]
+
+    async def run_rounds(self, room_id: str, rounds: int = 2,
+                          challenge: bool = False) -> str:
         """Run N rounds of async discussion — all participants respond in parallel each round."""
         if room_id not in self.rooms:
             return f"Room '{room_id}' not found."
         room = self.rooms[room_id]
+        room.challenge_mode = challenge
 
         for round_num in range(1, rounds + 1):
-            # Snapshot the thread before this round starts so all see the same state
-            coros = [self._participant_respond(room, p) for p in room.participants]
-            responses = await asyncio.gather(*coros)
+            # Inject challenge prompt between rounds if enabled
+            if challenge and round_num > 1:
+                prev_round_msgs = room.messages[-(len(room.participants)):]
+                claims = self._extract_claims(prev_round_msgs)
+                if claims:
+                    challenge_text = (
+                        "**[Challenge Round]** The following key claims were made in the previous round. "
+                        "Each participant MUST: (1) identify at least one claim you disagree with or find incomplete, "
+                        "(2) provide specific evidence or reasoning for your disagreement, "
+                        "(3) propose a concrete refinement. Do NOT simply agree with everything.\n\n"
+                        + "\n".join(f"- {c}" for c in claims)
+                    )
+                    room.messages.append({
+                        "name": "MODERATOR",
+                        "content": challenge_text,
+                        "ts": datetime.now().isoformat(),
+                    })
+
+            # Filter participants who haven't hit their round limit
+            active = []
+            for p in room.participants:
+                soul = self._parse_soul(p)
+                if soul and soul.max_rounds > 0:
+                    if room.turn_counts.get(p["name"], 0) >= soul.max_rounds:
+                        continue
+                active.append(p)
+
+            if not active:
+                break
+
+            # Detect if participants use different local models on the same endpoint.
+            # If so, run sequentially to avoid GPU model-loading contention.
+            local_models = set()
+            local_endpoints = set()
+            for p in active:
+                if p.get("backend") == "local":
+                    local_models.add(p.get("model", ""))
+                    ep = p.get("base_url") or p.get("endpoint") or ""
+                    if p.get("session_id") and p["session_id"] in self.local.sessions:
+                        s = self.local.sessions[p["session_id"]]
+                        local_models.add(s.model)
+                        ep = s.endpoint
+                    local_endpoints.add(ep)
+
+            needs_sequential = len(local_models) > 1 and len(local_endpoints) <= 1
+
+            if needs_sequential:
+                # Sequential: different models on same GPU — avoid model swap thrashing
+                responses = []
+                for p in active:
+                    resp = await self._participant_respond(room, p)
+                    responses.append(resp)
+            else:
+                # Parallel: same model or different endpoints
+                coros = [self._participant_respond(room, p) for p in active]
+                responses = await asyncio.gather(*coros)
+
             for resp in responses:
                 room.messages.append(resp)
 
@@ -3795,9 +4278,9 @@ async def list_tools():
         Tool(
             name="room_create",
             description="Create a discussion room where multiple AI agents post asynchronously and see each other's messages. "
-                        "Participants can be opencode sessions (any model) or codex sessions. "
-                        "Pass participants as a JSON string: "
-                        '[{"name":"Codex","backend":"codex","session_id":"sid1"},{"name":"Gemini","backend":"opencode","session_id":"sid2"}]',
+                        "Each participant can have a 'soul' — a system prompt defining their expertise, personality, "
+                        "available tools (recall, remember, web_search, smart_context), and memory namespace. "
+                        "Participants without a soul work as before (generic prompt).",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -3805,7 +4288,15 @@ async def list_tools():
                     "topic": {"type": "string", "description": "The discussion topic or opening question"},
                     "participants": {
                         "type": "string",
-                        "description": 'JSON array of participants: [{"name":"...","backend":"opencode|codex|claude","session_id":"...","model":"..."}]. Use backend="claude" to add Claude itself via claude -p.'
+                        "description": 'JSON array of participants. Each can have an optional "soul" object: '
+                                       '[{"name":"Critic","backend":"local","session_id":"sid","model":"qwen2.5:32b",'
+                                       '"soul":{"system_prompt":"You are a rigorous scientific critic...",'
+                                       '"realm":"agent:critic","tools":["recall","remember","web_search"],'
+                                       '"max_tool_turns":3,"challenge_bias":0.8}}]. '
+                                       'Soul fields: system_prompt (required), realm (auto-generated from name if omitted), '
+                                       'tools (list of: recall, remember, web_search, smart_context), '
+                                       'max_tool_turns (default 3), max_rounds (0=unlimited), '
+                                       'response_format (optional template), challenge_bias (0-1, default 0.5).'
                     }
                 },
                 "required": ["room_id", "topic", "participants"]
@@ -3829,12 +4320,14 @@ async def list_tools():
         Tool(
             name="room_run",
             description="Run N rounds of async discussion in a room. All participants respond in parallel each round, "
-                        "seeing the full thread before they respond.",
+                        "seeing the full thread before they respond. "
+                        "Set challenge=true to auto-extract claims between rounds and inject challenge prompts.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "room_id": {"type": "string", "description": "Room ID to run"},
-                    "rounds": {"type": "integer", "description": "Number of discussion rounds (default: 2)"}
+                    "rounds": {"type": "integer", "description": "Number of discussion rounds (default: 2)"},
+                    "challenge": {"type": "boolean", "description": "Enable challenge rounds — auto-extract claims and ask participants to verify/challenge them (default: false)"}
                 },
                 "required": ["room_id"]
             }
@@ -4328,6 +4821,7 @@ async def call_tool(name: str, arguments: dict):
             result = await rooms.run_rounds(
                 room_id=arguments["room_id"],
                 rounds=arguments.get("rounds", 2),
+                challenge=arguments.get("challenge", False),
             )
         elif name == "room_read":
             result = rooms.read(room_id=arguments["room_id"])

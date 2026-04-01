@@ -48,7 +48,7 @@
         <div class="hero-eyebrow">MCP SERVER</div>
         <h1 id="hero-title" class="hero-title">chitta-bridge</h1>
         <p class="hero-subtitle">multi-model AI discussions for Claude Code</p>
-        <p class="hero-micro">any backend &middot; discussion rooms &middot; local GPU models &middot; synthesis</p>
+        <p class="hero-micro">any backend &middot; soul-powered rooms &middot; local GPU models &middot; challenge rounds &middot; synthesis</p>
 
         <div class="hero-install">
           <code>pip install chitta-bridge</code>
@@ -143,8 +143,8 @@
             <rect x="490" y="150" width="4" height="52" rx="2" fill="#a78bfa" opacity="0.7"/>
             <rect x="494" y="150" width="272" height="52" rx="0 7 7 0" fill="#0d1a2e" stroke="rgba(167,139,250,0.18)" stroke-width="1" stroke-dasharray="6 3"/>
             <text x="508" y="170" font-size="10" font-weight="700" fill="#f1f5f9" font-family="JetBrains Mono,monospace">Discussion Room</text>
-            <text x="508" y="185" font-size="9" fill="#64748b" font-family="JetBrains Mono,monospace">parallel rounds · synthesize</text>
-            <text x="752" y="166" text-anchor="end" font-size="8" fill="rgba(167,139,250,0.55)" font-family="JetBrains Mono,monospace">MoE · async</text>
+            <text x="508" y="185" font-size="9" fill="#64748b" font-family="JetBrains Mono,monospace">souls · challenge rounds · synthesis</text>
+            <text x="752" y="166" text-anchor="end" font-size="8" fill="rgba(167,139,250,0.55)" font-family="JetBrains Mono,monospace">MoE · souls</text>
 
             <!-- ═══ NODE: Local GPU ═══ -->
             <rect x="490" y="219" width="4" height="52" rx="2" fill="#fb923c" opacity="0.7"/>
@@ -226,7 +226,7 @@
           </div>
           <div class="spec-card">
             <div class="spec-key">discussion rooms</div>
-            <div class="spec-val">async multi-agent roundtable &middot; all participants respond in parallel each round</div>
+            <div class="spec-val">soul-powered roundtable &middot; per-agent memory &middot; challenge rounds &middot; GPU contention handling</div>
           </div>
           <div class="spec-card">
             <div class="spec-key">local GPU models</div>
@@ -242,7 +242,7 @@
           </div>
           <div class="spec-card">
             <div class="spec-key">soul memory</div>
-            <div class="spec-val">bidirectional chittad bridge &middot; rooms get context from memory, syntheses stored back</div>
+            <div class="spec-val">realm-scoped memory &middot; per-agent namespaces &middot; hybrid recall (vector + BM25) &middot; auto-seeding</div>
           </div>
           <div class="spec-card">
             <div class="spec-key">sessions</div>
@@ -689,28 +689,28 @@
       <div class="wrap">
         <div class="section-label">08</div>
         <h2>Discussion Rooms</h2>
-        <p class="section-desc">An async multi-agent roundtable — any mix of backends and models. All participants respond in parallel each round, each seeing the full thread before posting. A synthesis pass distills consensus, disagreements, and the best answer.</p>
+        <p class="section-desc">Async multi-agent roundtable with <strong>agent souls</strong> &mdash; persistent identity, per-agent memory, mediated tools, and structured challenge rounds. Participants respond in parallel (or sequentially on shared GPUs), each seeing the full thread.</p>
 
         <div class="chunk-specs">
           <div class="chunk-row">
-            <span class="chunk-key">room_create</span>
-            <span class="chunk-val">create a room with named participants &middot; reuse existing sessions or spin up new ones</span>
+            <span class="chunk-key">agent souls</span>
+            <span class="chunk-val">system prompt &middot; memory realm &middot; tools (recall, remember, web_search) &middot; challenge bias</span>
           </div>
           <div class="chunk-row">
-            <span class="chunk-key">room_add_participant</span>
-            <span class="chunk-val">add a new agent to an ongoing discussion</span>
+            <span class="chunk-key">challenge rounds</span>
+            <span class="chunk-val">moderator extracts claims between rounds &middot; forces disagreement and evidence-based refinement</span>
           </div>
           <div class="chunk-row">
-            <span class="chunk-key">room_run</span>
-            <span class="chunk-val">run N rounds &middot; all agents respond concurrently &middot; full thread visible to each</span>
+            <span class="chunk-key">realm memory</span>
+            <span class="chunk-val">per-agent persistent memory via chitta-field &middot; auto-seeded on first turn &middot; hybrid recall (vector + BM25)</span>
           </div>
           <div class="chunk-row">
-            <span class="chunk-key">room_synthesize</span>
-            <span class="chunk-val">distill the transcript &middot; consensus &middot; disagreements &middot; best answer &middot; open questions</span>
+            <span class="chunk-key">GPU contention</span>
+            <span class="chunk-val">auto-detects shared GPUs &middot; runs sequentially to avoid model-swap thrashing</span>
           </div>
           <div class="chunk-row">
-            <span class="chunk-key">room_read</span>
-            <span class="chunk-val">read full transcript at any time</span>
+            <span class="chunk-key">synthesis</span>
+            <span class="chunk-val">distill transcript &middot; consensus &middot; disagreements &middot; best answer &middot; open questions</span>
           </div>
         </div>
 
@@ -719,26 +719,35 @@
             <span class="code-dot red"></span>
             <span class="code-dot yellow"></span>
             <span class="code-dot green"></span>
-            <span class="code-title">discussion room example</span>
+            <span class="code-title">soul-powered discussion room</span>
           </div>
           <pre><code>room_create(
-  room_id="arch-review",
-  topic="Should we use event sourcing here?",
+  room_id="expert-panel",
+  topic="How should we authenticate ancient DNA from permafrost?",
   participants='[
-    {"name":"Codex","backend":"codex","session_id":"codex-1"},
-    {"name":"Gemini","backend":"opencode","session_id":"gemini-1"},
-    {"name":"Llama","backend":"local","model":"qwen3:30b-a3b","base_url":"http://gpunode:11434/v1"}
+    {"name":"Specialist","backend":"local","model":"qwen2.5:32b",
+     "base_url":"http://gpunode:11434/v1",
+     "soul":{"system_prompt":"You are a paleogenomicist...",
+             "realm":"agent:specialist",
+             "tools":["recall","remember","web_search"],
+             "challenge_bias":0.7}},
+    {"name":"Critic","backend":"local","model":"deepseek-r1:32b",
+     "base_url":"http://gpunode:11434/v1",
+     "soul":{"system_prompt":"You are a methodologist...",
+             "realm":"agent:critic",
+             "tools":["recall","remember"],
+             "challenge_bias":0.8}}
   ]'
 )
-room_run(room_id="arch-review")        <span class="comment"># all 3 respond in parallel</span>
-room_synthesize(room_id="arch-review") <span class="comment"># distill into one answer</span></code></pre>
+room_run(room_id="expert-panel", rounds=2, challenge=true)
+room_synthesize(room_id="expert-panel")</code></pre>
         </div>
 
         <div class="tool-group" style="margin-top: 1.5rem;">
           <div class="tool-grid">
             <div class="tool-card">
               <code class="tool-name">room_create</code>
-              <span class="tool-desc">create a room with named participants</span>
+              <span class="tool-desc">create room with participants and optional souls</span>
             </div>
             <div class="tool-card">
               <code class="tool-name">room_add_participant</code>
@@ -746,7 +755,7 @@ room_synthesize(room_id="arch-review") <span class="comment"># distill into one 
             </div>
             <div class="tool-card">
               <code class="tool-name">room_run</code>
-              <span class="tool-desc">run N parallel rounds</span>
+              <span class="tool-desc">run N rounds with optional challenge mode</span>
             </div>
             <div class="tool-card">
               <code class="tool-name">room_synthesize</code>
