@@ -125,7 +125,7 @@ def _print_exports(node: str, port: int, model: str):
     """Print shell export statements."""
     base_url = f"http://{node}:{port}"
     print(f"export ANTHROPIC_BASE_URL={base_url}")
-    print(f"export ANTHROPIC_AUTH_TOKEN=ollama")
+    print("export ANTHROPIC_AUTH_TOKEN=ollama")
     print(f"# Run: claude --model {model}")
 
 
@@ -190,7 +190,7 @@ def _start_local(args, model: str, port: int, url_file: Path, ollama: str):
     local_url = f"http://localhost:{port}"
     models = _probe_ollama(local_url)
     if models is not None:
-        print(f"# Ollama already running locally", file=sys.stderr)
+        print("# Ollama already running locally", file=sys.stderr)
         if models:
             print(f"# Models: {', '.join(models)}", file=sys.stderr)
         if model not in (models or []):
@@ -201,7 +201,7 @@ def _start_local(args, model: str, port: int, url_file: Path, ollama: str):
         return
 
     # Start ollama serve in background
-    print(f"# Starting Ollama locally (no SLURM detected)...", file=sys.stderr)
+    print("# Starting Ollama locally (no SLURM detected)...", file=sys.stderr)
     env = os.environ.copy()
     env["OLLAMA_HOST"] = f"0.0.0.0:{port}"
     subprocess.Popen(
@@ -227,7 +227,7 @@ def _start_local(args, model: str, port: int, url_file: Path, ollama: str):
     subprocess.run([ollama, "pull", model])
 
     url_file.write_text(local_url)
-    print(f"# Ollama ready locally", file=sys.stderr)
+    print("# Ollama ready locally", file=sys.stderr)
     _print_exports("localhost", port, model)
 
 
