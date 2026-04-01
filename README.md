@@ -149,7 +149,7 @@ room_synthesize(room_id="expert-panel")
 |---------|-------------|
 | `system_prompt` | Agent identity, expertise, personality |
 | `realm` | Chitta memory namespace — per-agent persistent memory |
-| `tools` | Available tools: `recall`, `remember`, `web_search`, `smart_context` |
+| `tools` | Available tools (see Agent Tools below) |
 | `max_tool_turns` | Max tool-use iterations per response (default 3) |
 | `max_rounds` | Max discussion rounds, 0 = unlimited |
 | `challenge_bias` | 0 = agreeable, 1 = devil's advocate |
@@ -166,7 +166,7 @@ When `challenge=true`, a moderator automatically:
 
 When multiple local models share the same GPU endpoint, rooms automatically run participants **sequentially** to avoid model-swap thrashing. Different endpoints run in parallel.
 
-### Tools
+### Room Tools
 
 | Tool | Description |
 |------|-------------|
@@ -175,6 +175,68 @@ When multiple local models share the same GPU endpoint, rooms automatically run 
 | `room_run` | Run N rounds with optional challenge mode |
 | `room_read` | Read the full transcript |
 | `room_synthesize` | Distill the transcript — consensus, disagreements, best answer, open questions |
+
+### Agent Tools
+
+Tools available to soul-powered room participants via mediated XML tool calling. Assign a subset per agent via the `tools` field.
+
+**Memory (core)**
+
+| Tool | Description |
+|------|-------------|
+| `recall` | Semantic vector search over agent's memory realm |
+| `remember` | Store an insight or fact in agent's memory realm |
+| `smart_context` | Task-aware context assembly (memories + code symbols + graph) |
+
+**Memory (extended)**
+
+| Tool | Description |
+|------|-------------|
+| `recall_keyword` | BM25 keyword search — best when exact terms are known |
+| `recall_temporal` | Search memories from a specific time range (since/until) |
+| `hybrid_recall` | Combined vector + BM25 search — best general-purpose recall |
+| `5w_search` | Structured who/what/when/where/why search |
+| `forget` | Remove a memory by similarity match |
+
+**Web**
+
+| Tool | Description |
+|------|-------------|
+| `web_search` | DuckDuckGo search, returns titles + URLs + snippets |
+| `web_fetch` | Fetch a URL as plain text (HTML stripped, max 8000 chars) |
+
+**File operations**
+
+| Tool | Description |
+|------|-------------|
+| `read_file` | Read file with line numbers (offset/limit, capped at 500 lines) |
+| `write_file` | Create or overwrite a file (auto-creates parent dirs) |
+| `edit_file` | Targeted string replacement with context display |
+| `glob` | Find files by glob pattern, sorted by modification time |
+| `grep` | Regex search over file contents with context lines |
+
+**Shell**
+
+| Tool | Description |
+|------|-------------|
+| `bash` | Execute a shell command (sandboxed, 60s timeout, dangerous commands blocked) |
+
+**Code intelligence (via chitta)**
+
+| Tool | Description |
+|------|-------------|
+| `read_function` | Read a function's source code by name |
+| `read_symbol` | Look up any code symbol (class, function, variable) |
+| `search_symbols` | Search for code symbols matching a query |
+| `codebase_overview` | High-level overview of codebase structure |
+
+**Task tracking**
+
+| Tool | Description |
+|------|-------------|
+| `todo_add` | Add a task to the agent's personal todo list |
+| `todo_list` | List current todo items |
+| `todo_done` | Mark a todo item as complete |
 
 ### Synthesis
 

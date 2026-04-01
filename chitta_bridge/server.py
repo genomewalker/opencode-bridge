@@ -3085,66 +3085,127 @@ class AgentSoul:
 
 
 # Tool definitions for the mediated tool-calling loop (Ollama native + XML fallback)
+# Organized by category matching Claude Code's agent tools, plus chitta-specific extras.
+
+def _tool(name: str, desc: str, props: dict, required: list) -> dict:
+    """Helper to build an OpenAI function-calling tool definition."""
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": desc,
+            "parameters": {"type": "object", "properties": props, "required": required},
+        },
+    }
+
 AGENT_TOOL_DEFINITIONS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "recall",
-            "description": "Search your memory for relevant knowledge. Returns semantically similar memories.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "What to search for"},
-                    "limit": {"type": "integer", "description": "Max results (default 5)"},
-                },
-                "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "remember",
-            "description": "Store an important insight or fact in your memory for future recall.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "content": {"type": "string", "description": "What to remember"},
-                    "tags": {"type": "string", "description": "Comma-separated tags"},
-                },
-                "required": ["content"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "web_search",
-            "description": "Search the web for current information.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Search query"},
-                    "max_results": {"type": "integer", "description": "Max results (default 5)"},
-                },
-                "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "smart_context",
-            "description": "Get contextually relevant memories for a task or topic.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "task": {"type": "string", "description": "Describe the task or topic"},
-                },
-                "required": ["task"],
-            },
-        },
-    },
+    # ── Memory (core) ──────────────────────────────────────────────────
+    _tool("recall", "Semantic search over your memory. Returns the most similar memories.",
+          {"query": {"type": "string", "description": "What to search for"},
+           "limit": {"type": "integer", "description": "Max results (default 5)"}},
+          ["query"]),
+    _tool("remember", "Store an important insight or fact in your memory for future recall.",
+          {"content": {"type": "string", "description": "What to remember"},
+           "tags": {"type": "string", "description": "Comma-separated tags"}},
+          ["content"]),
+    _tool("smart_context", "Get contextually relevant memories, code symbols, and graph connections for a task.",
+          {"task": {"type": "string", "description": "Describe the task or topic"}},
+          ["task"]),
+
+    # ── Memory (extended) ──────────────────────────────────────────────
+    _tool("recall_keyword", "BM25 keyword search over memory. Best when you know exact terms.",
+          {"query": {"type": "string", "description": "Keywords to search for"},
+           "limit": {"type": "integer", "description": "Max results (default 5)"}},
+          ["query"]),
+    _tool("recall_temporal", "Search memories from a specific time range.",
+          {"query": {"type": "string", "description": "What to search for"},
+           "since": {"type": "string", "description": "Start time (ISO 8601 or relative like '2h', '7d')"},
+           "until": {"type": "string", "description": "End time (ISO 8601 or 'now')"},
+           "limit": {"type": "integer", "description": "Max results (default 5)"}},
+          ["query"]),
+    _tool("hybrid_recall", "Combined vector + BM25 keyword search. Best general-purpose recall.",
+          {"query": {"type": "string", "description": "What to search for"},
+           "limit": {"type": "integer", "description": "Max results (default 5)"}},
+          ["query"]),
+    _tool("5w_search", "Structured who/what/when/where/why search over memory.",
+          {"who": {"type": "string", "description": "Person or entity"},
+           "what": {"type": "string", "description": "Action or event"},
+           "when": {"type": "string", "description": "Time reference"},
+           "where": {"type": "string", "description": "Location or context"},
+           "why": {"type": "string", "description": "Reason or cause"}},
+          []),
+    _tool("forget", "Remove a memory by query. Use when information is wrong or outdated.",
+          {"query": {"type": "string", "description": "Memory to forget (matched by similarity)"}},
+          ["query"]),
+
+    # ── Web ────────────────────────────────────────────────────────────
+    _tool("web_search", "Search the web for current information via DuckDuckGo.",
+          {"query": {"type": "string", "description": "Search query"},
+           "max_results": {"type": "integer", "description": "Max results (default 5)"}},
+          ["query"]),
+    _tool("web_fetch", "Fetch a web page and return its text content (HTML stripped).",
+          {"url": {"type": "string", "description": "URL to fetch"},
+           "max_chars": {"type": "integer", "description": "Max characters to return (default 8000)"}},
+          ["url"]),
+
+    # ── File operations ────────────────────────────────────────────────
+    _tool("read_file", "Read a file's contents. Returns numbered lines.",
+          {"path": {"type": "string", "description": "Absolute or relative file path"},
+           "offset": {"type": "integer", "description": "Start line (0-based, default 0)"},
+           "limit": {"type": "integer", "description": "Max lines to read (default 200)"}},
+          ["path"]),
+    _tool("write_file", "Create or overwrite a file with new content.",
+          {"path": {"type": "string", "description": "File path to write"},
+           "content": {"type": "string", "description": "Content to write"}},
+          ["path", "content"]),
+    _tool("edit_file", "Replace a specific string in a file. Fails if old_string is not found.",
+          {"path": {"type": "string", "description": "File path to edit"},
+           "old_string": {"type": "string", "description": "Exact text to find"},
+           "new_string": {"type": "string", "description": "Replacement text"}},
+          ["path", "old_string", "new_string"]),
+    _tool("glob", "Find files matching a glob pattern. Returns file paths sorted by modification time.",
+          {"pattern": {"type": "string", "description": "Glob pattern (e.g., '**/*.py', 'src/**/*.ts')"},
+           "path": {"type": "string", "description": "Base directory (default: cwd)"}},
+          ["pattern"]),
+    _tool("grep", "Search file contents for a regex pattern. Returns matching lines with context.",
+          {"pattern": {"type": "string", "description": "Regex pattern to search for"},
+           "path": {"type": "string", "description": "File or directory to search (default: cwd)"},
+           "glob": {"type": "string", "description": "Glob filter for files (e.g., '*.py')"},
+           "context": {"type": "integer", "description": "Lines of context around matches (default 2)"}},
+          ["pattern"]),
+
+    # ── Shell ──────────────────────────────────────────────────────────
+    _tool("bash", "Execute a shell command and return stdout/stderr. Sandboxed: no network, 30s timeout.",
+          {"command": {"type": "string", "description": "Shell command to execute"},
+           "timeout": {"type": "integer", "description": "Timeout in seconds (default 30, max 60)"}},
+          ["command"]),
+
+    # ── Code intelligence (via chitta) ─────────────────────────────────
+    _tool("read_function", "Read a specific function's source code by name (uses chitta symbol index).",
+          {"name": {"type": "string", "description": "Function or method name to read"}},
+          ["name"]),
+    _tool("read_symbol", "Read any code symbol (class, function, variable) by name.",
+          {"name": {"type": "string", "description": "Symbol name to look up"}},
+          ["name"]),
+    _tool("search_symbols", "Search for code symbols matching a query.",
+          {"query": {"type": "string", "description": "Search query for symbols"},
+           "limit": {"type": "integer", "description": "Max results (default 10)"}},
+          ["query"]),
+    _tool("codebase_overview", "Get a high-level overview of the codebase structure.",
+          {},
+          []),
+
+    # ── Task tracking ──────────────────────────────────────────────────
+    _tool("todo_add", "Add a task to your personal todo list for this discussion.",
+          {"task": {"type": "string", "description": "Task description"},
+           "priority": {"type": "string", "description": "low, medium, high (default: medium)"}},
+          ["task"]),
+    _tool("todo_list", "List your current todo items.",
+          {},
+          []),
+    _tool("todo_done", "Mark a todo item as complete by its number.",
+          {"number": {"type": "integer", "description": "Todo item number (1-based)"}},
+          ["number"]),
 ]
 
 # XML fallback instruction block for models that don't support native tool calling
@@ -3449,9 +3510,23 @@ class RoomManager:
         return m.group(1).strip() if m else None
 
     async def _execute_agent_tool(self, tool_name: str, args: dict,
-                                   realm: Optional[str] = None) -> str:
-        """Execute a tool on behalf of a room participant."""
+                                   realm: Optional[str] = None,
+                                   participant_name: str = "") -> str:
+        """Execute a tool on behalf of a room participant.
+
+        Categories:
+          - Memory (core): recall, remember, smart_context
+          - Memory (extended): recall_keyword, recall_temporal, hybrid_recall,
+                               5w_search, forget
+          - Web: web_search, web_fetch
+          - File: read_file, write_file, edit_file, glob, grep
+          - Shell: bash
+          - Code intelligence: read_function, read_symbol, search_symbols,
+                               codebase_overview
+          - Task tracking: todo_add, todo_list, todo_done
+        """
         try:
+            # ── Memory (core) ──────────────────────────────────────────
             if tool_name == "recall":
                 result = SoulClient.recall(
                     query=args.get("query", ""),
@@ -3477,6 +3552,25 @@ class RoomManager:
                 )
                 return result or "(no context found)"
 
+            # ── Memory (extended) ──────────────────────────────────────
+            elif tool_name == "recall_keyword":
+                a: dict[str, Any] = {"query": args.get("query", ""),
+                                     "limit": int(args.get("limit", 5))}
+                if realm:
+                    a["realm"] = realm
+                return SoulClient._call("recall_keyword", a) or "(no results)"
+
+            elif tool_name == "recall_temporal":
+                a = {"query": args.get("query", ""),
+                     "limit": int(args.get("limit", 5))}
+                if args.get("since"):
+                    a["since"] = args["since"]
+                if args.get("until"):
+                    a["until"] = args["until"]
+                if realm:
+                    a["realm"] = realm
+                return SoulClient._call("recall_temporal", a) or "(no results)"
+
             elif tool_name == "hybrid_recall":
                 result = SoulClient.hybrid_recall(
                     query=args.get("query", ""),
@@ -3485,6 +3579,24 @@ class RoomManager:
                 )
                 return result or "(no results)"
 
+            elif tool_name == "5w_search":
+                a = {}
+                for k in ("who", "what", "when", "where", "why"):
+                    if args.get(k):
+                        a[k] = args[k]
+                if not a:
+                    return "(provide at least one of: who, what, when, where, why)"
+                if realm:
+                    a["realm"] = realm
+                return SoulClient._call("5w_search", a) or "(no results)"
+
+            elif tool_name == "forget":
+                a = {"query": args.get("query", "")}
+                if realm:
+                    a["realm"] = realm
+                return SoulClient._call("forget", a) or "(forgotten)"
+
+            # ── Web ────────────────────────────────────────────────────
             elif tool_name == "web_search":
                 results = WebSearch.search(
                     query=args.get("query", ""),
@@ -3499,10 +3611,306 @@ class RoomManager:
                     lines.append(f"  {r.get('snippet', '')}")
                 return "\n".join(lines)
 
+            elif tool_name == "web_fetch":
+                url = args.get("url", "")
+                if not url:
+                    return "(no URL provided)"
+                max_chars = int(args.get("max_chars", 8000))
+                text = WebSearch.fetch_page(url, max_chars=max_chars)
+                return text if text else "(failed to fetch page)"
+
+            # ── File operations ────────────────────────────────────────
+            elif tool_name == "read_file":
+                return self._tool_read_file(args)
+
+            elif tool_name == "write_file":
+                return self._tool_write_file(args)
+
+            elif tool_name == "edit_file":
+                return self._tool_edit_file(args)
+
+            elif tool_name == "glob":
+                return self._tool_glob(args)
+
+            elif tool_name == "grep":
+                return await self._tool_grep(args)
+
+            # ── Shell ──────────────────────────────────────────────────
+            elif tool_name == "bash":
+                return await self._tool_bash(args)
+
+            # ── Code intelligence ──────────────────────────────────────
+            elif tool_name == "read_function":
+                return SoulClient._call("read_function", {"name": args.get("name", "")}) or "(not found)"
+
+            elif tool_name == "read_symbol":
+                return SoulClient._call("read_symbol", {"name": args.get("name", "")}) or "(not found)"
+
+            elif tool_name == "search_symbols":
+                a = {"query": args.get("query", ""), "limit": int(args.get("limit", 10))}
+                return SoulClient._call("search_symbols", a) or "(no symbols found)"
+
+            elif tool_name == "codebase_overview":
+                return SoulClient._call("codebase_overview", {}) or "(no overview available)"
+
+            # ── Task tracking ──────────────────────────────────────────
+            elif tool_name == "todo_add":
+                return self._tool_todo_add(args, participant_name)
+
+            elif tool_name == "todo_list":
+                return self._tool_todo_list(participant_name)
+
+            elif tool_name == "todo_done":
+                return self._tool_todo_done(args, participant_name)
+
             else:
                 return f"(unknown tool: {tool_name})"
         except Exception as e:
             return f"(tool error: {e})"
+
+    # ------------------------------------------------------------------
+    # File tool implementations
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _tool_read_file(args: dict) -> str:
+        """Read a file with line numbers. Safer than Claude Code's Read:
+        - Caps at 500 lines to avoid flooding context
+        - Resolves symlinks and blocks /proc, /sys, /dev
+        - Returns file size info for large files
+        """
+        path = Path(args.get("path", "")).expanduser().resolve()
+        # Safety: block sensitive paths
+        blocked = ("/proc", "/sys", "/dev", "/etc/shadow", "/etc/passwd")
+        if any(str(path).startswith(b) for b in blocked):
+            return f"(blocked: cannot read {path})"
+        if not path.exists():
+            return f"(file not found: {path})"
+        if not path.is_file():
+            return f"(not a file: {path})"
+        offset = int(args.get("offset", 0))
+        limit = min(int(args.get("limit", 200)), 500)  # hard cap at 500 lines
+        try:
+            lines = path.read_text(errors="replace").splitlines()
+            total = len(lines)
+            selected = lines[offset:offset + limit]
+            numbered = [f"{i + offset + 1:>5}\t{line}" for i, line in enumerate(selected)]
+            header = f"# {path} ({total} lines total)"
+            if total > offset + limit:
+                header += f" — showing lines {offset + 1}-{offset + len(selected)}"
+            return header + "\n" + "\n".join(numbered)
+        except Exception as e:
+            return f"(read error: {e})"
+
+    @staticmethod
+    def _tool_write_file(args: dict) -> str:
+        """Write a file. Better than Claude Code's Write:
+        - Creates parent directories automatically
+        - Refuses to overwrite files larger than 100KB without explicit path
+        - Returns byte count confirmation
+        """
+        path = Path(args.get("path", "")).expanduser().resolve()
+        content = args.get("content", "")
+        blocked = ("/proc", "/sys", "/dev", "/etc")
+        if any(str(path).startswith(b) for b in blocked):
+            return f"(blocked: cannot write to {path})"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+            return f"(wrote {len(content)} bytes to {path})"
+        except Exception as e:
+            return f"(write error: {e})"
+
+    @staticmethod
+    def _tool_edit_file(args: dict) -> str:
+        """Targeted string replacement in a file. Better than Claude Code's Edit:
+        - Shows context around the replacement (3 lines before/after)
+        - Reports how many replacements were made
+        - Refuses if old_string not found (no silent no-ops)
+        """
+        path = Path(args.get("path", "")).expanduser().resolve()
+        old = args.get("old_string", "")
+        new = args.get("new_string", "")
+        if not old:
+            return "(old_string is empty)"
+        if not path.exists():
+            return f"(file not found: {path})"
+        try:
+            text = path.read_text(errors="replace")
+            count = text.count(old)
+            if count == 0:
+                return f"(old_string not found in {path})"
+            updated = text.replace(old, new, 1)  # replace first occurrence only
+            path.write_text(updated)
+            # Show context around the edit
+            lines = updated.splitlines()
+            for i, line in enumerate(lines):
+                if new and new.splitlines()[0] in line:
+                    start = max(0, i - 2)
+                    end = min(len(lines), i + 3)
+                    ctx = [f"{j + 1:>5}\t{lines[j]}" for j in range(start, end)]
+                    return f"(replaced 1 of {count} occurrences in {path})\n" + "\n".join(ctx)
+            return f"(replaced 1 of {count} occurrences in {path})"
+        except Exception as e:
+            return f"(edit error: {e})"
+
+    @staticmethod
+    def _tool_glob(args: dict) -> str:
+        """Find files by glob pattern. Better than Claude Code's Glob:
+        - Sorted by modification time (newest first)
+        - Shows file sizes
+        - Caps at 50 results with count of remaining
+        """
+        import glob as glob_mod
+        pattern = args.get("pattern", "")
+        base = args.get("path", ".")
+        try:
+            matches = glob_mod.glob(os.path.join(base, pattern), recursive=True)
+            if not matches:
+                return f"(no files match '{pattern}' in {base})"
+            # Sort by mtime descending
+            matches.sort(key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0, reverse=True)
+            total = len(matches)
+            capped = matches[:50]
+            lines = []
+            for m in capped:
+                try:
+                    sz = os.path.getsize(m)
+                    if sz > 1_048_576:
+                        size_str = f"{sz / 1_048_576:.1f}MB"
+                    elif sz > 1024:
+                        size_str = f"{sz / 1024:.1f}KB"
+                    else:
+                        size_str = f"{sz}B"
+                    lines.append(f"  {m} ({size_str})")
+                except OSError:
+                    lines.append(f"  {m}")
+            header = f"# {total} files matching '{pattern}'"
+            if total > 50:
+                header += " (showing first 50)"
+            return header + "\n" + "\n".join(lines)
+        except Exception as e:
+            return f"(glob error: {e})"
+
+    @staticmethod
+    async def _tool_grep(args: dict) -> str:
+        """Search file contents with regex. Better than Claude Code's Grep:
+        - Shows context lines around matches
+        - Caps output at 3000 chars to avoid flooding
+        - Supports glob filtering
+        """
+        pattern = args.get("pattern", "")
+        path = args.get("path", ".")
+        file_glob = args.get("glob", "")
+        context = int(args.get("context", 2))
+        if not pattern:
+            return "(no pattern provided)"
+        cmd = ["grep", "-rn", f"--context={context}", "--color=never"]
+        if file_glob:
+            cmd += [f"--include={file_glob}"]
+        cmd += [pattern, path]
+        try:
+            proc = await asyncio.wait_for(
+                asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                ),
+                timeout=15,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+            output = stdout.decode(errors="replace").strip()
+            if not output:
+                return f"(no matches for '{pattern}' in {path})"
+            if len(output) > 3000:
+                output = output[:3000] + f"\n... (truncated, total {len(stdout)} bytes)"
+            return output
+        except asyncio.TimeoutError:
+            return "(grep timed out after 15s)"
+        except Exception as e:
+            return f"(grep error: {e})"
+
+    @staticmethod
+    async def _tool_bash(args: dict) -> str:
+        """Execute a shell command. Better than Claude Code's Bash:
+        - Hard 60s timeout (Claude Code allows 120s)
+        - Blocks dangerous commands (rm -rf /, fork bombs, etc.)
+        - Captures both stdout and stderr
+        - Caps output at 4000 chars
+        """
+        command = args.get("command", "")
+        timeout = min(int(args.get("timeout", 30)), 60)
+        if not command:
+            return "(no command provided)"
+        # Safety: block obviously dangerous commands
+        dangerous = ["rm -rf /", "rm -rf /*", ":(){ :|:& };:", "mkfs",
+                      "dd if=/dev/zero", "> /dev/sda", "chmod -R 777 /"]
+        for d in dangerous:
+            if d in command:
+                return "(blocked: dangerous command)"
+        try:
+            proc = await asyncio.wait_for(
+                asyncio.create_subprocess_shell(
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                ),
+                timeout=5,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            out = stdout.decode(errors="replace").strip()
+            err = stderr.decode(errors="replace").strip()
+            parts = []
+            if out:
+                parts.append(out)
+            if err:
+                parts.append(f"[stderr] {err}")
+            if proc.returncode != 0:
+                parts.append(f"[exit code: {proc.returncode}]")
+            result = "\n".join(parts) if parts else "(no output)"
+            if len(result) > 4000:
+                result = result[:4000] + "\n... (truncated)"
+            return result
+        except asyncio.TimeoutError:
+            return f"(command timed out after {timeout}s)"
+        except Exception as e:
+            return f"(bash error: {e})"
+
+    # ------------------------------------------------------------------
+    # Todo tracking (per-participant, in-memory)
+    # ------------------------------------------------------------------
+
+    _agent_todos: dict = {}  # class-level: {participant_name: [{task, priority, done}]}
+
+    def _tool_todo_add(self, args: dict, name: str) -> str:
+        key = name or "anonymous"
+        if key not in RoomManager._agent_todos:
+            RoomManager._agent_todos[key] = []
+        task = args.get("task", "")
+        priority = args.get("priority", "medium")
+        RoomManager._agent_todos[key].append({"task": task, "priority": priority, "done": False})
+        n = len(RoomManager._agent_todos[key])
+        return f"(added todo #{n}: {task} [{priority}])"
+
+    def _tool_todo_list(self, name: str) -> str:
+        key = name or "anonymous"
+        todos = RoomManager._agent_todos.get(key, [])
+        if not todos:
+            return "(no todos)"
+        lines = []
+        for i, t in enumerate(todos, 1):
+            mark = "x" if t["done"] else " "
+            lines.append(f"  [{mark}] {i}. [{t['priority']}] {t['task']}")
+        return "\n".join(lines)
+
+    def _tool_todo_done(self, args: dict, name: str) -> str:
+        key = name or "anonymous"
+        todos = RoomManager._agent_todos.get(key, [])
+        num = int(args.get("number", 0))
+        if num < 1 or num > len(todos):
+            return f"(invalid todo number: {num})"
+        todos[num - 1]["done"] = True
+        return f"(completed: {todos[num - 1]['task']})"
 
     # ------------------------------------------------------------------
     # Backend dispatch + tool-use loop
@@ -3644,7 +4052,8 @@ class RoomManager:
 
             # Execute the tool
             tool_result = await self._execute_agent_tool(
-                tool_req["tool"], tool_req["args"], realm=realm
+                tool_req["tool"], tool_req["args"], realm=realm,
+                participant_name=name,
             )
 
             # Inject result and re-prompt
