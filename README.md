@@ -88,35 +88,91 @@ chitta-bridge-uninstall
 
 ## Discussion Rooms
 
-Async multi-agent roundtable — any mix of backends (OpenCode, Codex, local GPU models, Claude) post in parallel each round, each seeing the full thread before responding.
+Async multi-agent roundtable with **agent souls** — participants get persistent identity, memory, tools, and structured challenge rounds.
+
+### Basic Room
 
 ```python
-# Create a room with 3 participants (including a local GPU model)
 room_create(
     room_id="my-room",
     topic="What's the best way to design a cache invalidation strategy?",
     participants='[
-        {"name":"Codex-GPT54","backend":"codex","session_id":"existing-codex-session"},
-        {"name":"Gemini","backend":"opencode","session_id":"existing-gemini-session"},
-        {"name":"Llama","backend":"local","model":"llama3.3:70b","base_url":"http://gpunode01:11434/v1"}
+        {"name":"Codex","backend":"codex","session_id":"codex-1"},
+        {"name":"Gemini","backend":"opencode","session_id":"gemini-1"},
+        {"name":"Llama","backend":"local","model":"qwen2.5:32b","base_url":"http://gpunode:11434/v1"}
     ]'
 )
 
-# Run 2 rounds (all participants respond in parallel each round)
 room_run(room_id="my-room", rounds=2)
-
-# Add a participant mid-discussion
-room_add_participant(room_id="my-room", participant='{"name":"Claude","backend":"claude"}')
-
-# Read the full transcript
-room_read(room_id="my-room")
+room_synthesize(room_id="my-room")
 ```
+
+### Soul-Powered Room
+
+Each participant can have a **soul** — a system prompt, memory namespace, tools, challenge bias, and response format:
+
+```python
+room_create(
+    room_id="expert-panel",
+    topic="How should we authenticate ancient DNA from permafrost?",
+    participants='[
+        {"name":"Paleogenomicist","backend":"local","model":"qwen2.5:32b",
+         "base_url":"http://gpunode:11434/v1",
+         "soul":{
+           "system_prompt":"You are a senior paleogenomicist with 15+ years experience...",
+           "realm":"agent:paleogenomicist",
+           "tools":["recall","remember","web_search","smart_context"],
+           "max_tool_turns":2,
+           "challenge_bias":0.7,
+           "response_format":"### Key Points\\n### Tools & Thresholds\\n### Caveats"
+         }},
+        {"name":"Bioinformatician","backend":"local","model":"phi4:14b",
+         "base_url":"http://gpunode:11434/v1",
+         "soul":{
+           "system_prompt":"You are a computational biologist specializing in pipelines...",
+           "realm":"agent:bioinformatician",
+           "tools":["recall","remember","smart_context"],
+           "challenge_bias":0.4
+         }}
+    ]'
+)
+
+# Challenge mode: between rounds, a moderator extracts claims and
+# forces participants to disagree, provide evidence, and refine
+room_run(room_id="expert-panel", rounds=2, challenge=true)
+room_synthesize(room_id="expert-panel")
+```
+
+### Soul Features
+
+| Feature | Description |
+|---------|-------------|
+| `system_prompt` | Agent identity, expertise, personality |
+| `realm` | Chitta memory namespace — per-agent persistent memory |
+| `tools` | Available tools: `recall`, `remember`, `web_search`, `smart_context` |
+| `max_tool_turns` | Max tool-use iterations per response (default 3) |
+| `max_rounds` | Max discussion rounds, 0 = unlimited |
+| `challenge_bias` | 0 = agreeable, 1 = devil's advocate |
+| `response_format` | Structured output template |
+
+### Challenge Rounds
+
+When `challenge=true`, a moderator automatically:
+1. Extracts substantive claims from the previous round
+2. Injects a challenge prompt requiring each participant to disagree with at least one claim
+3. Forces evidence-based refinement instead of polite agreement
+
+### GPU Contention Handling
+
+When multiple local models share the same GPU endpoint, rooms automatically run participants **sequentially** to avoid model-swap thrashing. Different endpoints run in parallel.
+
+### Tools
 
 | Tool | Description |
 |------|-------------|
-| `room_create` | Create a discussion room with named participants |
+| `room_create` | Create a discussion room with named participants and optional souls |
 | `room_add_participant` | Add a participant to an existing room |
-| `room_run` | Run N rounds — all participants respond in parallel |
+| `room_run` | Run N rounds with optional challenge mode |
 | `room_read` | Read the full transcript |
 | `room_synthesize` | Distill the transcript — consensus, disagreements, best answer, open questions |
 
@@ -130,7 +186,7 @@ room_synthesize(room_id="my-room")
 # Use a local model as synthesizer
 room_synthesize(
     room_id="my-room",
-    synthesizer='{"name":"Qwen3","backend":"local","model":"qwen3:30b-a3b","base_url":"http://gpunode01:11434/v1"}'
+    synthesizer='{"name":"Qwen3","backend":"local","model":"qwen3:30b-a3b","base_url":"http://gpunode:11434/v1"}'
 )
 ```
 
@@ -193,13 +249,13 @@ web_fetch(url="https://example.com/article", max_chars=12000)
 
 ## Soul Memory (chittad)
 
-Bidirectional memory bridge to the cc-soul daemon. Room discussions automatically pull relevant memories as context, and syntheses are stored back as episodes.
+Bidirectional memory bridge to the cc-soul daemon with **realm-scoped** memory. Each room participant can have its own memory namespace, and room discussions automatically pull relevant memories as context.
 
 ```python
 # Check if soul is running
 soul_status()
 
-# Recall memories
+# Recall memories (global or realm-scoped)
 soul_recall(query="cache invalidation strategies", limit=5)
 
 # Store a memory
@@ -211,14 +267,17 @@ soul_context(task="refactor authentication middleware")
 
 | Tool | Description |
 |------|-------------|
-| `soul_recall` | Search memories by query |
-| `soul_remember` | Store a new memory |
+| `soul_recall` | Search memories by query (supports realm scoping) |
+| `soul_remember` | Store a new memory (supports realm scoping) |
 | `soul_context` | Smart context assembly (memories + symbols + graph) |
 | `soul_status` | Check if chittad is available |
 
 Discussion rooms automatically:
-- **Inject soul context** at creation — participants see relevant memories
+- **Seed agent realms** on first turn — identity and topic stored for future recall
+- **Inject soul context** at creation — participants see relevant memories (code symbols filtered)
+- **Store contributions back** — each agent's response stored in their realm
 - **Store synthesis back** — room conclusions become soul episodes
+- **Hybrid recall** — vector + BM25 keyword matching for better memory retrieval
 
 ## Codex Backend
 
