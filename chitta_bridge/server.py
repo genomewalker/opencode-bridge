@@ -3753,9 +3753,22 @@ class RoomManager:
     def _tool_read_file(self, args: dict, participant_name: str = "") -> str:
         """Read a file — handles text, PDF, Jupyter notebooks, and images."""
         path = Path(args.get("path", "")).expanduser().resolve()
-        blocked = ("/proc", "/sys", "/dev", "/etc/shadow")
-        if any(str(path).startswith(b) for b in blocked):
+        str_path = str(path)
+        # Block sensitive system paths
+        blocked_prefixes = ("/proc", "/sys", "/dev")
+        blocked_exact = ("/etc/shadow", "/etc/gshadow", "/etc/master.passwd")
+        # Block sensitive dotfiles/dirs (credentials, keys, tokens)
+        blocked_dotpaths = (
+            "/.ssh/", "/.gnupg/", "/.aws/", "/.azure/", "/.gcloud/",
+            "/.config/gh/", "/.docker/config.json", "/.kube/config",
+            "/.netrc", "/.env", "/.npmrc",
+        )
+        if any(str_path.startswith(b) for b in blocked_prefixes):
             return f"(blocked: cannot read {path})"
+        if str_path in blocked_exact:
+            return f"(blocked: cannot read {path})"
+        if any(bp in str_path for bp in blocked_dotpaths):
+            return f"(blocked: sensitive file — {path})"
         if not path.exists():
             return f"(file not found: {path})"
         if not path.is_file():
@@ -3913,9 +3926,17 @@ class RoomManager:
         """
         path = Path(args.get("path", "")).expanduser().resolve()
         content = args.get("content", "")
-        blocked = ("/proc", "/sys", "/dev", "/etc")
-        if any(str(path).startswith(b) for b in blocked):
+        str_path = str(path)
+        blocked_prefixes = ("/proc", "/sys", "/dev", "/etc")
+        blocked_dotpaths = (
+            "/.ssh/", "/.gnupg/", "/.aws/", "/.azure/", "/.gcloud/",
+            "/.config/gh/", "/.docker/config.json", "/.kube/config",
+            "/.netrc", "/.env", "/.npmrc",
+        )
+        if any(str_path.startswith(b) for b in blocked_prefixes):
             return f"(blocked: cannot write to {path})"
+        if any(bp in str_path for bp in blocked_dotpaths):
+            return f"(blocked: sensitive path — {path})"
 
         # Read-before-overwrite check
         key = participant_name or "_global"
@@ -4255,12 +4276,27 @@ class RoomManager:
         bomb_patterns = [
             ":(){ :", "|:&", "fork()", "./$0|./$0",
             "dd if=/dev/zero of=/dev/sd", "mkfs.", "> /dev/sd",
-            "chmod -R 777 /", "chown -R", "wget|sh", "curl|sh",
-            "wget|bash", "curl|bash",
+            "chmod -R 777 /", "chown -R",
         ]
         for bp in bomb_patterns:
             if bp in normalized:
                 return "(blocked: dangerous pattern detected)"
+
+        # Block encoding/indirection bypasses (base64 decode | bash, hex, python os.system)
+        bypass_patterns = [
+            r"base64\s.*\|\s*(ba)?sh",            # base64 -d | bash
+            r"printf\s+['\"]\\x",                  # printf '\x72\x6d' hex encoding
+            r"python[23]?\s+-c\s+.*os\.system",    # python -c "os.system(...)"
+            r"python[23]?\s+-c\s+.*subprocess",     # python -c "subprocess..."
+            r"perl\s+-e\s+.*system",                # perl -e 'system(...)'
+            r"ruby\s+-e\s+.*system",                # ruby -e 'system(...)'
+            r"\$\(\s*echo\s+.*\|\s*(ba)?sh",       # $(echo ... | bash)
+            r"wget\s.*\|\s*(ba)?sh",               # wget ... | bash
+            r"curl\s.*\|\s*(ba)?sh",               # curl ... | bash
+        ]
+        for bp in bypass_patterns:
+            if re.search(bp, normalized, re.IGNORECASE):
+                return "(blocked: encoding/indirection bypass detected)"
 
         if re.search(r'\beval\s', command) or re.search(r'\bexec\s', command):
             inner = command.split("eval", 1)[-1] if "eval" in command else ""
@@ -4296,6 +4332,18 @@ class RoomManager:
         if use_unshare:
             shell_cmd = ["unshare", "--net", "--", "bash", "-c", command]
         else:
+            # Fail-closed: without network isolation, only allow safe commands
+            safe_prefixes = (
+                "ls", "cat", "head", "tail", "wc", "sort", "uniq", "cut",
+                "grep", "find", "file", "stat", "du", "df", "echo", "printf",
+                "pwd", "date", "whoami", "uname", "which", "env", "id",
+                "diff", "md5sum", "sha256sum", "tr", "sed", "awk",
+                "python", "python3", "pip", "rg", "fd", "jq",
+            )
+            first_cmd = tokens[0] if tokens else ""
+            base_cmd = os.path.basename(first_cmd)
+            if base_cmd not in safe_prefixes:
+                return f"(blocked: '{base_cmd}' not allowed without network isolation — unshare not available)"
             shell_cmd = ["bash", "-c", command]
 
         # ── Background execution ──────────────────────────────────────
