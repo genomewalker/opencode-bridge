@@ -33,7 +33,7 @@ import urllib.parse
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Any
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields as dc_fields
 
 from mcp.server import Server, InitializationOptions
 from mcp.server.stdio import stdio_server
@@ -841,6 +841,32 @@ class CodexSession:
         for m in data.get("messages", []):
             session.messages.append(Message(**m))
         return session
+
+
+@dataclass
+class CodexJob:
+    """Background Codex task with persistent status tracking."""
+    id: str
+    task: str
+    model: str
+    working_dir: str
+    created: str = field(default_factory=lambda: datetime.now().isoformat())
+    status: str = "running"  # running | completed | failed | cancelled
+    effort: Optional[str] = None
+    resume_from: Optional[str] = None
+    started: Optional[str] = None
+    finished: Optional[str] = None
+    result: Optional[str] = None
+    codex_session_id: Optional[str] = None
+
+    def save(self, path: Path):
+        path.write_text(json.dumps(asdict(self), indent=2))
+
+    @classmethod
+    def load(cls, path: Path) -> "CodexJob":
+        data = json.loads(path.read_text())
+        valid = {f.name for f in dc_fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in valid})
 
 
 class OpenCodeBridge:
@@ -1743,12 +1769,31 @@ class CodexBridge:
         self.sessions_dir = Path.home() / ".chitta-bridge" / "codex-sessions"
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self._load_sessions()
+        self.jobs: dict[str, CodexJob] = {}
+        self._job_tasks: dict[str, "asyncio.Task"] = {}
+        self.jobs_dir = Path.home() / ".chitta-bridge" / "codex-jobs"
+        self.jobs_dir.mkdir(parents=True, exist_ok=True)
+        self._load_jobs()
 
     def _load_sessions(self):
         for path in self.sessions_dir.glob("*.json"):
             try:
                 session = CodexSession.load(path)
                 self.sessions[session.id] = session
+            except Exception:
+                pass
+
+    def _load_jobs(self):
+        for path in self.jobs_dir.glob("*.json"):
+            try:
+                job = CodexJob.load(path)
+                # Jobs that were "running" at startup are now orphaned
+                if job.status == "running":
+                    job.status = "failed"
+                    job.result = "Server restarted while job was running"
+                    job.finished = datetime.now().isoformat()
+                    job.save(path)
+                self.jobs[job.id] = job
             except Exception:
                 pass
 
@@ -1827,6 +1872,137 @@ class CodexBridge:
             if stderr_task and not stderr_task.done():
                 stderr_task.cancel()
             return f"Error: {e}", 1
+
+    async def _run_codex_exec_stdin(
+        self,
+        args: list,
+        stdin_data: str,
+        cwd: str,
+        timeout: int = 300,
+        stall_timeout: int = 90,
+    ) -> tuple[str, int]:
+        """Run a codex exec command with stdin data; returns (raw_output, returncode)."""
+        if not CODEX_BIN:
+            return "Codex not installed.", 1
+        proc = None
+        stderr_task = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                str(CODEX_BIN), *args,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=cwd
+            )
+            proc.stdin.write(stdin_data.encode())
+            await proc.stdin.drain()
+            proc.stdin.close()
+
+            stderr_task = asyncio.ensure_future(proc.stderr.read())
+            stdout_parts: list[str] = []
+            deadline = asyncio.get_event_loop().time() + timeout
+            first_line = True
+
+            while True:
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    proc.kill()
+                    await proc.wait()
+                    stderr_task.cancel()
+                    return f"Timed out after {timeout}s", 1
+                read_timeout = remaining if first_line else min(stall_timeout, remaining)
+                try:
+                    line = await asyncio.wait_for(proc.stdout.readline(), timeout=read_timeout)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+                    stderr_task.cancel()
+                    return f"Model stalled — no output for {stall_timeout}s", 1
+                if not line:
+                    break
+                stdout_parts.append(line.decode(errors="replace"))
+                first_line = False
+
+            try:
+                stderr_raw = await asyncio.wait_for(stderr_task, timeout=5)
+            except asyncio.TimeoutError:
+                stderr_task.cancel()
+                stderr_raw = b""
+            await proc.wait()
+
+            out = "".join(stdout_parts)
+            if proc.returncode != 0:
+                err = stderr_raw.decode(errors="replace").strip()
+                return err or out, proc.returncode or 1
+            return out, 0
+        except asyncio.CancelledError:
+            if proc:
+                proc.kill()
+                await proc.wait()
+            if stderr_task and not stderr_task.done():
+                stderr_task.cancel()
+            raise
+        except Exception as e:
+            if proc:
+                proc.kill()
+                await proc.wait()
+            if stderr_task and not stderr_task.done():
+                stderr_task.cancel()
+            return f"Error: {e}", 1
+
+    @staticmethod
+    def _parse_codex_jsonl(output: str) -> tuple[str, Optional[str]]:
+        """Extract reply text and thread_id from Codex JSONL output."""
+        reply_parts = []
+        thread_id = None
+        for line in output.split("\n"):
+            if not line or line.startswith("WARNING:"):
+                continue
+            try:
+                event = json.loads(line)
+                if not thread_id and event.get("thread_id"):
+                    thread_id = event["thread_id"]
+                if event.get("type") == "item.completed":
+                    item = event.get("item", {})
+                    if item.get("type") == "agent_message":
+                        text = item.get("text", "")
+                        if text:
+                            reply_parts.append(text)
+            except json.JSONDecodeError:
+                continue
+        return "\n".join(reply_parts), thread_id
+
+    async def _run_rescue_background(self, job_id: str):
+        """Coroutine that runs a rescue job in the background and updates its state."""
+        job = self.jobs[job_id]
+        job.started = datetime.now().isoformat()
+        job.save(self.jobs_dir / f"{job_id}.json")
+
+        args = ["exec"]
+        if job.resume_from:
+            args.extend(["resume", job.resume_from])
+        if job.model:
+            args.extend(["--model", job.model])
+        if job.effort:
+            args.extend(["--effort", job.effort])
+        args.extend(["--full-auto", "--json", "-"])
+
+        try:
+            output, code = await self._run_codex_exec_stdin(
+                args, job.task, job.working_dir, timeout=1800, stall_timeout=120
+            )
+            reply, thread_id = self._parse_codex_jsonl(output)
+            job.status = "completed" if code == 0 else "failed"
+            job.result = reply or output or "(no output)"
+            job.codex_session_id = thread_id
+            job.finished = datetime.now().isoformat()
+        except asyncio.CancelledError:
+            job.status = "cancelled"
+            job.result = "(cancelled)"
+            job.finished = datetime.now().isoformat()
+        finally:
+            job.save(self.jobs_dir / f"{job_id}.json")
+            self._job_tasks.pop(job_id, None)
 
     async def start_session(
         self,
@@ -2038,130 +2214,251 @@ Set via:
         task: str,
         working_dir: Optional[str] = None,
         model: Optional[str] = None,
-        full_auto: bool = True
+        full_auto: bool = True,
+        effort: Optional[str] = None,
     ) -> str:
         """Run a one-off task without session management."""
         args = ["exec"]
-
-        # Add model only if explicitly specified (otherwise use codex config default)
         if model:
             args.extend(["--model", model])
-
+        if effort:
+            args.extend(["--effort", effort])
         if full_auto:
             args.append("--full-auto")
         else:
             args.extend(["--sandbox", self.config.codex_sandbox])
-
-        args.append("--json")
-        args.append("-")
+        args.extend(["--json", "-"])
 
         cwd = working_dir or os.getcwd()
+        output, code = await self._run_codex_exec_stdin(args, task, cwd)
+        if code != 0:
+            return f"Error: {output}"
 
-        proc = None
-        stderr_task = None
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                str(CODEX_BIN), *args,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd
-            )
-            proc.stdin.write(task.encode())
-            await proc.stdin.drain()
-            proc.stdin.close()
-
-            # Drain stderr concurrently so a full stderr pipe never blocks stdout.
-            stderr_task = asyncio.ensure_future(proc.stderr.read())
-
-            stdout_parts: list[str] = []
-            deadline = asyncio.get_event_loop().time() + 300
-            stall_timeout = 90
-            first_line = True
-
-            while True:
-                remaining = deadline - asyncio.get_event_loop().time()
-                if remaining <= 0:
-                    proc.kill()
-                    await proc.wait()
-                    stderr_task.cancel()
-                    return "Timed out after 300s"
-                read_timeout = remaining if first_line else min(stall_timeout, remaining)
-                try:
-                    line = await asyncio.wait_for(
-                        proc.stdout.readline(),
-                        timeout=read_timeout
-                    )
-                except asyncio.TimeoutError:
-                    proc.kill()
-                    await proc.wait()
-                    stderr_task.cancel()
-                    return f"Model stalled — no output for {stall_timeout}s"
-                if not line:
-                    break
-                stdout_parts.append(line.decode(errors="replace"))
-                first_line = False
-
-            try:
-                stderr_raw = await asyncio.wait_for(stderr_task, timeout=5)
-            except asyncio.TimeoutError:
-                stderr_task.cancel()
-                stderr_raw = b""
-            await proc.wait()
-
-            output = "".join(stdout_parts)
-            if proc.returncode != 0:
-                err = stderr_raw.decode(errors="replace").strip()
-                return f"Error: {err or output}"
-        except asyncio.TimeoutError:
-            if proc:
-                proc.kill()
-                await proc.wait()
-            if stderr_task and not stderr_task.done():
-                stderr_task.cancel()
-            return "Command timed out"
-        except Exception as e:
-            if proc:
-                proc.kill()
-                await proc.wait()
-            if stderr_task and not stderr_task.done():
-                stderr_task.cancel()
-            return f"Error: {e}"
-
-        # Parse output (Codex JSONL format)
-        reply_parts = []
-        for line in output.split("\n"):
-            if not line or line.startswith("WARNING:"):
-                continue
-            try:
-                event = json.loads(line)
-                if event.get("type") == "item.completed":
-                    item = event.get("item", {})
-                    if item.get("type") == "agent_message":
-                        text = item.get("text", "")
-                        if text:
-                            reply_parts.append(text)
-            except json.JSONDecodeError:
-                continue
-
-        return "\n".join(reply_parts) if reply_parts else output or "No response received"
+        reply, thread_id = self._parse_codex_jsonl(output)
+        result = reply or output or "No response received"
+        if thread_id:
+            result += f"\n\n(Codex session: {thread_id} — resume with: codex resume {thread_id})"
+        return result
 
     async def review_code(
         self,
         working_dir: Optional[str] = None,
-        model: Optional[str] = None
+        model: Optional[str] = None,
+        mode: str = "normal",
+        focus: Optional[str] = None,
+        base: Optional[str] = None,
+        effort: Optional[str] = None,
+        background: bool = False,
     ) -> str:
-        """Run Codex code review on the current repository."""
+        """Run Codex code review. mode='adversarial' pressure-tests design decisions."""
         model = model or self.config.codex_model
         cwd = working_dir or os.getcwd()
 
-        args = ["exec", "review", "--model", model, "--json"]
+        if mode == "adversarial":
+            focus_clause = f"\n\nSpecific focus area: {focus}" if focus else ""
+            task = (
+                "You are a senior adversarial code reviewer. Your job is NOT to find obvious bugs — "
+                "it is to challenge the design decisions, architecture, and tradeoffs in this code.\n\n"
+                "Review the uncommitted changes (or the full repo if no changes) and:\n"
+                "1. Question whether the chosen approach was the right one at all\n"
+                "2. Identify hidden assumptions that could break under load or edge cases\n"
+                "3. Pressure-test failure modes: what happens when X fails, Y is slow, Z is empty?\n"
+                "4. Challenge the architecture: would a different design be safer/simpler?\n"
+                "5. Flag race conditions, data loss risks, rollback gaps, reliability holes\n"
+                "6. Propose at least one alternative approach and explain the tradeoff"
+                f"{focus_clause}\n\n"
+                "Be direct and hard to satisfy. Do not praise good code — focus exclusively on risks."
+            )
+            if base:
+                task += f"\n\nReview changes relative to base: {base}"
+            if background:
+                return await self._launch_rescue(task, model=model, effort=effort, cwd=cwd)
+            output, code = await self._run_codex_exec_stdin(
+                self._build_exec_args(model, effort), task, cwd, timeout=600
+            )
+            if code != 0:
+                return f"Error: {output}"
+            reply, thread_id = self._parse_codex_jsonl(output)
+            result = reply or output or "Review complete"
+            if thread_id:
+                result += f"\n\n(Codex session: {thread_id} — resume with: codex resume {thread_id})"
+            return result
+        else:
+            # Normal review via `codex exec review`
+            args = ["exec", "review", "--model", model, "--json"]
+            if base:
+                args.extend(["--base", base])
+            if effort:
+                args.extend(["--effort", effort])
+            if background:
+                task = f"Run a code review{f' vs {base}' if base else ''}"
+                return await self._launch_rescue(task, model=model, effort=effort, cwd=cwd)
+            output, code = await self._run_codex(*args, cwd=cwd, timeout=600)
+            if code != 0:
+                return f"Error: {output}"
+            return output or "Review complete"
 
-        output, code = await self._run_codex(*args, cwd=cwd)
+    def _build_exec_args(self, model: Optional[str], effort: Optional[str]) -> list:
+        args = ["exec"]
+        if model:
+            args.extend(["--model", model])
+        if effort:
+            args.extend(["--effort", effort])
+        args.extend(["--full-auto", "--json", "-"])
+        return args
+
+    async def _launch_rescue(
+        self,
+        task: str,
+        model: Optional[str] = None,
+        effort: Optional[str] = None,
+        cwd: Optional[str] = None,
+        resume_from: Optional[str] = None,
+    ) -> str:
+        """Start a background rescue job and return its ID immediately."""
+        job_id = f"job-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{os.urandom(3).hex()}"
+        job = CodexJob(
+            id=job_id,
+            task=task,
+            model=model or self.config.codex_model,
+            working_dir=cwd or os.getcwd(),
+            effort=effort,
+            resume_from=resume_from,
+        )
+        self.jobs[job_id] = job
+        job.save(self.jobs_dir / f"{job_id}.json")
+        t = asyncio.create_task(self._run_rescue_background(job_id))
+        self._job_tasks[job_id] = t
+        return (
+            f"Rescue job started in background.\n"
+            f"  Job ID: {job_id}\n"
+            f"  Model: {job.model}{f', effort: {effort}' if effort else ''}"
+            f"{f', resume: {resume_from}' if resume_from else ''}\n"
+            f"  Use codex_job_status to check progress.\n"
+            f"  Use codex_job_result {job_id} when done."
+        )
+
+    async def rescue(
+        self,
+        task: str,
+        model: Optional[str] = None,
+        effort: Optional[str] = None,
+        working_dir: Optional[str] = None,
+        background: bool = True,
+        resume_from: Optional[str] = None,
+        fresh: bool = False,
+    ) -> str:
+        """Delegate a task to Codex. Supports background execution and session resume."""
+        cwd = working_dir or os.getcwd()
+        # If no resume_from and not fresh, check if there's a recent completed job to offer resume
+        if not resume_from and not fresh:
+            recent = [j for j in self.jobs.values() if j.codex_session_id and j.status == "completed"]
+            if recent:
+                latest = max(recent, key=lambda j: j.finished or "")
+                resume_from = latest.codex_session_id
+
+        if background:
+            return await self._launch_rescue(task, model=model, effort=effort, cwd=cwd, resume_from=resume_from)
+
+        # Foreground execution
+        args = self._build_exec_args(model or self.config.codex_model, effort)
+        if resume_from:
+            # Insert resume after "exec"
+            args = ["exec", "resume", resume_from] + args[1:]
+        output, code = await self._run_codex_exec_stdin(args, task, cwd, timeout=600)
         if code != 0:
             return f"Error: {output}"
+        reply, thread_id = self._parse_codex_jsonl(output)
+        result = reply or output or "No response received"
+        if thread_id:
+            result += f"\n\n(Codex session: {thread_id} — resume with: codex rescue --resume {thread_id})"
+        return result
 
-        return output or "Review complete"
+    def job_status(self, job_id: Optional[str] = None) -> str:
+        """Show status of one or all rescue jobs."""
+        if not self.jobs:
+            return "No rescue jobs found."
+        if job_id:
+            job_id = _sanitize_session_id(job_id) if re.fullmatch(r'[\w\-]+', job_id) else None
+            if not job_id or job_id not in self.jobs:
+                return f"Job '{job_id}' not found."
+            job = self.jobs[job_id]
+            lines = [
+                f"Job: {job.id}",
+                f"  Status:  {job.status}",
+                f"  Task:    {job.task[:120]}{'…' if len(job.task) > 120 else ''}",
+                f"  Model:   {job.model}{f' ({job.effort})' if job.effort else ''}",
+                f"  Created: {job.created}",
+            ]
+            if job.started:
+                lines.append(f"  Started: {job.started}")
+            if job.finished:
+                lines.append(f"  Finished: {job.finished}")
+            if job.codex_session_id:
+                lines.append(f"  Codex session: {job.codex_session_id}")
+            return "\n".join(lines)
+
+        # All jobs — show most recent 10
+        jobs_sorted = sorted(self.jobs.values(), key=lambda j: j.created, reverse=True)[:10]
+        lines = [f"Rescue Jobs ({len(self.jobs)} total, showing latest 10):"]
+        for job in jobs_sorted:
+            marker = {"running": "⏳", "completed": "✓", "failed": "✗", "cancelled": "⊘"}.get(job.status, "?")
+            age = job.created[:19].replace("T", " ")
+            lines.append(f"  {marker} {job.id}  [{job.status}]  {age}  {job.task[:60]}{'…' if len(job.task) > 60 else ''}")
+        return "\n".join(lines)
+
+    def job_result(self, job_id: Optional[str] = None) -> str:
+        """Get the final output of a completed rescue job."""
+        if not self.jobs:
+            return "No rescue jobs found."
+        if not job_id:
+            completed = [j for j in self.jobs.values() if j.status == "completed"]
+            if not completed:
+                return "No completed jobs found."
+            job = max(completed, key=lambda j: j.finished or "")
+        else:
+            if job_id not in self.jobs:
+                return f"Job '{job_id}' not found."
+            job = self.jobs[job_id]
+
+        if job.status == "running":
+            return f"Job '{job.id}' is still running. Check back with codex_job_status."
+        lines = [
+            f"Job: {job.id}  [{job.status}]",
+            f"Task: {job.task[:200]}{'…' if len(job.task) > 200 else ''}",
+            "",
+            job.result or "(no output)",
+        ]
+        if job.codex_session_id:
+            lines.append(f"\nCodex session: {job.codex_session_id}")
+            lines.append(f"Resume in Codex: codex resume {job.codex_session_id}")
+        return "\n".join(lines)
+
+    def job_cancel(self, job_id: Optional[str] = None) -> str:
+        """Cancel a running rescue job."""
+        if not job_id:
+            running = [j for j in self.jobs.values() if j.status == "running"]
+            if not running:
+                return "No running jobs to cancel."
+            if len(running) > 1:
+                return f"Multiple running jobs: {', '.join(j.id for j in running)}. Specify job_id."
+            job_id = running[0].id
+
+        if job_id not in self.jobs:
+            return f"Job '{job_id}' not found."
+        job = self.jobs[job_id]
+        if job.status != "running":
+            return f"Job '{job_id}' is not running (status: {job.status})."
+
+        task = self._job_tasks.get(job_id)
+        if task and not task.done():
+            task.cancel()
+            return f"Cancellation requested for job '{job_id}'."
+        # Already done but status not updated yet
+        job.status = "cancelled"
+        job.finished = datetime.now().isoformat()
+        job.save(self.jobs_dir / f"{job_id}.json")
+        return f"Job '{job_id}' marked as cancelled."
 
     def list_sessions(self) -> str:
         if not self.sessions:
@@ -5010,7 +5307,7 @@ async def list_tools():
         ),
         Tool(
             name="codex_run",
-            description="Run a one-off Codex task without session (stateless)",
+            description="Run a one-off Codex task without session (stateless). Returns result + Codex session ID for resuming.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -5029,6 +5326,10 @@ async def list_tools():
                     "full_auto": {
                         "type": "boolean",
                         "description": "Enable full-auto mode (default: true)"
+                    },
+                    "effort": {
+                        "type": "string",
+                        "description": "Reasoning effort: low, medium, high, xhigh (default: model default)"
                     }
                 },
                 "required": ["task"]
@@ -5036,7 +5337,7 @@ async def list_tools():
         ),
         Tool(
             name="codex_review",
-            description="Run Codex code review on the current repository",
+            description="Run Codex code review. mode='adversarial' pressure-tests design decisions. Supports background execution.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -5047,6 +5348,104 @@ async def list_tools():
                     "model": {
                         "type": "string",
                         "description": "Model to use for review"
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["normal", "adversarial"],
+                        "description": "Review mode: 'normal' (default) or 'adversarial' (challenges design, architecture, tradeoffs)"
+                    },
+                    "focus": {
+                        "type": "string",
+                        "description": "For adversarial mode: specific risk area to challenge (e.g. 'auth flow', 'race conditions')"
+                    },
+                    "base": {
+                        "type": "string",
+                        "description": "Git ref to compare against (e.g. 'main', 'HEAD~3'). Reviews only changes since that ref."
+                    },
+                    "effort": {
+                        "type": "string",
+                        "description": "Reasoning effort: low, medium, high, xhigh"
+                    },
+                    "background": {
+                        "type": "boolean",
+                        "description": "Run in background and return job ID immediately (default: false)"
+                    }
+                }
+            }
+        ),
+        Tool(
+            name="codex_rescue",
+            description="Delegate a task to Codex with background execution, session resume, and effort control. Better than codex_run for long tasks.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "Task to delegate to Codex (investigate, fix, implement)"
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Model to use (default: configured default)"
+                    },
+                    "effort": {
+                        "type": "string",
+                        "description": "Reasoning effort: low, medium, high, xhigh"
+                    },
+                    "working_dir": {
+                        "type": "string",
+                        "description": "Working directory (default: current)"
+                    },
+                    "background": {
+                        "type": "boolean",
+                        "description": "Run in background (default: true). Use codex_job_status / codex_job_result to track."
+                    },
+                    "resume_from": {
+                        "type": "string",
+                        "description": "Codex session ID to resume (from a previous codex_run or codex_job_result)"
+                    },
+                    "fresh": {
+                        "type": "boolean",
+                        "description": "Start fresh — do not auto-resume the latest completed job (default: false)"
+                    }
+                },
+                "required": ["task"]
+            }
+        ),
+        Tool(
+            name="codex_job_status",
+            description="Check status of background rescue jobs. Shows all jobs or a specific job.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "job_id": {
+                        "type": "string",
+                        "description": "Specific job ID to check (omit for all jobs)"
+                    }
+                }
+            }
+        ),
+        Tool(
+            name="codex_job_result",
+            description="Get the final output of a completed rescue job, including Codex session ID for native resume.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "job_id": {
+                        "type": "string",
+                        "description": "Job ID (omit for latest completed job)"
+                    }
+                }
+            }
+        ),
+        Tool(
+            name="codex_job_cancel",
+            description="Cancel a running background rescue job.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "job_id": {
+                        "type": "string",
+                        "description": "Job ID to cancel (omit if only one job is running)"
                     }
                 }
             }
@@ -5702,13 +6101,35 @@ async def call_tool(name: str, arguments: dict):
                 task=arguments["task"],
                 working_dir=arguments.get("working_dir"),
                 model=arguments.get("model"),
-                full_auto=arguments.get("full_auto", True)
+                full_auto=arguments.get("full_auto", True),
+                effort=arguments.get("effort"),
             )
         elif name == "codex_review":
             result = await codex_bridge.review_code(
                 working_dir=arguments.get("working_dir"),
-                model=arguments.get("model")
+                model=arguments.get("model"),
+                mode=arguments.get("mode", "normal"),
+                focus=arguments.get("focus"),
+                base=arguments.get("base"),
+                effort=arguments.get("effort"),
+                background=arguments.get("background", False),
             )
+        elif name == "codex_rescue":
+            result = await codex_bridge.rescue(
+                task=arguments["task"],
+                model=arguments.get("model"),
+                effort=arguments.get("effort"),
+                working_dir=arguments.get("working_dir"),
+                background=arguments.get("background", True),
+                resume_from=arguments.get("resume_from"),
+                fresh=arguments.get("fresh", False),
+            )
+        elif name == "codex_job_status":
+            result = codex_bridge.job_status(arguments.get("job_id"))
+        elif name == "codex_job_result":
+            result = codex_bridge.job_result(arguments.get("job_id"))
+        elif name == "codex_job_cancel":
+            result = codex_bridge.job_cancel(arguments.get("job_id"))
         elif name == "codex_model":
             result = codex_bridge.set_model(arguments["model"])
         elif name == "codex_history":
