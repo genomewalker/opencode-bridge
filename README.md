@@ -4,21 +4,15 @@ MCP server for multi-model AI discussions — works with **Claude Code** and **C
 
 ## Quick Start
 
-### Claude Code
-
 ```bash
 uv pip install git+https://github.com/genomewalker/chitta-bridge.git
-chitta-bridge-install
+
+chitta-bridge-install               # both Claude Code + Codex
+chitta-bridge-install claude-code   # Claude Code only
+chitta-bridge-install codex         # Codex CLI only
 ```
 
-### Codex
-
-```bash
-uv pip install git+https://github.com/genomewalker/chitta-bridge.git
-./codex-plugin/install.sh
-```
-
-Skills: `/review`, `/rescue`, `/room`, `/soul` — plus all `mcp__chitta_bridge__*` tools.
+Skills (Codex): `/review`, `/rescue`, `/room`, `/soul` — plus all `mcp__chitta_bridge__*` tools.
 
 ## Features
 
@@ -57,20 +51,15 @@ pip install -e .
 
 ## Register
 
-### Claude Code
-
 ```bash
-chitta-bridge-install    # registers MCP server
-claude mcp list          # verify
-chitta-bridge-uninstall  # remove
+chitta-bridge-install               # install for both Claude Code and Codex
+chitta-bridge-install claude-code   # Claude Code only (registers MCP server)
+chitta-bridge-install codex         # Codex CLI only (plugin + skills + MCP)
+chitta-bridge-uninstall             # uninstall from both
+chitta-bridge-uninstall codex       # uninstall from Codex only
 ```
 
-### Codex CLI
-
-```bash
-./codex-plugin/install.sh              # install plugin + enable in config.toml
-./codex-plugin/install.sh --uninstall  # remove
-```
+Verify: `claude mcp list` (Claude Code) or check `~/.codex/plugins/` (Codex)
 
 ## OpenCode Backend
 
