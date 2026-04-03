@@ -401,11 +401,8 @@ codex_rescue(task="fetch and apply the upstream patch", sandbox="danger-full-acc
 chitta-bridge ships as a proper Codex plugin with skills and MCP tools:
 
 ```bash
-# Install
-./codex-plugin/install.sh
-
-# Uninstall
-./codex-plugin/install.sh --uninstall
+chitta-bridge-install codex       # install
+chitta-bridge-uninstall codex     # uninstall
 ```
 
 This installs to `~/.codex/plugins/cache/local/chitta-bridge/local/` and enables:
