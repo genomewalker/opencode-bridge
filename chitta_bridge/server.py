@@ -853,6 +853,7 @@ class CodexJob:
     created: str = field(default_factory=lambda: datetime.now().isoformat())
     status: str = "running"  # running | completed | failed | cancelled
     effort: Optional[str] = None
+    sandbox: Optional[str] = None
     resume_from: Optional[str] = None
     started: Optional[str] = None
     finished: Optional[str] = None
@@ -1985,6 +1986,8 @@ class CodexBridge:
             args.extend(["--model", job.model])
         if job.effort:
             args.extend(["--effort", job.effort])
+        if job.sandbox:
+            args.extend(["--sandbox", job.sandbox])
         args.extend(["--full-auto", "--json", "-"])
 
         try:
@@ -2216,18 +2219,11 @@ Set via:
         model: Optional[str] = None,
         full_auto: bool = True,
         effort: Optional[str] = None,
+        sandbox: Optional[str] = None,
     ) -> str:
         """Run a one-off task without session management."""
-        args = ["exec"]
-        if model:
-            args.extend(["--model", model])
-        if effort:
-            args.extend(["--effort", effort])
-        if full_auto:
-            args.append("--full-auto")
-        else:
-            args.extend(["--sandbox", self.config.codex_sandbox])
-        args.extend(["--json", "-"])
+        args = self._build_exec_args(model, effort, sandbox=sandbox, full_auto=full_auto)
+
 
         cwd = working_dir or os.getcwd()
         output, code = await self._run_codex_exec_stdin(args, task, cwd)
@@ -2249,6 +2245,7 @@ Set via:
         base: Optional[str] = None,
         effort: Optional[str] = None,
         background: bool = False,
+        sandbox: Optional[str] = None,
     ) -> str:
         """Run Codex code review. mode='adversarial' pressure-tests design decisions."""
         model = model or self.config.codex_model
@@ -2272,9 +2269,9 @@ Set via:
             if base:
                 task += f"\n\nReview changes relative to base: {base}"
             if background:
-                return await self._launch_rescue(task, model=model, effort=effort, cwd=cwd)
+                return await self._launch_rescue(task, model=model, effort=effort, cwd=cwd, sandbox=sandbox)
             output, code = await self._run_codex_exec_stdin(
-                self._build_exec_args(model, effort), task, cwd, timeout=600
+                self._build_exec_args(model, effort, sandbox=sandbox), task, cwd, timeout=600
             )
             if code != 0:
                 return f"Error: {output}"
@@ -2290,21 +2287,37 @@ Set via:
                 args.extend(["--base", base])
             if effort:
                 args.extend(["--effort", effort])
+            if sandbox:
+                args.extend(["--sandbox", sandbox])
             if background:
                 task = f"Run a code review{f' vs {base}' if base else ''}"
-                return await self._launch_rescue(task, model=model, effort=effort, cwd=cwd)
+                return await self._launch_rescue(task, model=model, effort=effort, cwd=cwd, sandbox=sandbox)
             output, code = await self._run_codex(*args, cwd=cwd, timeout=600)
             if code != 0:
                 return f"Error: {output}"
             return output or "Review complete"
 
-    def _build_exec_args(self, model: Optional[str], effort: Optional[str]) -> list:
+    def _build_exec_args(
+        self,
+        model: Optional[str],
+        effort: Optional[str],
+        sandbox: Optional[str] = None,
+        full_auto: bool = True,
+    ) -> list:
         args = ["exec"]
         if model:
             args.extend(["--model", model])
         if effort:
             args.extend(["--effort", effort])
-        args.extend(["--full-auto", "--json", "-"])
+        if sandbox:
+            args.extend(["--sandbox", sandbox])
+            if full_auto:
+                args.append("--full-auto")
+        elif full_auto:
+            args.append("--full-auto")
+        else:
+            args.extend(["--sandbox", self.config.codex_sandbox])
+        args.extend(["--json", "-"])
         return args
 
     async def _launch_rescue(
@@ -2314,6 +2327,7 @@ Set via:
         effort: Optional[str] = None,
         cwd: Optional[str] = None,
         resume_from: Optional[str] = None,
+        sandbox: Optional[str] = None,
     ) -> str:
         """Start a background rescue job and return its ID immediately."""
         job_id = f"job-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{os.urandom(3).hex()}"
@@ -2323,6 +2337,7 @@ Set via:
             model=model or self.config.codex_model,
             working_dir=cwd or os.getcwd(),
             effort=effort,
+            sandbox=sandbox,
             resume_from=resume_from,
         )
         self.jobs[job_id] = job
@@ -2347,10 +2362,10 @@ Set via:
         background: bool = True,
         resume_from: Optional[str] = None,
         fresh: bool = False,
+        sandbox: Optional[str] = None,
     ) -> str:
         """Delegate a task to Codex. Supports background execution and session resume."""
         cwd = working_dir or os.getcwd()
-        # If no resume_from and not fresh, check if there's a recent completed job to offer resume
         if not resume_from and not fresh:
             recent = [j for j in self.jobs.values() if j.codex_session_id and j.status == "completed"]
             if recent:
@@ -2358,12 +2373,11 @@ Set via:
                 resume_from = latest.codex_session_id
 
         if background:
-            return await self._launch_rescue(task, model=model, effort=effort, cwd=cwd, resume_from=resume_from)
+            return await self._launch_rescue(task, model=model, effort=effort, cwd=cwd, resume_from=resume_from, sandbox=sandbox)
 
         # Foreground execution
-        args = self._build_exec_args(model or self.config.codex_model, effort)
+        args = self._build_exec_args(model or self.config.codex_model, effort, sandbox=sandbox)
         if resume_from:
-            # Insert resume after "exec"
             args = ["exec", "resume", resume_from] + args[1:]
         output, code = await self._run_codex_exec_stdin(args, task, cwd, timeout=600)
         if code != 0:
@@ -5330,6 +5344,11 @@ async def list_tools():
                     "effort": {
                         "type": "string",
                         "description": "Reasoning effort: low, medium, high, xhigh (default: model default)"
+                    },
+                    "sandbox": {
+                        "type": "string",
+                        "enum": ["read-only", "workspace-write", "danger-full-access"],
+                        "description": "Sandbox mode: read-only, workspace-write (default in full-auto), danger-full-access (network+full filesystem)"
                     }
                 },
                 "required": ["task"]
@@ -5369,6 +5388,11 @@ async def list_tools():
                     "background": {
                         "type": "boolean",
                         "description": "Run in background and return job ID immediately (default: false)"
+                    },
+                    "sandbox": {
+                        "type": "string",
+                        "enum": ["read-only", "workspace-write", "danger-full-access"],
+                        "description": "Sandbox mode: danger-full-access enables network + full filesystem access"
                     }
                 }
             }
@@ -5406,6 +5430,11 @@ async def list_tools():
                     "fresh": {
                         "type": "boolean",
                         "description": "Start fresh — do not auto-resume the latest completed job (default: false)"
+                    },
+                    "sandbox": {
+                        "type": "string",
+                        "enum": ["read-only", "workspace-write", "danger-full-access"],
+                        "description": "Sandbox mode: danger-full-access enables network + full filesystem access"
                     }
                 },
                 "required": ["task"]
@@ -6103,6 +6132,7 @@ async def call_tool(name: str, arguments: dict):
                 model=arguments.get("model"),
                 full_auto=arguments.get("full_auto", True),
                 effort=arguments.get("effort"),
+                sandbox=arguments.get("sandbox"),
             )
         elif name == "codex_review":
             result = await codex_bridge.review_code(
@@ -6113,6 +6143,7 @@ async def call_tool(name: str, arguments: dict):
                 base=arguments.get("base"),
                 effort=arguments.get("effort"),
                 background=arguments.get("background", False),
+                sandbox=arguments.get("sandbox"),
             )
         elif name == "codex_rescue":
             result = await codex_bridge.rescue(
@@ -6123,6 +6154,7 @@ async def call_tool(name: str, arguments: dict):
                 background=arguments.get("background", True),
                 resume_from=arguments.get("resume_from"),
                 fresh=arguments.get("fresh", False),
+                sandbox=arguments.get("sandbox"),
             )
         elif name == "codex_job_status":
             result = codex_bridge.job_status(arguments.get("job_id"))

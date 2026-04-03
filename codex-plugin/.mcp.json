@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "chitta-bridge": {
+      "command": "chitta-bridge",
+      "args": []
+    }
+  }
+}
