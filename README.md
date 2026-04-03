@@ -1,19 +1,24 @@
 # Chitta Bridge
 
-MCP server for multi-model AI discussions — connect Claude Code to any AI backend: cloud providers, agentic CLIs, and local GPU models.
+MCP server for multi-model AI discussions — works with **Claude Code** and **Codex**. Connect to any AI backend: cloud providers, agentic CLIs, and local GPU models.
 
 ## Quick Start
 
+### Claude Code
+
 ```bash
-# 1. Install
 uv pip install git+https://github.com/genomewalker/chitta-bridge.git
-
-# 2. Register with Claude Code
 chitta-bridge-install
-
-# 3. Use in Claude Code
-# The tools are now available - Claude will use them automatically
 ```
+
+### Codex
+
+```bash
+uv pip install git+https://github.com/genomewalker/chitta-bridge.git
+./codex-plugin/install.sh
+```
+
+Skills: `/review`, `/rescue`, `/room`, `/soul` — plus all `mcp__chitta_bridge__*` tools.
 
 ## Features
 
@@ -50,17 +55,21 @@ cd chitta-bridge
 pip install -e .
 ```
 
-## Register with Claude Code
+## Register
+
+### Claude Code
 
 ```bash
-# Install (registers MCP server)
-chitta-bridge-install
+chitta-bridge-install    # registers MCP server
+claude mcp list          # verify
+chitta-bridge-uninstall  # remove
+```
 
-# Verify
-claude mcp list
+### Codex CLI
 
-# Uninstall
-chitta-bridge-uninstall
+```bash
+./codex-plugin/install.sh              # install plugin + enable in config.toml
+./codex-plugin/install.sh --uninstall  # remove
 ```
 
 ## OpenCode Backend
@@ -343,12 +352,13 @@ Discussion rooms automatically:
 
 ## Codex Backend
 
+### Session tools
+
 | Tool | Description |
 |------|-------------|
 | `codex_start` | Start a new Codex session |
 | `codex_discuss` | Send a message to Codex |
-| `codex_run` | Run a one-off task (stateless) |
-| `codex_review` | Run code review on repository |
+| `codex_run` | Run a one-off task (stateless, returns session ID) |
 | `codex_model` | Change session model |
 | `codex_config` | Show Codex configuration |
 | `codex_configure` | Set Codex defaults (persisted) |
@@ -357,6 +367,61 @@ Discussion rooms automatically:
 | `codex_switch` | Switch to another session |
 | `codex_end` | End current session |
 | `codex_health` | Codex health check |
+
+### Review (normal + adversarial)
+
+| Tool | Description |
+|------|-------------|
+| `codex_review` | Code review with `mode` (normal/adversarial), `focus`, `--base`, `effort`, `background`, `sandbox` |
+
+Adversarial mode challenges design decisions, architecture, and tradeoffs instead of just finding bugs:
+
+```python
+codex_review(mode="adversarial", focus="race conditions and data loss", base="main")
+codex_review(mode="adversarial", background=True)  # returns job ID
+```
+
+### Rescue (background job delegation)
+
+| Tool | Description |
+|------|-------------|
+| `codex_rescue` | Delegate a task to Codex — supports `background`, `resume_from`, `effort`, `fresh`, `sandbox` |
+| `codex_job_status` | Check progress of background rescue jobs |
+| `codex_job_result` | Get final output + Codex session ID for `codex resume` |
+| `codex_job_cancel` | Cancel a running background job |
+
+```python
+# Start a background rescue
+codex_rescue(task="investigate why the tests started failing", background=True)
+
+# Check progress
+codex_job_status()
+
+# Get result (includes session ID for native Codex resume)
+codex_job_result()
+
+# Resume a previous session
+codex_rescue(task="apply the fix", resume_from="SESSION_ID")
+
+# Full access (network + filesystem)
+codex_rescue(task="fetch and apply the upstream patch", sandbox="danger-full-access")
+```
+
+### Codex Plugin for Codex CLI
+
+chitta-bridge ships as a proper Codex plugin with skills and MCP tools:
+
+```bash
+# Install
+./codex-plugin/install.sh
+
+# Uninstall
+./codex-plugin/install.sh --uninstall
+```
+
+This installs to `~/.codex/plugins/cache/local/chitta-bridge/local/` and enables:
+- **Skills**: `/review`, `/rescue`, `/room`, `/soul`
+- **Tools**: All `mcp__chitta_bridge__*` tools (soul memory, rooms, web, jobs)
 
 ## Available Models
 
@@ -425,10 +490,9 @@ The `full_auto` option (default: true) enables low-friction execution with `work
 ## Requirements
 
 - Python 3.10+
+- [Claude Code](https://claude.ai/download) or [Codex CLI](https://github.com/openai/codex) (or both)
 - [OpenCode CLI](https://opencode.ai) for `opencode_*` tools
-- [Codex CLI](https://github.com/openai/codex) for `codex_*` tools
 - Ollama or vLLM on a GPU node for `local_*` tools
-- Claude Code
 
 ## License
 
