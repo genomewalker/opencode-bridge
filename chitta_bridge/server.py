@@ -5084,7 +5084,7 @@ async def list_tools():
                     },
                     "variant": {
                         "type": "string",
-                        "description": "Model variant for reasoning effort: minimal, low, medium, high, xhigh, max (default: medium)"
+                        "description": "Reasoning effort: minimal, low, medium, high, xhigh, max"
                     }
                 },
                 "required": ["session_id"]
@@ -5092,9 +5092,7 @@ async def list_tools():
         ),
         Tool(
             name="opencode_discuss",
-            description="Send a message to OpenCode. Use for code review, architecture, brainstorming. "
-                        "Auto-detects discussion domain and frames OpenCode as a specialized expert. "
-                        "Use 'domain' to override detection.",
+            description="Send a message to OpenCode. Auto-detects domain; use 'domain' to override.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -5150,7 +5148,7 @@ async def list_tools():
         ),
         Tool(
             name="opencode_review",
-            description="Review code for issues and improvements. Supports large files with adaptive review strategies. Can accept multiple file paths (space or comma separated).",
+            description="Review code for issues. Accepts file paths (space/comma separated) or code snippets.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -5321,7 +5319,7 @@ async def list_tools():
         ),
         Tool(
             name="codex_run",
-            description="Run a one-off Codex task without session (stateless). Returns result + Codex session ID for resuming.",
+            description="Run a one-off Codex task (stateless). Returns result + session ID for resuming.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -5343,12 +5341,12 @@ async def list_tools():
                     },
                     "effort": {
                         "type": "string",
-                        "description": "Reasoning effort: low, medium, high, xhigh (default: model default)"
+                        "description": "Effort: low, medium, high, xhigh"
                     },
                     "sandbox": {
                         "type": "string",
                         "enum": ["read-only", "workspace-write", "danger-full-access"],
-                        "description": "Sandbox mode: read-only, workspace-write (default in full-auto), danger-full-access (network+full filesystem)"
+                        "description": "Sandbox: read-only, workspace-write, danger-full-access"
                     }
                 },
                 "required": ["task"]
@@ -5356,7 +5354,7 @@ async def list_tools():
         ),
         Tool(
             name="codex_review",
-            description="Run Codex code review. mode='adversarial' pressure-tests design decisions. Supports background execution.",
+            description="Run Codex code review. adversarial mode pressure-tests design decisions.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -5383,7 +5381,7 @@ async def list_tools():
                     },
                     "effort": {
                         "type": "string",
-                        "description": "Reasoning effort: low, medium, high, xhigh"
+                        "description": "Effort: low, medium, high, xhigh"
                     },
                     "background": {
                         "type": "boolean",
@@ -5392,14 +5390,14 @@ async def list_tools():
                     "sandbox": {
                         "type": "string",
                         "enum": ["read-only", "workspace-write", "danger-full-access"],
-                        "description": "Sandbox mode: danger-full-access enables network + full filesystem access"
+                        "description": "Sandbox: read-only, workspace-write, danger-full-access"
                     }
                 }
             }
         ),
         Tool(
             name="codex_rescue",
-            description="Delegate a task to Codex with background execution, session resume, and effort control. Better than codex_run for long tasks.",
+            description="Delegate a long task to Codex with background execution and session resume.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -5413,7 +5411,7 @@ async def list_tools():
                     },
                     "effort": {
                         "type": "string",
-                        "description": "Reasoning effort: low, medium, high, xhigh"
+                        "description": "Effort: low, medium, high, xhigh"
                     },
                     "working_dir": {
                         "type": "string",
@@ -5421,11 +5419,11 @@ async def list_tools():
                     },
                     "background": {
                         "type": "boolean",
-                        "description": "Run in background (default: true). Use codex_job_status / codex_job_result to track."
+                        "description": "Run in background (default: true)"
                     },
                     "resume_from": {
                         "type": "string",
-                        "description": "Codex session ID to resume (from a previous codex_run or codex_job_result)"
+                        "description": "Codex session ID to resume"
                     },
                     "fresh": {
                         "type": "boolean",
@@ -5434,7 +5432,7 @@ async def list_tools():
                     "sandbox": {
                         "type": "string",
                         "enum": ["read-only", "workspace-write", "danger-full-access"],
-                        "description": "Sandbox mode: danger-full-access enables network + full filesystem access"
+                        "description": "Sandbox: read-only, workspace-write, danger-full-access"
                     }
                 },
                 "required": ["task"]
@@ -5573,7 +5571,7 @@ async def list_tools():
         ),
         Tool(
             name="agent_chain",
-            description="Execute a chain of agent steps, passing results forward. Example: plan with OpenCode -> implement with Codex -> review with OpenCode",
+            description="Execute agent steps sequentially, passing results forward (e.g. OpenCode → Codex → OpenCode).",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -5597,7 +5595,7 @@ async def list_tools():
         ),
         Tool(
             name="delegate_codex",
-            description="Delegate a task to Codex, optionally return result to OpenCode for review. Enables: Claude -> Codex -> OpenCode flow",
+            description="Delegate to Codex, optionally send result to OpenCode for review.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -5651,10 +5649,7 @@ async def list_tools():
         ),
         Tool(
             name="room_create",
-            description="Create a discussion room where multiple AI agents post asynchronously and see each other's messages. "
-                        "Each participant can have a 'soul' — a system prompt defining their expertise, personality, "
-                        "available tools (recall, remember, web_search, smart_context), and memory namespace. "
-                        "Participants without a soul work as before (generic prompt).",
+            description="Create a multi-agent discussion room. Participants post async and see each other's messages. Each can have a soul (system_prompt, tools, realm).",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -5662,15 +5657,9 @@ async def list_tools():
                     "topic": {"type": "string", "description": "The discussion topic or opening question"},
                     "participants": {
                         "type": "string",
-                        "description": 'JSON array of participants. Each can have an optional "soul" object: '
-                                       '[{"name":"Critic","backend":"local","session_id":"sid","model":"qwen2.5:32b",'
-                                       '"soul":{"system_prompt":"You are a rigorous scientific critic...",'
-                                       '"realm":"agent:critic","tools":["recall","remember","web_search"],'
-                                       '"max_tool_turns":3,"challenge_bias":0.8}}]. '
-                                       'Soul fields: system_prompt (required), realm (auto-generated from name if omitted), '
-                                       'tools (list of: recall, remember, web_search, smart_context), '
-                                       'max_tool_turns (default 3), max_rounds (0=unlimited), '
-                                       'response_format (optional template), challenge_bias (0-1, default 0.5).'
+                        "description": 'JSON array: [{"name":"...","backend":"opencode|codex|local","session_id":"...","model":"...",'
+                                       '"soul":{"system_prompt":"...","realm":"...","tools":["recall","web_search"],'
+                                       '"max_tool_turns":3,"challenge_bias":0.5,"max_rounds":0}}]'
                     }
                 },
                 "required": ["room_id", "topic", "participants"]
@@ -5693,9 +5682,7 @@ async def list_tools():
         ),
         Tool(
             name="room_run",
-            description="Run N rounds of async discussion in a room. All participants respond in parallel each round, "
-                        "seeing the full thread before they respond. "
-                        "Set challenge=true to auto-extract claims between rounds and inject challenge prompts.",
+            description="Run N rounds in a room. Participants respond in parallel. challenge=true injects adversarial claims between rounds.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -5708,17 +5695,14 @@ async def list_tools():
         ),
         Tool(
             name="room_synthesize",
-            description="Distill a discussion room's full transcript into a single coherent answer. "
-                        "Runs a final synthesis pass (like MoE output combination) — extracts consensus, "
-                        "key disagreements, best answer, and open questions. "
-                        "Defaults to claude backend; pass synthesizer JSON to use another model.",
+            description="Synthesize a room's transcript into consensus, disagreements, and best answer.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "room_id": {"type": "string", "description": "Room ID to synthesize"},
                     "synthesizer": {
                         "type": "string",
-                        "description": 'Optional JSON: {"name":"Synthesizer","backend":"claude|opencode|codex|local","model":"...","base_url":"...","session_id":"..."}. Defaults to claude.'
+                        "description": 'Optional JSON: {"name":"...","backend":"claude|opencode|codex|local","model":"..."}. Defaults to claude.'
                     }
                 },
                 "required": ["room_id"]
@@ -5738,10 +5722,7 @@ async def list_tools():
         # Local model tools (Ollama / vLLM on GPU nodes)
         Tool(
             name="local_discover",
-            description="Discover GPU nodes with running Ollama/vLLM servers. "
-                        "Checks /tmp/ollama-server-*.url cache files (written by slurm-serve-ollama.sh), "
-                        "your own running Slurm GPU jobs, nodes in CHITTA_BRIDGE_GPU_NODES env var, "
-                        "and localhost. Returns available endpoints and their loaded models.",
+            description="Discover GPU nodes running Ollama/vLLM. Checks cache files, Slurm jobs, CHITTA_BRIDGE_GPU_NODES, and localhost.",
             inputSchema={"type": "object", "properties": {}}
         ),
         Tool(
@@ -5824,16 +5805,12 @@ async def list_tools():
         ),
         Tool(
             name="opencode_cleanup",
-            description="Remove stale tmp_pack_* files from OpenCode's snapshot directory. "
-                        "These files accumulate when OpenCode is killed mid-operation and can "
-                        "grow to hundreds of GB (issue #6845). Also runs automatically at startup.",
+            description="Remove stale tmp_pack_* snapshot files. Also runs at startup.",
             inputSchema={"type": "object", "properties": {}}
         ),
         Tool(
             name="opencode_ping",
-            description="Check if the model is reachable by sending a minimal request. "
-                        "Uses the active session's model (or a named session) — falls back to the configured default model. "
-                        "Use this to verify a model is responding before running longer tasks.",
+            description="Send a minimal request to verify the active session's model is reachable.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -5843,9 +5820,7 @@ async def list_tools():
         ),
         Tool(
             name="opencode_attach",
-            description="Register a Claude Code session ID as attached to an OpenCode session. "
-                        "Call this when starting work in a Claude Code session so the session "
-                        "can later be identified as in-use. Use opencode_end_unattached to clean up.",
+            description="Register a Claude Code session ID as attached to an OpenCode session.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -5869,8 +5844,7 @@ async def list_tools():
         ),
         Tool(
             name="opencode_end_unattached",
-            description="End all OpenCode sessions that have no Claude Code session IDs registered. "
-                        "Use after attaching IDs with opencode_attach to safely clean up orphaned sessions.",
+            description="End all OpenCode sessions with no attached Claude Code session IDs.",
             inputSchema={"type": "object", "properties": {}}
         ),
         Tool(
@@ -5963,7 +5937,7 @@ async def list_tools():
         ),
         Tool(
             name="web_fetch",
-            description="Fetch a web page and return its text content (HTML stripped). Useful for reading articles, docs, or search results.",
+            description="Fetch a web page and return its text (HTML stripped).",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -5984,7 +5958,7 @@ async def list_tools():
         # ── Soul Memory ────────────────────────────────────────────
         Tool(
             name="soul_recall",
-            description="Recall memories from the soul (chittad). Returns relevant memories for a query. Requires chittad daemon running.",
+            description="Recall memories from the soul (chittad).",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -6003,7 +5977,7 @@ async def list_tools():
         ),
         Tool(
             name="soul_remember",
-            description="Store a memory in the soul (chittad). Use for saving insights, corrections, or discoveries.",
+            description="Store a memory in the soul (chittad).",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -6026,7 +6000,7 @@ async def list_tools():
         ),
         Tool(
             name="soul_context",
-            description="Get smart context from the soul — combines memories, code symbols, and graph relationships relevant to a task.",
+            description="Get smart context (memories + code symbols + graph) for a task.",
             inputSchema={
                 "type": "object",
                 "properties": {
