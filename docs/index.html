@@ -4,8 +4,8 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#06090c" />
-  <title>chitta-bridge — multi-model AI discussions for Claude Code</title>
-  <meta name="description" content="MCP server that connects Claude Code to any AI backend — cloud providers, agentic CLIs, and local GPU models. Multi-agent discussion rooms with synthesis." />
+  <title>chitta-bridge — multi-model AI discussions for Claude Code &amp; Codex</title>
+  <meta name="description" content="MCP server that connects Claude Code and Codex to any AI backend — cloud providers, agentic CLIs, and local GPU models. Adversarial review, background rescue jobs, discussion rooms with synthesis." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300;0,400;0,600;0,700;1,400&display=swap" rel="stylesheet" />
@@ -28,6 +28,7 @@
         <a href="#flow">flow</a>
         <a href="#tools">tools</a>
         <a href="#orchestration">orchestration</a>
+        <a href="#codex">codex</a>
         <a href="#rooms">rooms</a>
         <a href="#local">local</a>
         <a href="docs.html">docs</a>
@@ -47,8 +48,8 @@
       <div class="wrap">
         <div class="hero-eyebrow">MCP SERVER</div>
         <h1 id="hero-title" class="hero-title">chitta-bridge</h1>
-        <p class="hero-subtitle">multi-model AI discussions for Claude Code</p>
-        <p class="hero-micro">any backend &middot; soul-powered rooms &middot; local GPU models &middot; challenge rounds &middot; synthesis</p>
+        <p class="hero-subtitle">multi-model AI discussions for Claude Code &amp; Codex</p>
+        <p class="hero-micro">any backend &middot; adversarial review &middot; background rescue &middot; soul-powered rooms &middot; local GPU models &middot; challenge rounds</p>
 
         <div class="hero-install">
           <code>pip install chitta-bridge</code>
@@ -157,7 +158,7 @@
 
         <!-- Flow trace -->
         <div class="flow-trace" aria-label="Signal flow path">
-          <span class="ft-node ft-claude">Claude&nbsp;Code</span>
+          <span class="ft-node ft-claude">Claude&nbsp;Code&nbsp;/&nbsp;Codex</span>
           <span class="ft-arrow" aria-hidden="true">&rarr;</span>
           <span class="ft-node ft-mcp">MCP</span>
           <span class="ft-arrow" aria-hidden="true">&rarr;</span>
@@ -167,7 +168,7 @@
           <span class="ft-arrow" aria-hidden="true">&rarr;</span>
           <span class="ft-node ft-hub">Hub</span>
           <span class="ft-arrow" aria-hidden="true">&rarr;</span>
-          <span class="ft-node ft-claude">Claude&nbsp;Code</span>
+          <span class="ft-node ft-claude">Claude&nbsp;Code&nbsp;/&nbsp;Codex</span>
         </div>
       </div>
     </section>
@@ -177,6 +178,8 @@
       <div class="wrap">
         <div class="section-label">01</div>
         <h2>Install</h2>
+
+        <h3 class="tool-group-label">Claude Code</h3>
         <div class="code-block">
           <div class="code-bar">
             <span class="code-dot red"></span>
@@ -184,13 +187,23 @@
             <span class="code-dot green"></span>
             <span class="code-title">claude-code</span>
           </div>
-          <pre><code><span class="prompt">$</span> pip install chitta-bridge</code></pre>
+          <pre><code><span class="prompt">$</span> pip install chitta-bridge
+<span class="prompt">$</span> chitta-bridge-install</code></pre>
         </div>
-        <p class="section-note">requires: Python 3.10+ &middot; Claude Code &middot; one or more backends (OpenCode, Codex, Ollama)</p>
-        <p class="section-note" style="margin-top:8px">then add to your MCP config:</p>
-        <div class="code-block" style="margin-top:8px">
-          <pre><code><span class="prompt">{</span> "chitta-bridge": { "command": "chitta-bridge" } <span class="prompt">}</span></code></pre>
+
+        <h3 class="tool-group-label" style="margin-top:1.5rem">Codex CLI</h3>
+        <div class="code-block">
+          <div class="code-bar">
+            <span class="code-dot red"></span>
+            <span class="code-dot yellow"></span>
+            <span class="code-dot green"></span>
+            <span class="code-title">codex</span>
+          </div>
+          <pre><code><span class="prompt">$</span> pip install chitta-bridge
+<span class="prompt">$</span> ./codex-plugin/install.sh</code></pre>
         </div>
+        <p class="section-note" style="margin-top:12px">requires: Python 3.10+ &middot; Claude Code or Codex CLI (or both) &middot; one or more backends (OpenCode, Codex, Ollama)</p>
+        <p class="section-note" style="margin-top:8px">Codex plugin provides skills: <code>/review</code>, <code>/rescue</code>, <code>/room</code>, <code>/soul</code></p>
       </div>
     </section>
 
@@ -310,7 +323,7 @@
     <section id="tools" class="section">
       <div class="wrap">
         <div class="section-label">04</div>
-        <h2>MCP Tools <span class="tool-count">55</span></h2>
+        <h2>MCP Tools <span class="tool-count">59</span></h2>
 
         <div class="tool-group">
           <h3 class="tool-group-label">Core</h3>
@@ -423,7 +436,29 @@
             </div>
             <div class="tool-card">
               <code class="tool-name">codex_review</code>
-              <span class="tool-desc">code review on repository</span>
+              <span class="tool-desc">code review &mdash; normal or adversarial mode</span>
+            </div>
+            <div class="tool-card">
+              <code class="tool-name">codex_rescue</code>
+              <span class="tool-desc">delegate task with background execution</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="tool-group">
+          <h3 class="tool-group-label">Codex Jobs</h3>
+          <div class="tool-grid">
+            <div class="tool-card">
+              <code class="tool-name">codex_job_status</code>
+              <span class="tool-desc">check background job progress</span>
+            </div>
+            <div class="tool-card">
+              <code class="tool-name">codex_job_result</code>
+              <span class="tool-desc">get final output + session ID for resume</span>
+            </div>
+            <div class="tool-card">
+              <code class="tool-name">codex_job_cancel</code>
+              <span class="tool-desc">cancel a running background job</span>
             </div>
           </div>
         </div>
@@ -684,10 +719,62 @@
       </div>
     </section>
 
+    <!-- ===== CODEX FEATURES ===== -->
+    <section id="codex" class="section">
+      <div class="wrap">
+        <div class="section-label">08</div>
+        <h2>Codex Features</h2>
+
+        <h3 class="tool-group-label">Adversarial Review</h3>
+        <p class="section-desc">Normal mode finds bugs. Adversarial mode challenges design decisions, architecture, and tradeoffs.</p>
+        <div class="code-block" style="margin-top: 1rem;">
+          <div class="code-bar">
+            <span class="code-dot red"></span>
+            <span class="code-dot yellow"></span>
+            <span class="code-dot green"></span>
+            <span class="code-title">adversarial review</span>
+          </div>
+          <pre><code>codex_review(mode="adversarial", focus="race conditions and data loss", base="main")
+codex_review(mode="adversarial", background=True)  <span class="comment"># returns job ID</span></code></pre>
+        </div>
+
+        <h3 class="tool-group-label" style="margin-top: 2rem;">Background Rescue</h3>
+        <p class="section-desc">Delegate tasks to Codex in the background. Resume sessions, control sandbox and effort.</p>
+        <div class="code-block" style="margin-top: 1rem;">
+          <div class="code-bar">
+            <span class="code-dot red"></span>
+            <span class="code-dot yellow"></span>
+            <span class="code-dot green"></span>
+            <span class="code-title">rescue jobs</span>
+          </div>
+          <pre><code>codex_rescue(task="investigate test failures", background=True)
+codex_job_status()
+codex_job_result()  <span class="comment"># includes session ID for codex resume</span>
+codex_rescue(task="apply the fix", resume_from="SESSION_ID")</code></pre>
+        </div>
+
+        <h3 class="tool-group-label" style="margin-top: 2rem;">Sandbox Modes</h3>
+        <div class="chunk-specs">
+          <div class="chunk-row">
+            <span class="chunk-key">read-only</span>
+            <span class="chunk-val">can only read files &mdash; safest for review</span>
+          </div>
+          <div class="chunk-row">
+            <span class="chunk-key">workspace-write</span>
+            <span class="chunk-val">can write to workspace (default)</span>
+          </div>
+          <div class="chunk-row">
+            <span class="chunk-key">danger-full-access</span>
+            <span class="chunk-val">full filesystem + network access &mdash; use with caution</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- ===== DISCUSSION ROOMS ===== -->
     <section id="rooms" class="section">
       <div class="wrap">
-        <div class="section-label">08</div>
+        <div class="section-label">09</div>
         <h2>Discussion Rooms</h2>
         <p class="section-desc">Async multi-agent roundtable with <strong>agent souls</strong> &mdash; persistent identity, per-agent memory, mediated tools, and structured challenge rounds. Participants respond in parallel (or sequentially on shared GPUs), each seeing the full thread.</p>
 
@@ -773,7 +860,7 @@ room_synthesize(room_id="expert-panel")</code></pre>
     <!-- ===== LOCAL GPU ===== -->
     <section id="local" class="section">
       <div class="wrap">
-        <div class="section-label">09</div>
+        <div class="section-label">10</div>
         <h2>Local GPU Models</h2>
         <p class="section-desc">Chat with Ollama or vLLM running on GPU nodes — no cloud API needed. Auto-discovers endpoints via Slurm job queue, cached URL files, or environment variable.</p>
 
@@ -859,7 +946,7 @@ local_start(session_id="gpu2", model="qwen2.5:32b",
     <!-- ===== LINKS ===== -->
     <section id="links" class="section section-links">
       <div class="wrap">
-        <div class="section-label">10</div>
+        <div class="section-label">11</div>
         <h2>Links</h2>
         <div class="link-list">
           <a href="https://github.com/genomewalker/chitta-bridge" class="link-item">
