@@ -179,31 +179,20 @@
         <div class="section-label">01</div>
         <h2>Install</h2>
 
-        <h3 class="tool-group-label">Claude Code</h3>
         <div class="code-block">
           <div class="code-bar">
             <span class="code-dot red"></span>
             <span class="code-dot yellow"></span>
             <span class="code-dot green"></span>
-            <span class="code-title">claude-code</span>
+            <span class="code-title">terminal</span>
           </div>
           <pre><code><span class="prompt">$</span> pip install chitta-bridge
-<span class="prompt">$</span> chitta-bridge-install</code></pre>
-        </div>
-
-        <h3 class="tool-group-label" style="margin-top:1.5rem">Codex CLI</h3>
-        <div class="code-block">
-          <div class="code-bar">
-            <span class="code-dot red"></span>
-            <span class="code-dot yellow"></span>
-            <span class="code-dot green"></span>
-            <span class="code-title">codex</span>
-          </div>
-          <pre><code><span class="prompt">$</span> pip install chitta-bridge
-<span class="prompt">$</span> ./codex-plugin/install.sh</code></pre>
+<span class="prompt">$</span> chitta-bridge-install               <span class="comment"># both Claude Code + Codex</span>
+<span class="prompt">$</span> chitta-bridge-install claude-code   <span class="comment"># Claude Code only</span>
+<span class="prompt">$</span> chitta-bridge-install codex         <span class="comment"># Codex CLI only</span></code></pre>
         </div>
         <p class="section-note" style="margin-top:12px">requires: Python 3.10+ &middot; Claude Code or Codex CLI (or both) &middot; one or more backends (OpenCode, Codex, Ollama)</p>
-        <p class="section-note" style="margin-top:8px">Codex plugin provides skills: <code>/review</code>, <code>/rescue</code>, <code>/room</code>, <code>/soul</code></p>
+        <p class="section-note" style="margin-top:8px">Codex skills: <code>/review</code>, <code>/rescue</code>, <code>/room</code>, <code>/soul</code></p>
       </div>
     </section>
 
