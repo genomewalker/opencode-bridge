@@ -5042,28 +5042,14 @@ orchestrator = Orchestrator(bridge, codex_bridge)
 rooms = RoomManager(bridge, codex_bridge, local_bridge)
 server = Server("chitta-bridge")
 
+# Checked once at startup — used to suppress tools for missing backends
+_HAS_CODEX = find_codex() is not None
+_HAS_OPENCODE = find_opencode() is not None
+
 
 @server.list_tools()
 async def list_tools():
-    return [
-        Tool(
-            name="opencode_models",
-            description="List available models from OpenCode (GPT-5, Claude, Gemini, etc.)",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "provider": {
-                        "type": "string",
-                        "description": "Filter by provider (openai, github-copilot, anthropic)"
-                    }
-                }
-            }
-        ),
-        Tool(
-            name="opencode_agents",
-            description="List available agents (plan, build, explore, general)",
-            inputSchema={"type": "object", "properties": {}}
-        ),
+    _tools = [
         Tool(
             name="opencode_start",
             description="Start a new discussion session with OpenCode",
@@ -5130,20 +5116,6 @@ async def list_tools():
                     }
                 },
                 "required": ["task"]
-            }
-        ),
-        Tool(
-            name="opencode_brainstorm",
-            description="Open-ended brainstorming on a topic",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "topic": {
-                        "type": "string",
-                        "description": "Topic to brainstorm about"
-                    }
-                },
-                "required": ["topic"]
             }
         ),
         Tool(
@@ -5439,45 +5411,6 @@ async def list_tools():
             }
         ),
         Tool(
-            name="codex_job_status",
-            description="Check status of background rescue jobs. Shows all jobs or a specific job.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "job_id": {
-                        "type": "string",
-                        "description": "Specific job ID to check (omit for all jobs)"
-                    }
-                }
-            }
-        ),
-        Tool(
-            name="codex_job_result",
-            description="Get the final output of a completed rescue job, including Codex session ID for native resume.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "job_id": {
-                        "type": "string",
-                        "description": "Job ID (omit for latest completed job)"
-                    }
-                }
-            }
-        ),
-        Tool(
-            name="codex_job_cancel",
-            description="Cancel a running background rescue job.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "job_id": {
-                        "type": "string",
-                        "description": "Job ID to cancel (omit if only one job is running)"
-                    }
-                }
-            }
-        ),
-        Tool(
             name="codex_model",
             description="Change the model for the current Codex session",
             inputSchema={
@@ -5666,21 +5599,6 @@ async def list_tools():
             }
         ),
         Tool(
-            name="room_add_participant",
-            description="Add a participant to an existing discussion room.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "room_id": {"type": "string", "description": "Room ID"},
-                    "participant": {
-                        "type": "string",
-                        "description": 'JSON object: {"name":"...","backend":"opencode|codex","session_id":"...","model":"..."}'
-                    }
-                },
-                "required": ["room_id", "participant"]
-            }
-        ),
-        Tool(
             name="room_run",
             description="Run N rounds in a room. Participants respond in parallel. challenge=true injects adversarial claims between rounds.",
             inputSchema={
@@ -5804,50 +5722,6 @@ async def list_tools():
             inputSchema={"type": "object", "properties": {}}
         ),
         Tool(
-            name="opencode_cleanup",
-            description="Remove stale tmp_pack_* snapshot files. Also runs at startup.",
-            inputSchema={"type": "object", "properties": {}}
-        ),
-        Tool(
-            name="opencode_ping",
-            description="Send a minimal request to verify the active session's model is reachable.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "session_id": {"type": "string", "description": "Session ID to ping (uses its model). Defaults to active session."}
-                }
-            }
-        ),
-        Tool(
-            name="opencode_attach",
-            description="Register a Claude Code session ID as attached to an OpenCode session.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "session_id": {"type": "string", "description": "OpenCode session ID"},
-                    "claude_session_id": {"type": "string", "description": "Identifier for this Claude Code session (e.g. task name, terminal, PID)"}
-                },
-                "required": ["session_id", "claude_session_id"]
-            }
-        ),
-        Tool(
-            name="opencode_detach",
-            description="Remove a Claude Code session ID from an OpenCode session (call on session end).",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "session_id": {"type": "string", "description": "OpenCode session ID"},
-                    "claude_session_id": {"type": "string", "description": "Claude Code session ID to detach"}
-                },
-                "required": ["session_id", "claude_session_id"]
-            }
-        ),
-        Tool(
-            name="opencode_end_unattached",
-            description="End all OpenCode sessions with no attached Claude Code session IDs.",
-            inputSchema={"type": "object", "properties": {}}
-        ),
-        Tool(
             name="opencode_end_all",
             description="End all OpenCode sessions, or a specific list of named sessions. "
                         "Use exclude_model to keep sessions of one model and kill the rest.",
@@ -5865,35 +5739,6 @@ async def list_tools():
                     }
                 }
             }
-        ),
-        Tool(
-            name="codex_attach",
-            description="Register a Claude Code session ID as attached to a Codex session.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "session_id": {"type": "string", "description": "Codex session ID"},
-                    "claude_session_id": {"type": "string", "description": "Identifier for this Claude Code session"}
-                },
-                "required": ["session_id", "claude_session_id"]
-            }
-        ),
-        Tool(
-            name="codex_detach",
-            description="Remove a Claude Code session ID from a Codex session.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "session_id": {"type": "string", "description": "Codex session ID"},
-                    "claude_session_id": {"type": "string", "description": "Claude Code session ID to detach"}
-                },
-                "required": ["session_id", "claude_session_id"]
-            }
-        ),
-        Tool(
-            name="codex_end_unattached",
-            description="End all Codex sessions that have no Claude Code session IDs registered.",
-            inputSchema={"type": "object", "properties": {}}
         ),
         Tool(
             name="codex_end_all",
@@ -6018,6 +5863,11 @@ async def list_tools():
             inputSchema={"type": "object", "properties": {}}
         ),
     ]
+    if not _HAS_CODEX:
+        _tools = [t for t in _tools if not t.name.startswith("codex_")]
+    if not _HAS_OPENCODE:
+        _tools = [t for t in _tools if not t.name.startswith("opencode_")]
+    return _tools
 
 
 @server.call_tool()
