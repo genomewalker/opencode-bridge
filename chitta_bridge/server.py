@@ -3625,7 +3625,7 @@ class RoomManager:
             f"You are a neutral synthesizer reviewing a multi-agent discussion.\n\n"
             f"{transcript}\n\n"
             f"## Synthesis Task\n"
-            f"Distill the discussion above into a single, coherent answer:\n"
+            f"Resolve any contradictions between participants, then distill the discussion into a single, coherent answer:\n"
             f"1. **Core consensus** — what all participants agreed on\n"
             f"2. **Key disagreements** — where they diverged and why\n"
             f"3. **Best answer** — your integrated recommendation, drawing on the strongest points\n"
@@ -3787,7 +3787,12 @@ class RoomManager:
 
             system_prompt = "\n".join(sys_parts)
         else:
-            system_prompt = f"You are **{name}** in a multi-agent discussion room."
+            system_prompt = (
+                f"You are **{name}**, a specialist participant in a multi-agent discussion. "
+                f"Contribute your distinct expertise to the topic. Be analytical, specific, "
+                f"and direct. React to other participants' arguments — challenge, extend, or "
+                f"correct them as warranted."
+            )
 
         # -- User message --
         user_parts = [
@@ -6209,13 +6214,86 @@ async def call_tool(name: str, arguments: dict):
         else:
             result = f"Unknown tool: {name}"
 
+        # Truncate large responses to reduce token cost. Export/history tools are exempt.
+        _no_truncate = {"opencode_export", "opencode_history", "codex_history", "local_history"}
+        _max_chars = 12_000
+        if name not in _no_truncate and isinstance(result, str) and len(result) > _max_chars:
+            result = result[:_max_chars] + f"\n\n[truncated — {len(result) - _max_chars:,} chars omitted]"
+
         return [TextContent(type="text", text=result)]
 
     except Exception as e:
         return [TextContent(type="text", text=f"Error: {e}")]
 
 
+async def _run_exec_mode() -> None:
+    """Single-shot exec mode: read JSON from stdin, call backend, write JSON to stdout.
+
+    Input (stdin):
+        {"backend": "opencode"|"claude"|"codex", "model": "...",
+         "system": "...", "message": "...", "session_id": "..." (optional)}
+
+    Output (stdout):
+        {"content": "...", "error": null}
+    """
+    raw = sys.stdin.read()
+    try:
+        req = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(json.dumps({"content": "", "error": f"invalid JSON: {e}"}))
+        return
+
+    backend = req.get("backend", "claude")
+    model = req.get("model")
+    system = req.get("system", "")
+    message = req.get("message", "")
+    session_id = req.get("session_id")
+
+    full_prompt = f"{system}\n\n{message}" if system else message
+    base_url = req.get("base_url")
+
+    try:
+        if backend == "claude":
+            content = await bridge._run_claude_p(full_prompt)
+        elif backend in ("opencode", "chitta-bridge"):
+            sid = session_id or f"exec-{os.getpid()}"
+            ephemeral = session_id is None
+            if sid not in bridge.sessions:
+                await bridge.start_session(sid, model=model)
+            content = await bridge.send_message(full_prompt, sid, _raw=True)
+            if ephemeral:
+                bridge.end_session(sid)
+        elif backend == "codex":
+            content = await codex_bridge.run_task(full_prompt)
+        elif backend == "local":
+            endpoint = base_url or "http://localhost:11434/v1"
+            sid = session_id or f"exec-local-{os.getpid()}"
+            ephemeral = session_id is None
+            if sid not in local_bridge.sessions:
+                local_bridge.start_session(sid, model=model or "default", endpoint=endpoint)
+            content = await local_bridge.send_message(
+                message, sid, system_prompt=system or None
+            )
+            if ephemeral:
+                local_bridge.end_session(sid)
+        else:
+            content = f"[error: unknown backend '{backend}']"
+        print(json.dumps({"content": content}))
+    except Exception as e:
+        print(json.dumps({"content": "", "error": str(e)}))
+
+
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--exec", action="store_true",
+                        help="Single-shot mode: read JSON from stdin, write JSON to stdout")
+    args, _ = parser.parse_known_args()
+
+    if args.exec:
+        asyncio.run(_run_exec_mode())
+        return
+
     # Clean up stale snapshot files on every startup (issue #6845)
     cleanup_opencode_snapshot()
 
