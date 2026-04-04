@@ -72,6 +72,60 @@ fn json_extract_u64(json: &str, key: &str) -> u64 {
         .unwrap_or(0)
 }
 
+// ── Manifest ──────────────────────────────────────────────────────────────────
+
+fn manifest_path() -> std::path::PathBuf {
+    let home = env::var("HOME").unwrap_or_else(|_| ".".into());
+    Path::new(&home).join(".claude/mind/fp_manifest.jsonl")
+}
+
+fn session_id() -> String {
+    env::var("CLAUDE_SESSION_ID").unwrap_or_else(|_| "default".into())
+}
+
+fn manifest_record(filepath: &str, kind: &str, line_num: usize) {
+    let abs_path = Path::new(filepath)
+        .canonicalize()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| filepath.to_string());
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let sid = session_id();
+    let entry = format!(
+        "{{\"sid\":\"{}\",\"file\":\"{}\",\"type\":\"{}\",\"line\":{},\"ts\":{}}}\n",
+        json_escape(&sid), json_escape(&abs_path), kind, line_num, ts
+    );
+    let p = manifest_path();
+    if let Some(parent) = p.parent() { let _ = fs::create_dir_all(parent); }
+    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&p) {
+        let _ = IoWrite::write_all(&mut f, entry.as_bytes());
+    }
+}
+
+fn manifest_check(filepath: &str) -> Vec<String> {
+    let abs_path = Path::new(filepath)
+        .canonicalize()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| filepath.to_string());
+    let sid = session_id();
+    let p = manifest_path();
+    if !p.exists() { return vec![]; }
+    let content = fs::read_to_string(&p).unwrap_or_default();
+    let mut results = Vec::new();
+    for line in content.lines() {
+        if json_extract_str(line, "sid").as_deref() == Some(&sid)
+            && json_extract_str(line, "file").as_deref() == Some(&abs_path)
+        {
+            let kind = json_extract_str(line, "type").unwrap_or_default();
+            let ln = json_extract_u64(line, "line");
+            results.push(format!("{} @ L{}", kind, ln));
+        }
+    }
+    results
+}
+
 // ── Core patch ────────────────────────────────────────────────────────────────
 
 fn apply_patch(file: &str, old_str: &str, new_str: &str) -> Result<String, String> {
@@ -114,6 +168,7 @@ fn apply_patch(file: &str, old_str: &str, new_str: &str) -> Result<String, Strin
     let mut stats = Stats::load();
     stats.record(old_str.len(), new_str.len(), msg.len());
     stats.save();
+    manifest_record(file, "patch", line_num);
 
     Ok(msg)
 }
@@ -272,6 +327,7 @@ fn apply_symbol_patch(file: &str, symbol: &str, new_body: &str) -> Result<String
     let mut stats = Stats::load();
     stats.record(end - start, new_body_trimmed.len(), msg.len());
     stats.save();
+    manifest_record(file, "symbol", line_num);
 
     Ok(msg)
 }
@@ -414,6 +470,66 @@ fn write_hook_mode() {
     process::exit(0);
 }
 
+// ── Read hook mode ────────────────────────────────────────────────────────────
+// Advisory when file was already patched this session — skips re-reading.
+
+fn read_hook_mode() {
+    let mut input = String::new();
+    io::stdin().read_to_string(&mut input).unwrap_or(0);
+
+    let file = json_extract_str(&input, "file_path").unwrap_or_default();
+    if file.is_empty() { process::exit(0); }
+
+    let patches = manifest_check(&file);
+    if patches.is_empty() { process::exit(0); }
+
+    let fname = Path::new(&file).file_name()
+        .and_then(|n| n.to_str()).unwrap_or(&file);
+    let summary = patches.join(", ");
+    let msg = format!(
+        "[fp] {} was already patched this session: {}. Use file_patch/symbol_patch for further edits, or Read with offset if inspection needed.",
+        fname, summary
+    );
+    println!(
+        "{{\"hookSpecificOutput\":{{\"hookEventName\":\"PreToolUse\",\"additionalContext\":\"{}\"}}}}",
+        json_escape(&msg)
+    );
+    process::exit(0);
+}
+
+// ── Manifest mode ─────────────────────────────────────────────────────────────
+
+fn manifest_mode() {
+    let p = manifest_path();
+    if !p.exists() {
+        println!("fp manifest: no patches recorded yet.");
+        return;
+    }
+    let sid = session_id();
+    let content = fs::read_to_string(&p).unwrap_or_default();
+    let mut entries: Vec<(String, String, u64)> = Vec::new();
+    for line in content.lines() {
+        if json_extract_str(line, "sid").as_deref() == Some(&sid) {
+            let file = json_extract_str(line, "file").unwrap_or_default();
+            let kind = json_extract_str(line, "type").unwrap_or_default();
+            let ln = json_extract_u64(line, "line");
+            entries.push((file, kind, ln));
+        }
+    }
+    if entries.is_empty() {
+        println!("fp manifest: no patches in current session.");
+        return;
+    }
+    println!("fp Patch Manifest — current session ({} patches)", entries.len());
+    println!("{}", "=".repeat(60));
+    for (file, kind, ln) in &entries {
+        let fname = Path::new(file).file_name()
+            .and_then(|n| n.to_str()).unwrap_or(file);
+        println!("  {} {:8} @ L{}", fname, kind, ln);
+    }
+}
+
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 fn main() {
@@ -421,7 +537,9 @@ fn main() {
     match args.as_slice() {
         [_, flag] if flag == "--hook"       => hook_mode(),
         [_, flag] if flag == "--write-hook" => write_hook_mode(),
+        [_, flag] if flag == "--read-hook"  => read_hook_mode(),
         [_, cmd]  if cmd  == "gain"         => gain_mode(),
+        [_, cmd]  if cmd  == "manifest"     => manifest_mode(),
         [_, file, old_str, new_str] => {
             match apply_patch(file, old_str, new_str) {
                 Ok(msg) => println!("{}", msg),
@@ -443,6 +561,8 @@ fn main() {
             eprintln!("  fp --hook                              Edit tool hook (stdin JSON)");
             eprintln!("  fp --write-hook                        Write tool hook (stdin JSON)");
             eprintln!("  fp gain                                show token savings");
+    eprintln!("  fp manifest                            show this session\'s patches");
+    eprintln!("  fp --read-hook                         Read tool hook (stdin JSON)");
             process::exit(2);
         }
     }
