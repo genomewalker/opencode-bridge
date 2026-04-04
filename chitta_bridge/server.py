@@ -129,6 +129,127 @@ def cleanup_opencode_snapshot() -> str:
 MAX_READ_SIZE = 10 * 1024 * 1024  # 10MB - above this, estimate lines from size
 
 
+def _apply_file_patch(filepath: str, old_str: str, new_str: str) -> str:
+    """Apply a search-replace patch. Returns compact diff summary on success."""
+    p = Path(filepath).resolve()
+    if not p.is_file():
+        return f"Error: file not found: {filepath}"
+    try:
+        content = p.read_text(encoding="utf-8")
+    except OSError as e:
+        return f"Error reading {p.name}: {e}"
+
+    count = content.count(old_str)
+    if count == 0:
+        preview = old_str[:80].replace('\n', '↵')
+        return f"Error: old_str not found in {p.name}\nSearched for: {preview!r}"
+    if count > 1:
+        return f"Error: old_str matches {count} locations in {p.name} — make it more specific"
+
+    line_num = content[:content.index(old_str)].count('\n') + 1
+    old_lines = old_str.count('\n') + 1
+    new_lines = new_str.count('\n') + (1 if new_str else 0)
+    delta = new_lines - old_lines
+
+    try:
+        p.write_text(content.replace(old_str, new_str, 1), encoding="utf-8")
+    except OSError as e:
+        return f"Error writing {p.name}: {e}"
+
+    sign = "+" if delta >= 0 else ""
+    return f"✓ {p.name} patched @ L{line_num} (+{new_lines}/-{old_lines} lines, net {sign}{delta})"
+
+
+def _find_symbol_range(content: str, symbol: str, ext: str):
+    """Return (start, end) byte range of a named symbol. Returns None if not found."""
+    import re
+    if ext in (".py", ".pyx"):
+        # Python: indent-based (def/async def/class)
+        patterns = [
+            rf"^(\s*)(async\s+def\s+{re.escape(symbol)}\s*[\(:])",
+            rf"^(\s*)(def\s+{re.escape(symbol)}\s*[\(:])",
+            rf"^(\s*)(class\s+{re.escape(symbol)}\s*[\(:])",
+        ]
+        for pat in patterns:
+            for m in re.finditer(pat, content, re.MULTILINE):
+                indent = len(m.group(1))
+                start = m.start()
+                # Find end: next non-blank line at same or lower indent after body
+                rest = content[m.end():]
+                end = len(content)
+                seen_body = False
+                pos = m.end()
+                for line in rest.split('\n'):
+                    if line.strip():
+                        line_indent = len(line) - len(line.lstrip())
+                        if seen_body and line_indent <= indent:
+                            end = pos
+                            break
+                        seen_body = True
+                    pos += len(line) + 1
+                return start, end
+    else:
+        # Brace-based: Rust, C, C++, JS, Go, Java…
+        kws = ["fn ", "function ", "async function ", "def ", "class ", "impl ", "struct ", "enum "]
+        for kw in kws:
+            needle = kw + symbol
+            idx = content.find(needle)
+            while idx != -1:
+                before = content[:idx]
+                after = content[idx + len(needle):]
+                # Word boundary check
+                prev_char = before[-1] if before else ' '
+                next_char = after[0] if after else ' '
+                if not prev_char.isalnum() and prev_char != '_' and next_char in ('(', '<', '{', ' ', '\n', ':'):
+                    brace_pos = content.find('{', idx)
+                    if brace_pos == -1:
+                        break
+                    depth = 0
+                    for i, c in enumerate(content[brace_pos:]):
+                        if c == '{':
+                            depth += 1
+                        elif c == '}':
+                            depth -= 1
+                            if depth == 0:
+                                end = brace_pos + i + 1
+                                if end < len(content) and content[end] == '\n':
+                                    end += 1
+                                return idx, end
+                idx = content.find(needle, idx + 1)
+    return None
+
+
+def _apply_symbol_patch(filepath: str, symbol: str, new_body: str) -> str:
+    """Replace a named function/class/method. No old_str needed — finds by name."""
+    p = Path(filepath).resolve()
+    if not p.is_file():
+        return f"Error: file not found: {filepath}"
+    try:
+        content = p.read_text(encoding="utf-8")
+    except OSError as e:
+        return f"Error reading {p.name}: {e}"
+
+    ext = p.suffix.lower()
+    result = _find_symbol_range(content, symbol, ext)
+    if result is None:
+        return f"Error: symbol '{symbol}' not found in {p.name}"
+
+    start, end = result
+    line_num = content[:start].count('\n') + 1
+    old_lines = content[start:end].count('\n') + 1
+    body = new_body if new_body.endswith('\n') else new_body + '\n'
+    new_lines = body.count('\n')
+    delta = new_lines - old_lines
+
+    try:
+        p.write_text(content[:start] + body + content[end:], encoding="utf-8")
+    except OSError as e:
+        return f"Error writing {p.name}: {e}"
+
+    sign = "+" if delta >= 0 else ""
+    return f"✓ {p.name}::{symbol} patched @ L{line_num} (+{new_lines}/-{old_lines} lines, net {sign}{delta})"
+
+
 def get_file_info(filepath: str) -> dict:
     """Get metadata about a file: size, lines, language, etc. Results are cached per path."""
     filepath = str(Path(filepath).resolve())
@@ -5873,6 +5994,61 @@ async def list_tools():
             description="Check if the soul (chittad daemon) is available.",
             inputSchema={"type": "object", "properties": {}}
         ),
+
+        # ── Token-efficient file editing ───────────────────────────
+        Tool(
+            name="file_patch",
+            description=(
+                "Apply a search-replace patch to a file. ~10-50x cheaper than Read+Edit "
+                "because only the changed strings are sent, not the full file. "
+                "Returns a compact summary: filename, line number, +added/-removed lines."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file": {
+                        "type": "string",
+                        "description": "Absolute path to the file to patch"
+                    },
+                    "old_str": {
+                        "type": "string",
+                        "description": "Exact string to find (must match exactly once)"
+                    },
+                    "new_str": {
+                        "type": "string",
+                        "description": "Replacement string (empty string to delete)"
+                    }
+                },
+                "required": ["file", "old_str", "new_str"]
+            }
+        ),
+        Tool(
+            name="symbol_patch",
+            description=(
+                "Replace an entire function, class, or method by name — no old_str needed. "
+                "Finds the symbol in the file and replaces its full definition. "
+                "Supports Python (def/class) and brace-based languages (Rust, JS, Go, C). "
+                "Returns compact summary: file::symbol, line, +added/-removed lines."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file": {
+                        "type": "string",
+                        "description": "Absolute path to the file"
+                    },
+                    "symbol": {
+                        "type": "string",
+                        "description": "Symbol name (function, class, method) to replace"
+                    },
+                    "new_body": {
+                        "type": "string",
+                        "description": "Complete new definition (including def/fn/class line)"
+                    }
+                },
+                "required": ["file", "symbol", "new_body"]
+            }
+        ),
     ]
     if not _HAS_CODEX:
         _tools = [t for t in _tools if not t.name.startswith("codex_")]
@@ -6217,6 +6393,24 @@ async def call_tool(name: str, arguments: dict):
                 result = f"Soul: connected\n{r}" if r else "Soul: socket exists but no response"
             else:
                 result = "Soul: not available (chittad not running)"
+        elif name == "file_patch":
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: _apply_file_patch(
+                    arguments["file"],
+                    arguments["old_str"],
+                    arguments["new_str"],
+                ),
+            )
+        elif name == "symbol_patch":
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: _apply_symbol_patch(
+                    arguments["file"],
+                    arguments["symbol"],
+                    arguments["new_body"],
+                ),
+            )
         else:
             result = f"Unknown tool: {name}"
 
