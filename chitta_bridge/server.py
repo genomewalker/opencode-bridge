@@ -3632,8 +3632,14 @@ class RoomManager:
             f"4. **Open questions** — what remains unresolved\n"
         )
 
-        # Use synthesizer config or default to claude
-        synth = synthesizer or {"name": "Synthesizer", "backend": "claude"}
+        # Use synthesizer config or infer backend from room participants
+        if synthesizer:
+            synth = synthesizer
+        else:
+            # Infer backend from participants — if all use the same backend, reuse it
+            backends = [p.get("backend", "claude") for p in room.participants]
+            inferred = backends[0] if backends and len(set(backends)) == 1 else "claude"
+            synth = {"name": "Synthesizer", "backend": inferred}
         synth_name = synth.get("name", "Synthesizer")
         backend = synth.get("backend", "claude")
         sid = synth.get("session_id")
@@ -5595,9 +5601,9 @@ async def list_tools():
                     "topic": {"type": "string", "description": "The discussion topic or opening question"},
                     "participants": {
                         "type": "string",
-                        "description": 'JSON array: [{"name":"...","backend":"opencode|codex|local","session_id":"...","model":"...",'
+                        "description": 'JSON array: [{"name":"...","backend":"claude|opencode|codex|local","session_id":"...","model":"...",'
                                        '"soul":{"system_prompt":"...","realm":"...","tools":["recall","web_search"],'
-                                       '"max_tool_turns":3,"challenge_bias":0.5,"max_rounds":0}}]'
+                                       '"max_tool_turns":3,"challenge_bias":0.5,"max_rounds":0}}]. backend defaults to "claude" if omitted — set explicitly to avoid unexpected API spend.'
                     }
                 },
                 "required": ["room_id", "topic", "participants"]
@@ -5625,7 +5631,7 @@ async def list_tools():
                     "room_id": {"type": "string", "description": "Room ID to synthesize"},
                     "synthesizer": {
                         "type": "string",
-                        "description": 'Optional JSON: {"name":"...","backend":"claude|opencode|codex|local","model":"..."}. Defaults to claude.'
+                        "description": 'Optional JSON: {"name":"...","backend":"claude|opencode|codex|local","model":"..."}. Defaults to the backend used by room participants (inferred); falls back to claude if mixed.'
                     }
                 },
                 "required": ["room_id"]
@@ -6243,7 +6249,10 @@ async def _run_exec_mode() -> None:
         print(json.dumps({"content": "", "error": f"invalid JSON: {e}"}))
         return
 
-    backend = req.get("backend", "claude")
+    backend = req.get("backend")
+    if not backend:
+        print(json.dumps({"content": "", "error": "missing required field: backend (claude|opencode|codex|local)"}))
+        return
     model = req.get("model")
     system = req.get("system", "")
     message = req.get("message", "")
