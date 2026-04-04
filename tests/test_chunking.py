@@ -259,8 +259,12 @@ def _mock_opencode_response(text: str, session_id: str = "mock-sess") -> str:
 
 
 @pytest.fixture
-def bridge():
+def bridge(tmp_path):
     b = OpenCodeBridge()
+    b.sessions_dir = tmp_path / "sessions"
+    b.sessions_dir.mkdir()
+    b.sessions = {}
+    b.active_session = None
     return b
 
 
@@ -343,7 +347,7 @@ class TestRunChunked:
 
         call_count = 0
 
-        async def mock_run(*args, timeout=300):
+        async def mock_run(*args, timeout=300, stall_timeout=None):
             nonlocal call_count
             call_count += 1
             # Chunk calls return chunk analysis; synthesis call returns final
@@ -393,7 +397,7 @@ class TestRunChunked:
         # Track calls to distinguish chunk calls from synthesis call.
         # Chunk calls have a --file arg pointing to a temp chunk file;
         # the synthesis call does NOT attach a chunk temp file.
-        async def mock_run(*args, timeout=300):
+        async def mock_run(*args, timeout=300, stall_timeout=None):
             # The synthesis prompt includes "Synthesize" — detect it
             prompt_arg = args[1] if len(args) > 1 else ""
             if "Synthesize" in prompt_arg or "Chunk Analyses" in prompt_arg:
@@ -420,7 +424,7 @@ class TestRunChunked:
 
         first_call_done = False
 
-        async def mock_run(*args, timeout=300):
+        async def mock_run(*args, timeout=300, stall_timeout=None):
             nonlocal first_call_done
             prompt_arg = args[1] if len(args) > 1 else ""
             # Synthesis call — always succeed
@@ -612,7 +616,7 @@ class TestRunChunkedSmallFilesPassthrough:
 
         synthesis_args = []
 
-        async def mock_run(*args, timeout=300):
+        async def mock_run(*args, timeout=300, stall_timeout=None):
             prompt_arg = args[1] if len(args) > 1 else ""
             if "Synthesize" in prompt_arg or "Chunk Analyses" in prompt_arg:
                 synthesis_args.extend(args)

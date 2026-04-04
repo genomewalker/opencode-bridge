@@ -390,8 +390,8 @@ fn hook_mode() {
     io::stdin().read_to_string(&mut input).unwrap_or(0);
 
     let file = json_extract_str(&input, "file_path").unwrap_or_default();
-    let old_str = json_extract_str(&input, "old_string").unwrap_or_default();
-    let new_str = json_extract_str(&input, "new_string").unwrap_or_default();
+    let old_str = json_extract_str(&input, "old_str").unwrap_or_default();
+    let new_str = json_extract_str(&input, "new_str").unwrap_or_default();
 
     if file.is_empty() || old_str.is_empty() {
         process::exit(0); // not an Edit call we handle — pass through

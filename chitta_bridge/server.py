@@ -312,6 +312,36 @@ def _human_size(size_bytes: int) -> str:
     return f"{size_bytes:.1f}TB"
 
 
+def _expand_paths(paths: list[str]) -> list[str]:
+    """Expand directories to contained files; keep plain file paths as-is."""
+    result: list[str] = []
+    for p in paths:
+        path = Path(p)
+        if path.is_dir():
+            result.extend(str(f) for f in sorted(path.rglob("*")) if f.is_file())
+        elif path.is_file():
+            result.append(str(path))
+    return result
+
+
+def _embed_files_in_prompt(message: str, files: list[str]) -> str:
+    """Embed file content inline for backends that don't support --file args."""
+    if not files:
+        return message
+    parts = []
+    for f in files:
+        p = Path(f)
+        if p.is_file():
+            try:
+                content = p.read_text(errors="replace")
+                parts.append(f"### File: {p.name}\n```\n{content}\n```")
+            except OSError:
+                pass
+    if not parts:
+        return message
+    return "\n\n".join(parts) + "\n\n" + message
+
+
 def build_file_context(file_paths: list[str]) -> str:
     """Build a context block describing attached files."""
     if not file_paths:
@@ -3684,6 +3714,7 @@ class DiscussionRoom:
     created: str = field(default_factory=lambda: datetime.now().isoformat())
     turn_counts: dict = field(default_factory=dict)  # {name: int} per-participant round count
     challenge_mode: bool = False
+    files: list = field(default_factory=list)
 
 
 class RoomManager:
@@ -3695,10 +3726,12 @@ class RoomManager:
         self.local = local_bridge
         self.rooms: dict[str, DiscussionRoom] = {}
 
-    def create(self, room_id: str, topic: str, participants: list[dict]) -> str:
+    def create(self, room_id: str, topic: str, participants: list[dict],
+               files: Optional[list[str]] = None) -> str:
         if room_id in self.rooms:
             return f"Room '{room_id}' already exists."
-        room = DiscussionRoom(id=room_id, topic=topic, participants=participants)
+        expanded = _expand_paths(files or [])
+        room = DiscussionRoom(id=room_id, topic=topic, participants=participants, files=expanded)
         room.messages.append({"name": "TOPIC", "content": topic, "ts": datetime.now().isoformat()})
         # Inject soul context if chittad is running (filter code symbols)
         if SoulClient.is_available():
@@ -4898,7 +4931,8 @@ class RoomManager:
 
     async def _send_to_backend(self, participant: dict, message: str,
                                 system_prompt: Optional[str] = None,
-                                tools: Optional[list] = None) -> str:
+                                tools: Optional[list] = None,
+                                files: Optional[list[str]] = None) -> str:
         """Send a message to a participant's backend, returning the raw reply."""
         name = participant["name"]
         backend = participant["backend"]
@@ -4906,7 +4940,7 @@ class RoomManager:
 
         if backend == "claude":
             full_prompt = f"{system_prompt}\n\n{message}" if system_prompt else message
-            return await self._run_claude_p(full_prompt)
+            return await self._run_claude_p(full_prompt, files=files)
 
         elif backend == "local":
             base_url = participant.get("base_url") or participant.get("endpoint")
@@ -4920,18 +4954,20 @@ class RoomManager:
                 if not model and node["models"]:
                     model = node["models"][0]
             if base_url:
+                msg_with_files = _embed_files_in_prompt(message, files or [])
                 if sid and sid in self.local.sessions:
-                    return await self.local.send_message(message, sid, system_prompt=system_prompt)
+                    return await self.local.send_message(msg_with_files, sid, system_prompt=system_prompt)
                 else:
                     tmp = f"room-{participant.get('_room_id', 'r')}-{name.lower().replace(' ', '-')}"
                     if tmp not in self.local.sessions:
                         self.local.start_session(tmp, model=model or "default", endpoint=base_url)
                     participant["session_id"] = tmp
-                    return await self.local.send_message(message, tmp, system_prompt=system_prompt)
+                    return await self.local.send_message(msg_with_files, tmp, system_prompt=system_prompt)
             return "[error: no endpoint]"
 
         elif backend == "codex":
             full_prompt = f"{system_prompt}\n\n{message}" if system_prompt else message
+            full_prompt = _embed_files_in_prompt(full_prompt, files or [])
             if sid and sid in self.codex.sessions:
                 return await self.codex.send_message(full_prompt, sid)
             return await self.codex.run_task(full_prompt)
@@ -4939,14 +4975,15 @@ class RoomManager:
         else:  # opencode
             full_prompt = f"{system_prompt}\n\n{message}" if system_prompt else message
             if sid and sid in self.opencode.sessions:
-                return await self.opencode.send_message(full_prompt, sid, _raw=True)
+                return await self.opencode.send_message(full_prompt, sid, files=files, _raw=True)
             tmp = f"room-{participant.get('_room_id', 'r')}-{name.lower().replace(' ', '-')}"
             await self.opencode.start_session(tmp, model=participant.get("model"))
-            reply = await self.opencode.send_message(full_prompt, tmp, _raw=True)
+            reply = await self.opencode.send_message(full_prompt, tmp, files=files, _raw=True)
             self.opencode.end_session(tmp)
             return reply
 
-    async def _run_claude_p(self, prompt: str, timeout: int = 300) -> str:
+    async def _run_claude_p(self, prompt: str, timeout: int = 300,
+                             files: Optional[list[str]] = None) -> str:
         """Run `claude -p` with prompt via stdin and return the text response."""
         global CLAUDE_BIN
         if not CLAUDE_BIN:
@@ -4954,8 +4991,11 @@ class RoomManager:
         if not CLAUDE_BIN:
             return "[error: claude binary not found]"
         try:
+            file_args: list[str] = []
+            for f in (files or []):
+                file_args.extend(["--file", f])
             proc = await asyncio.create_subprocess_exec(
-                CLAUDE_BIN, "-p",
+                CLAUDE_BIN, "-p", *file_args,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -5010,11 +5050,12 @@ class RoomManager:
         realm = soul.realm if soul else None
         allowed_tools = set(soul.tools) if soul else set()
 
+        room_files = room.files or None
         reply = ""
         for turn in range(max_tool_turns + 1):
             try:
                 if turn == 0:
-                    reply = await self._send_to_backend(participant, user_msg, system_prompt)
+                    reply = await self._send_to_backend(participant, user_msg, system_prompt, files=room_files)
                 else:
                     reply = await self._send_to_backend(participant, user_msg, system_prompt)
             except Exception as e:
@@ -5725,6 +5766,10 @@ async def list_tools():
                         "description": 'JSON array: [{"name":"...","backend":"claude|opencode|codex|local","session_id":"...","model":"...",'
                                        '"soul":{"system_prompt":"...","realm":"...","tools":["recall","web_search"],'
                                        '"max_tool_turns":3,"challenge_bias":0.5,"max_rounds":0}}]. backend defaults to "claude" if omitted — set explicitly to avoid unexpected API spend.'
+                    },
+                    "files": {
+                        "type": "string",
+                        "description": 'JSON array of file or directory paths to attach to all participants: ["/path/to/file.py", "/path/to/dir"]. Directories are expanded recursively. Files are passed via --file to opencode/claude, embedded inline for codex/local.'
                     }
                 },
                 "required": ["room_id", "topic", "participants"]
@@ -6217,10 +6262,14 @@ async def call_tool(name: str, arguments: dict):
             participants = arguments["participants"]
             if isinstance(participants, str):
                 participants = json.loads(participants)
+            files_arg = arguments.get("files")
+            if isinstance(files_arg, str):
+                files_arg = json.loads(files_arg)
             result = rooms.create(
                 room_id=arguments["room_id"],
                 topic=arguments["topic"],
                 participants=participants,
+                files=files_arg,
             )
         elif name == "room_add_participant":
             p = arguments["participant"]
