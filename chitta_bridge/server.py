@@ -2455,7 +2455,7 @@ Set via:
         sandbox: Optional[str] = None,
         full_auto: bool = True,
     ) -> list:
-        args = ["exec"]
+        args = ["exec", "--skip-git-repo-check"]
         if model:
             args.extend(["--model", model])
         if effort:
@@ -4940,7 +4940,7 @@ class RoomManager:
 
         if backend == "claude":
             full_prompt = f"{system_prompt}\n\n{message}" if system_prompt else message
-            return await self._run_claude_p(full_prompt, files=files)
+            return await self._run_claude_p(full_prompt, files=files, model=participant.get("model"))
 
         elif backend == "local":
             base_url = participant.get("base_url") or participant.get("endpoint")
@@ -4983,7 +4983,8 @@ class RoomManager:
             return reply
 
     async def _run_claude_p(self, prompt: str, timeout: int = 300,
-                             files: Optional[list[str]] = None) -> str:
+                             files: Optional[list[str]] = None,
+                             model: Optional[str] = None) -> str:
         """Run `claude -p` with prompt via stdin and return the text response."""
         global CLAUDE_BIN
         if not CLAUDE_BIN:
@@ -4991,17 +4992,19 @@ class RoomManager:
         if not CLAUDE_BIN:
             return "[error: claude binary not found]"
         try:
-            file_args: list[str] = []
-            for f in (files or []):
-                file_args.extend(["--file", f])
+            # Embed files inline — avoids CLAUDE_CODE_SESSION_ACCESS_TOKEN requirement
+            full_prompt = _embed_files_in_prompt(prompt, files or [])
+            cmd = [CLAUDE_BIN, "-p"]
+            if model:
+                cmd.extend(["--model", model])
             proc = await asyncio.create_subprocess_exec(
-                CLAUDE_BIN, "-p", *file_args,
+                *cmd,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
             stdout, stderr = await asyncio.wait_for(
-                proc.communicate(prompt.encode()), timeout=timeout
+                proc.communicate(full_prompt.encode()), timeout=timeout
             )
             if proc.returncode == 0 and stdout:
                 return stdout.decode(errors="replace").strip()
@@ -5218,6 +5221,66 @@ server = Server("chitta-bridge")
 # Checked once at startup — used to suppress tools for missing backends
 _HAS_CODEX = find_codex() is not None
 _HAS_OPENCODE = find_opencode() is not None
+
+# Tools hidden from tools/list to save context tokens.
+# All are still callable directly or via the `advanced` gateway.
+HIDDEN_TOOLS = {
+    # Session lifecycle — prefer reuse over start/end
+    "opencode_start", "opencode_end", "opencode_end_all",
+    "opencode_history", "opencode_model", "opencode_agent", "opencode_variant",
+    "opencode_config", "opencode_configure", "opencode_export", "opencode_health",
+    "codex_start", "codex_end", "codex_end_all",
+    "codex_switch", "codex_sessions", "codex_history",
+    "codex_model", "codex_config", "codex_configure",
+    "codex_review", "codex_rescue", "codex_health",
+    # Local model management
+    "local_start", "local_end", "local_switch",
+    "local_sessions", "local_history", "local_models",
+    "local_discover", "local_health", "local_discuss",
+    # Orchestration (complex, rarely needed)
+    "multi_consult", "agent_chain", "delegate_codex", "parallel_agents",
+    # Rooms (multi-agent discussion)
+    "room_create", "room_run", "room_synthesize", "room_read",
+    # Status/health
+    "soul_status",
+}
+
+
+def handle_advanced(arguments: dict) -> str:
+    """Gateway to hidden chitta-bridge tools.
+
+    Actions:
+    - list: Show all hidden tools by category
+    - call a hidden tool: {"tool": "<name>", "arguments": {...}}
+
+    Examples:
+      {"action": "list"}
+      {"tool": "opencode_start", "arguments": {"session_id": "main"}}
+    """
+    tool_name = arguments.get("tool", "")
+    action = arguments.get("action", "")
+
+    if tool_name:
+        if tool_name not in HIDDEN_TOOLS:
+            return f"Unknown hidden tool: {tool_name}\nUse action='list' to see available tools."
+
+    # List hidden tools by category
+    categories = {
+        "Session lifecycle (opencode)": [t for t in sorted(HIDDEN_TOOLS) if t.startswith("opencode_")],
+        "Session lifecycle (codex)":    [t for t in sorted(HIDDEN_TOOLS) if t.startswith("codex_")],
+        "Local models":                 [t for t in sorted(HIDDEN_TOOLS) if t.startswith("local_")],
+        "Orchestration":                [t for t in sorted(HIDDEN_TOOLS) if t in {"multi_consult", "agent_chain", "delegate_codex", "parallel_agents"}],
+        "Rooms":                        [t for t in sorted(HIDDEN_TOOLS) if t.startswith("room_")],
+        "Misc":                         [t for t in sorted(HIDDEN_TOOLS) if not any(t.startswith(p) for p in ("opencode_", "codex_", "local_", "room_")) and t not in {"multi_consult", "agent_chain", "delegate_codex", "parallel_agents"}],
+    }
+    lines = ["Hidden chitta-bridge tools (callable via advanced gateway or directly):\n"]
+    for cat, tools in categories.items():
+        if tools:
+            lines.append(f"{cat}:")
+            lines.extend(f"  • {t}" for t in tools)
+    lines.append(f"\nTotal: {len(HIDDEN_TOOLS)} hidden tools")
+    lines.append('\nUsage: {"tool": "<name>", "arguments": {...}}')
+    return "\n".join(lines)
 
 
 @server.list_tools()
@@ -6099,13 +6162,50 @@ async def list_tools():
         _tools = [t for t in _tools if not t.name.startswith("codex_")]
     if not _HAS_OPENCODE:
         _tools = [t for t in _tools if not t.name.startswith("opencode_")]
+    _tools = [t for t in _tools if t.name not in HIDDEN_TOOLS]
+    _tools.append(Tool(
+        name="advanced",
+        description=(
+            "Gateway to hidden chitta-bridge tools (session lifecycle, orchestration, rooms, local models). "
+            "Use action='list' to see all hidden tools, or tool='<name>' with arguments to call one."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "description": "Use 'list' to enumerate all hidden tools"
+                },
+                "tool": {
+                    "type": "string",
+                    "description": "Name of the hidden tool to call"
+                },
+                "arguments": {
+                    "type": "object",
+                    "description": "Arguments to pass to the tool"
+                }
+            }
+        }
+    ))
     return _tools
 
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict):
     try:
-        if name == "opencode_models":
+        if name == "advanced":
+            # List mode
+            if "tool" not in arguments:
+                result = handle_advanced(arguments)
+            else:
+                # Re-dispatch to the hidden tool
+                hidden_name = arguments["tool"]
+                hidden_args = arguments.get("arguments", {})
+                if hidden_name not in HIDDEN_TOOLS:
+                    result = f"Unknown hidden tool: {hidden_name}\nUse action='list' to see available tools."
+                else:
+                    return await call_tool(hidden_name, hidden_args)
+        elif name == "opencode_models":
             result = await bridge.list_models(arguments.get("provider"))
         elif name == "opencode_agents":
             result = await bridge.list_agents()
