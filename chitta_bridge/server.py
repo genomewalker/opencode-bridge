@@ -5846,7 +5846,9 @@ async def list_tools():
                 "properties": {
                     "room_id": {"type": "string", "description": "Room ID to run"},
                     "rounds": {"type": "integer", "description": "Number of discussion rounds (default: 2)"},
-                    "challenge": {"type": "boolean", "description": "Enable challenge rounds — auto-extract claims and ask participants to verify/challenge them (default: false)"}
+                    "challenge": {"type": "boolean", "description": "Enable challenge rounds — auto-extract claims and ask participants to verify/challenge them (default: false)"},
+                    "prompt": {"type": "string", "description": "Discussion prompt to inject as a MODERATOR message before running rounds"},
+                    "files": {"type": "array", "items": {"type": "string"}, "description": "File paths to attach to the room for this run"}
                 },
                 "required": ["room_id"]
             }
@@ -6362,6 +6364,40 @@ async def call_tool(name: str, arguments: dict):
             participants = arguments["participants"]
             if isinstance(participants, str):
                 participants = json.loads(participants)
+            # Normalize string participants into dicts:
+            #   "local-gpu/model" → backend=local, "codex/model" → backend=codex,
+            #   "claude" or "claude/model" → backend=claude,
+            #   bare string → check existing sessions (local, codex, opencode) by ID,
+            #   else → backend=opencode
+            normalized = []
+            for p in participants:
+                if isinstance(p, dict):
+                    normalized.append(p)
+                else:
+                    s = str(p)
+                    if s.startswith("local-gpu/") or s.startswith("local/"):
+                        model = s.split("/", 1)[1]
+                        normalized.append({"name": model, "backend": "local", "model": model})
+                    elif s.startswith("codex/"):
+                        model = s.split("/", 1)[1]
+                        normalized.append({"name": f"Codex ({model})", "backend": "codex", "model": model})
+                    elif s == "claude" or s.startswith("claude/"):
+                        model = s.split("/", 1)[1] if "/" in s else None
+                        d = {"name": "Claude", "backend": "claude"}
+                        if model:
+                            d["model"] = model
+                        normalized.append(d)
+                    elif s in local_bridge.sessions:
+                        sess = local_bridge.sessions[s]
+                        normalized.append({"name": s, "backend": "local", "session_id": s, "model": sess.model})
+                    elif s in codex_bridge.sessions:
+                        sess = codex_bridge.sessions[s]
+                        normalized.append({"name": s, "backend": "codex", "session_id": s, "model": sess.model})
+                    elif s in bridge.sessions:
+                        normalized.append({"name": s, "backend": "opencode", "session_id": s})
+                    else:
+                        normalized.append({"name": s, "backend": "opencode", "model": s})
+            participants = normalized
             files_arg = arguments.get("files")
             if isinstance(files_arg, str):
                 files_arg = json.loads(files_arg)
@@ -6377,8 +6413,25 @@ async def call_tool(name: str, arguments: dict):
                 p = json.loads(p)
             result = rooms.add_participant(room_id=arguments["room_id"], participant=p)
         elif name == "room_run":
+            rid = arguments["room_id"]
+            prompt = arguments.get("prompt")
+            if prompt and rid in rooms.rooms:
+                room = rooms.rooms[rid]
+                room.messages.append({
+                    "name": "MODERATOR",
+                    "content": prompt,
+                    "ts": datetime.now().isoformat(),
+                })
+            files_arg = arguments.get("files")
+            if files_arg:
+                if isinstance(files_arg, str):
+                    files_arg = json.loads(files_arg)
+                if rid in rooms.rooms:
+                    expanded = _expand_paths(files_arg)
+                    existing = set(rooms.rooms[rid].files or [])
+                    rooms.rooms[rid].files = list(existing | set(expanded))
             result = await rooms.run_rounds(
-                room_id=arguments["room_id"],
+                room_id=rid,
                 rounds=arguments.get("rounds", 2),
                 challenge=arguments.get("challenge", False),
             )
