@@ -5028,16 +5028,21 @@ class RoomManager:
     async def _run_claude_p(self, prompt: str, timeout: int = 300,
                              files: Optional[list[str]] = None,
                              model: Optional[str] = None) -> str:
-        """Run `claude -p` with prompt via stdin and return the text response."""
+        """Run `claude -p --output-format json` and return the response text.
+
+        The native claude binary hangs after outputting its result (never closes
+        stdout), so communicate() deadlocks. Instead we stream stdout line-by-line,
+        parse the JSON result object, then kill the process.
+        """
         global CLAUDE_BIN
         if not CLAUDE_BIN:
             CLAUDE_BIN = shutil.which("claude")
         if not CLAUDE_BIN:
             return "[error: claude binary not found]"
+        proc = None
         try:
-            # Embed files inline — avoids CLAUDE_CODE_SESSION_ACCESS_TOKEN requirement
             full_prompt = _embed_files_in_prompt(prompt, files or [])
-            cmd = [CLAUDE_BIN, "-p"]
+            cmd = [CLAUDE_BIN, "-p", "--output-format", "json"]
             if model:
                 cmd.extend(["--model", model])
             proc = await asyncio.create_subprocess_exec(
@@ -5046,16 +5051,52 @@ class RoomManager:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(full_prompt.encode()), timeout=timeout
-            )
-            if proc.returncode == 0 and stdout:
-                return stdout.decode(errors="replace").strip()
-            return f"[error: {stderr.decode(errors='replace').strip() or 'empty response'}]"
-        except asyncio.TimeoutError:
-            return f"[error: claude -p timed out after {timeout}s]"
+            proc.stdin.write(full_prompt.encode())
+            await proc.stdin.drain()
+            proc.stdin.close()
+
+            result_text: Optional[str] = None
+            async def _read_result() -> None:
+                nonlocal result_text
+                while True:
+                    line = await proc.stdout.readline()
+                    if not line:
+                        break
+                    try:
+                        data = json.loads(line.decode(errors="replace"))
+                    except json.JSONDecodeError:
+                        continue
+                    if data.get("type") == "result":
+                        if data.get("is_error"):
+                            result_text = f"[error: {data.get('result', 'claude error')}]"
+                        else:
+                            result_text = data.get("result", "")
+                        return
+
+            try:
+                await asyncio.wait_for(_read_result(), timeout=timeout)
+            except asyncio.TimeoutError:
+                return f"[error: claude -p timed out after {timeout}s]"
+
+            if result_text is not None:
+                return result_text
+
+            # No result object found — collect stderr for diagnostics
+            try:
+                stderr = await asyncio.wait_for(proc.stderr.read(), timeout=5)
+                return f"[error: {stderr.decode(errors='replace').strip() or 'empty response'}]"
+            except asyncio.TimeoutError:
+                return "[error: empty response]"
+
         except Exception as e:
             return f"[error: {e}]"
+        finally:
+            if proc is not None:
+                try:
+                    proc.kill()
+                    await asyncio.wait_for(proc.wait(), timeout=2)
+                except Exception:
+                    pass
 
     async def _participant_respond(self, room: DiscussionRoom, participant: dict) -> dict:
         """Get one participant's response with optional tool-use loop."""
