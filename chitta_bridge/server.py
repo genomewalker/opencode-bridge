@@ -128,6 +128,42 @@ def cleanup_opencode_snapshot() -> str:
 
 MAX_READ_SIZE = 10 * 1024 * 1024  # 10MB - above this, estimate lines from size
 
+# Backend inference: model/name prefix → backend
+# Order matters — check more specific prefixes first.
+_BACKEND_RULES: list[tuple[tuple[str, ...], str]] = [
+    # Anthropic → claude
+    (("claude", "opus", "sonnet", "haiku"), "claude"),
+    # OpenAI → codex
+    (("gpt-", "o1", "o3", "o4", "chatgpt", "codex", "text-davinci", "text-embedding"), "codex"),
+    # Google → opencode (accessed via OpenCode)
+    (("gemini", "palm", "bard"), "opencode"),
+    # Open-source / local weights → local
+    (("llama", "qwen", "mistral", "mixtral", "phi", "deepseek", "falcon", "vicuna",
+      "orca", "gemma", "starcoder", "codellama", "yi-", "nous-", "wizardcoder",
+      "openchat", "zephyr", "tinyllama", "stablelm", "internlm", "baichuan",
+      "solar", "neural-chat"), "local"),
+]
+
+
+def _infer_backend(participant_name: str, model: Optional[str] = None) -> str:
+    """Infer the backend from participant name or model string.
+
+    Checks model first (more specific), then participant name.
+    Raises ValueError if the backend cannot be determined unambiguously.
+    """
+    for probe in (model, participant_name):
+        if not probe:
+            continue
+        low = probe.lower().strip()
+        for prefixes, backend in _BACKEND_RULES:
+            if any(low.startswith(p) or low == p.rstrip("-") for p in prefixes):
+                return backend
+    raise ValueError(
+        f"Cannot infer backend for participant '{participant_name}'"
+        f"{f' (model={model!r})' if model else ''}. "
+        "Set backend explicitly to one of: claude, opencode, codex, local"
+    )
+
 
 def _apply_file_patch(filepath: str, old_str: str, new_str: str) -> str:
     """Apply a search-replace patch. Returns compact diff summary on success."""
@@ -2801,7 +2837,10 @@ Set via:
 _LOCAL_LLM_PORT = 11434
 
 # URL cache files written by slurm-serve-ollama.sh
-_OLLAMA_URL_GLOB = "/tmp/ollama-server-*.url"
+_OLLAMA_URL_GLOB = os.environ.get(
+    "CHITTA_BRIDGE_URL_DIR",
+    "/maps/projects/caeg/scratch/kbd606/tmp"
+) + "/ollama-server-*.url"
 
 
 class GpuNodeDiscovery:
@@ -4935,7 +4974,9 @@ class RoomManager:
                                 files: Optional[list[str]] = None) -> str:
         """Send a message to a participant's backend, returning the raw reply."""
         name = participant["name"]
-        backend = participant["backend"]
+        backend = participant.get("backend") or participant.get("type")
+        if not backend:
+            backend = _infer_backend(name, participant.get("model"))
         sid = participant.get("session_id")
 
         if backend == "claude":
@@ -4958,7 +4999,8 @@ class RoomManager:
                 if sid and sid in self.local.sessions:
                     return await self.local.send_message(msg_with_files, sid, system_prompt=system_prompt)
                 else:
-                    tmp = f"room-{participant.get('_room_id', 'r')}-{name.lower().replace(' ', '-')}"
+                    safe_name = re.sub(r"[^a-zA-Z0-9_-]", "-", name.lower())
+                    tmp = f"room-{participant.get('_room_id', 'r')}-{safe_name}"
                     if tmp not in self.local.sessions:
                         self.local.start_session(tmp, model=model or "default", endpoint=base_url)
                     participant["session_id"] = tmp
@@ -4976,7 +5018,8 @@ class RoomManager:
             full_prompt = f"{system_prompt}\n\n{message}" if system_prompt else message
             if sid and sid in self.opencode.sessions:
                 return await self.opencode.send_message(full_prompt, sid, files=files, _raw=True)
-            tmp = f"room-{participant.get('_room_id', 'r')}-{name.lower().replace(' ', '-')}"
+            safe_name = re.sub(r"[^a-zA-Z0-9_-]", "-", name.lower())
+            tmp = f"room-{participant.get('_room_id', 'r')}-{safe_name}"
             await self.opencode.start_session(tmp, model=participant.get("model"))
             reply = await self.opencode.send_message(full_prompt, tmp, files=files, _raw=True)
             self.opencode.end_session(tmp)
@@ -6375,6 +6418,34 @@ async def call_tool(name: str, arguments: dict):
                     normalized.append(p)
                 else:
                     s = str(p)
+                    # Parse "backend:session_id" shorthand
+                    if ":" in s and s.split(":", 1)[0] in ("opencode", "codex", "claude", "local"):
+                        backend_hint, sid_or_model = s.split(":", 1)
+                        if backend_hint == "claude":
+                            d = {"name": s, "backend": "claude"}
+                            if sid_or_model and sid_or_model != "opus":
+                                d["model"] = sid_or_model
+                            elif sid_or_model == "opus":
+                                d["model"] = "opus"
+                            normalized.append(d)
+                        elif backend_hint == "local":
+                            if sid_or_model in local_bridge.sessions:
+                                sess = local_bridge.sessions[sid_or_model]
+                                normalized.append({"name": s, "backend": "local", "session_id": sid_or_model, "model": sess.model})
+                            else:
+                                normalized.append({"name": s, "backend": "local", "model": sid_or_model})
+                        elif backend_hint == "codex":
+                            if sid_or_model in codex_bridge.sessions:
+                                sess = codex_bridge.sessions[sid_or_model]
+                                normalized.append({"name": s, "backend": "codex", "session_id": sid_or_model, "model": sess.model})
+                            else:
+                                normalized.append({"name": s, "backend": "codex", "model": sid_or_model})
+                        elif backend_hint == "opencode":
+                            if sid_or_model in bridge.sessions:
+                                normalized.append({"name": s, "backend": "opencode", "session_id": sid_or_model})
+                            else:
+                                normalized.append({"name": s, "backend": "opencode", "model": sid_or_model})
+                        continue
                     if s.startswith("local-gpu/") or s.startswith("local/"):
                         model = s.split("/", 1)[1]
                         normalized.append({"name": model, "backend": "local", "model": model})
