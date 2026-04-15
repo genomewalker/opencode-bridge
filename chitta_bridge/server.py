@@ -133,8 +133,11 @@ MAX_READ_SIZE = 10 * 1024 * 1024  # 10MB - above this, estimate lines from size
 _BACKEND_RULES: list[tuple[tuple[str, ...], str]] = [
     # Anthropic → claude
     (("claude", "opus", "sonnet", "haiku"), "claude"),
-    # OpenAI → codex
-    (("gpt-", "o1", "o3", "o4", "chatgpt", "codex", "text-davinci", "text-embedding"), "codex"),
+    # OpenAI → codex  (o1/o3/o4 require exact match or clear suffix to avoid false positives
+    # on participant names like "o3-planning"; gpt- prefix is unambiguous)
+    (("gpt-", "chatgpt", "codex", "text-davinci", "text-embedding"), "codex"),
+    (("o1-", "o3-", "o4-", "o1mini", "o3mini"), "codex"),  # versioned OpenAI models
+
     # Google → opencode (accessed via OpenCode)
     (("gemini", "palm", "bard"), "opencode"),
     # Open-source / local weights → local
@@ -151,10 +154,14 @@ def _infer_backend(participant_name: str, model: Optional[str] = None) -> str:
     Checks model first (more specific), then participant name.
     Raises ValueError if the backend cannot be determined unambiguously.
     """
+    # Exact-match short OpenAI model names that can't safely use startswith
+    _CODEX_EXACT = {"o1", "o3", "o4", "o1-mini", "o3-mini", "o4-mini"}
     for probe in (model, participant_name):
         if not probe:
             continue
         low = probe.lower().strip()
+        if low in _CODEX_EXACT:
+            return "codex"
         for prefixes, backend in _BACKEND_RULES:
             if any(low.startswith(p) or low == p.rstrip("-") for p in prefixes):
                 return backend
@@ -6464,10 +6471,13 @@ async def call_tool(name: str, arguments: dict):
                         backend_hint, sid_or_model = s.split(":", 1)
                         if backend_hint == "claude":
                             d = {"name": s, "backend": "claude"}
-                            if sid_or_model and sid_or_model != "opus":
-                                d["model"] = sid_or_model
-                            elif sid_or_model == "opus":
-                                d["model"] = "opus"
+                            if sid_or_model:
+                                _CLAUDE_SHORTHANDS = {
+                                    "opus": "claude-opus-4-6",
+                                    "sonnet": "claude-sonnet-4-6",
+                                    "haiku": "claude-haiku-4-5-20251001",
+                                }
+                                d["model"] = _CLAUDE_SHORTHANDS.get(sid_or_model.lower(), sid_or_model)
                             normalized.append(d)
                         elif backend_hint == "local":
                             if sid_or_model in local_bridge.sessions:
@@ -6508,7 +6518,10 @@ async def call_tool(name: str, arguments: dict):
                     elif s in bridge.sessions:
                         normalized.append({"name": s, "backend": "opencode", "session_id": s})
                     else:
-                        inferred = _infer_backend(s)
+                        try:
+                            inferred = _infer_backend(s)
+                        except ValueError:
+                            inferred = "opencode"
                         normalized.append({"name": s, "backend": inferred, "model": s})
             participants = normalized
             files_arg = arguments.get("files")
