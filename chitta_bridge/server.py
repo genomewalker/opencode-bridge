@@ -6467,7 +6467,8 @@ async def call_tool(name: str, arguments: dict):
                     elif s in bridge.sessions:
                         normalized.append({"name": s, "backend": "opencode", "session_id": s})
                     else:
-                        normalized.append({"name": s, "backend": "opencode", "model": s})
+                        inferred = _infer_backend(s)
+                        normalized.append({"name": s, "backend": inferred, "model": s})
             participants = normalized
             files_arg = arguments.get("files")
             if isinstance(files_arg, str):
