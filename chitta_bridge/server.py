@@ -5349,7 +5349,6 @@ def handle_advanced(arguments: dict) -> str:
       {"tool": "opencode_start", "arguments": {"session_id": "main"}}
     """
     tool_name = arguments.get("tool", "")
-    action = arguments.get("action", "")
 
     if tool_name:
         if tool_name not in HIDDEN_TOOLS:
