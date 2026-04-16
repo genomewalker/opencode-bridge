@@ -2406,6 +2406,27 @@ Set via:
 
         return reply or "No response received"
 
+    @staticmethod
+    def _cleanup_stale_arg0_dirs() -> None:
+        """Remove stale codex-arg0* temp dirs that have no .lock file.
+
+        Codex creates ~/.codex/tmp/arg0/codex-arg0XXXXXX/ per run and cleans up
+        on normal exit. When the process is killed, the dir is left without a
+        .lock file and accumulates indefinitely (850+ dirs observed in practice).
+        """
+        arg0_dir = Path.home() / ".codex" / "tmp" / "arg0"
+        if not arg0_dir.is_dir():
+            return
+        for d in arg0_dir.iterdir():
+            if not d.is_dir() or not d.name.startswith("codex-arg0"):
+                continue
+            if not (d / ".lock").exists():
+                try:
+                    import shutil as _shutil
+                    _shutil.rmtree(d, ignore_errors=True)
+                except OSError:
+                    pass
+
     async def run_task(
         self,
         task: str,
@@ -2417,10 +2438,9 @@ Set via:
     ) -> str:
         """Run a one-off task without session management."""
         args = self._build_exec_args(model, effort, sandbox=sandbox, full_auto=full_auto)
-
-
         cwd = working_dir or os.getcwd()
         output, code = await self._run_codex_exec_stdin(args, task, cwd)
+        self._cleanup_stale_arg0_dirs()
         if code != 0:
             return f"Error: {output}"
 
