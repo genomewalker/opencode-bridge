@@ -21,6 +21,7 @@ import os
 import re
 import sys
 import json
+import stat as _stat_mod
 import signal as _signal
 import asyncio
 import shutil
@@ -118,7 +119,12 @@ _path_write_locks_mu = _threading.Lock()
 
 
 def _path_write_lock(path: Path) -> _threading.Lock:
-    key = str(path)
+    """Return a lock for `path`. Keys are canonicalized via realpath so aliases
+    (symlinks, `..` segments) coalesce onto the same lock."""
+    try:
+        key = os.path.realpath(str(path))
+    except OSError:
+        key = os.path.abspath(str(path))
     with _path_write_locks_mu:
         lock = _path_write_locks.get(key)
         if lock is None:
@@ -127,10 +133,99 @@ def _path_write_lock(path: Path) -> _threading.Lock:
     return lock
 
 
+_HARDENED_ATOMIC_WRITE_OK = (
+    hasattr(os, "O_NOFOLLOW")
+    and hasattr(os, "O_DIRECTORY")
+    and os.open in os.supports_dir_fd
+    and os.stat in os.supports_dir_fd
+    and os.rename in os.supports_dir_fd
+    and os.unlink in os.supports_dir_fd
+)
+
+
 def _atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> None:
-    """Atomically write `content` to `path` via temp + os.replace on the same fs."""
+    """Atomically write `content` to `path` with TOCTOU defenses.
+
+    Hardened path (Linux / modern POSIX):
+      - Opens the immediate parent with O_DIRECTORY|O_NOFOLLOW so a
+        parent-swap to a symlink after the caller's denylist check fails
+        with ELOOP.
+      - Creates the temp file via openat(dirfd, O_CREAT|O_EXCL|O_NOFOLLOW)
+        with mode 0600 — a final-component symlink cannot redirect our open.
+      - Rejects an existing target that is a symlink OR has st_nlink > 1
+        (hardlink-clobber defense).
+      - Renames via renameat(dirfd, dirfd) for atomic, relative-resolution-
+        safe swap.
+
+    Fallback (Windows or platforms without dir_fd / O_NOFOLLOW): the legacy
+    tempfile + os.replace path. Aliased/symlinked destinations are still
+    caught by the caller's `_reject_sensitive_path` check; this is a race
+    window, not a silent bypass.
+    """
     parent = path.parent
     parent.mkdir(parents=True, exist_ok=True)
+
+    if not _HARDENED_ATOMIC_WRITE_OK:
+        _atomic_write_text_legacy(path, content, encoding)
+        return
+
+    dir_flags = (
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        dirfd = os.open(str(parent), dir_flags)
+    except OSError as e:
+        raise OSError(f"refused to write {path}: parent dir unsafe ({e})") from e
+
+    try:
+        target_name = path.name
+
+        # Hardlink / symlink clobber check on existing target.
+        try:
+            st = os.stat(target_name, dir_fd=dirfd, follow_symlinks=False)
+        except FileNotFoundError:
+            st = None
+        if st is not None:
+            if _stat_mod.S_ISLNK(st.st_mode):
+                raise OSError(f"refused to write {path}: target is a symlink")
+            if st.st_nlink > 1:
+                raise OSError(
+                    f"refused to write {path}: target has st_nlink={st.st_nlink} "
+                    "(hardlink clobber risk)"
+                )
+
+        tmp_name = f".{target_name}.{os.getpid()}.{_threading.get_ident()}.tmp"
+        try:
+            os.unlink(tmp_name, dir_fd=dirfd)
+        except FileNotFoundError:
+            pass
+
+        file_flags = (
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        tmp_fd = os.open(tmp_name, file_flags, 0o600, dir_fd=dirfd)
+        try:
+            data = content.encode(encoding)
+            with os.fdopen(tmp_fd, "wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            os.rename(tmp_name, target_name, src_dir_fd=dirfd, dst_dir_fd=dirfd)
+        except Exception:
+            try:
+                os.unlink(tmp_name, dir_fd=dirfd)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(dirfd)
+
+
+def _atomic_write_text_legacy(path: Path, content: str, encoding: str = "utf-8") -> None:
+    """Fallback for platforms without dir_fd / O_NOFOLLOW support."""
+    parent = path.parent
     tmp = tempfile.NamedTemporaryFile(
         mode="w",
         encoding=encoding,
