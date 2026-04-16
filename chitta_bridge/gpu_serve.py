@@ -21,7 +21,9 @@ import argparse
 import glob
 import json
 import os
+import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -35,7 +37,24 @@ DEFAULT_GRES = "gpu:1"
 DEFAULT_MEM = "48G"
 DEFAULT_TIME = "08:00:00"
 URL_FILE_PATTERN = "/tmp/ollama-server-{model}.url"
+PID_FILE_PATTERN = "/tmp/ollama-local-{model}.pid"
+LOG_FILE_PATTERN = "/tmp/ollama-local-{model}.log"
 JOB_NAME_PATTERN = "ollama-{model}"
+
+
+def _pid_file(model: str) -> Path:
+    return Path(PID_FILE_PATTERN.format(model=model))
+
+
+def _log_file(model: str) -> Path:
+    return Path(LOG_FILE_PATTERN.format(model=model))
+
+
+def _pid_cmdline(pid: int) -> str:
+    try:
+        return Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="ignore")
+    except OSError:
+        return ""
 
 
 def _url_file(model: str) -> Path:
@@ -195,7 +214,11 @@ def _start_local(args, model: str, port: int, url_file: Path, ollama: str):
             print(f"# Models: {', '.join(models)}", file=sys.stderr)
         if model not in (models or []):
             print(f"# Pulling {model}...", file=sys.stderr)
-            subprocess.run([ollama, "pull", model], stderr=subprocess.DEVNULL)
+            subprocess.run(
+                [ollama, "pull", model],
+                env={**os.environ, "OLLAMA_HOST": f"127.0.0.1:{port}"},
+                stderr=subprocess.DEVNULL,
+            )
         url_file.write_text(local_url)
         _print_exports("localhost", port, model)
         return
@@ -204,13 +227,17 @@ def _start_local(args, model: str, port: int, url_file: Path, ollama: str):
     print("# Starting Ollama locally (no SLURM detected)...", file=sys.stderr)
     env = os.environ.copy()
     env["OLLAMA_HOST"] = f"0.0.0.0:{port}"
-    subprocess.Popen(
-        [ollama, "serve"],
-        stdout=open(f"/tmp/ollama-local-{model}.log", "w"),
-        stderr=subprocess.STDOUT,
-        env=env,
-        start_new_session=True,
-    )
+    log_path = _log_file(model)
+    pid_path = _pid_file(model)
+    with open(log_path, "w") as log_fh:
+        proc = subprocess.Popen(
+            [ollama, "serve"],
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            env=env,
+            start_new_session=True,
+        )
+    pid_path.write_text(str(proc.pid))
 
     # Wait for it to come up
     print("# Waiting for Ollama to be ready...", file=sys.stderr)
@@ -219,12 +246,15 @@ def _start_local(args, model: str, port: int, url_file: Path, ollama: str):
             break
         time.sleep(2)
     else:
-        print("# Ollama didn't start. Check /tmp/ollama-local-{model}.log", file=sys.stderr)
+        print(f"# Ollama didn't start. Check {log_path}", file=sys.stderr)
         sys.exit(1)
 
     # Pull model
     print(f"# Pulling {model}...", file=sys.stderr)
-    subprocess.run([ollama, "pull", model])
+    subprocess.run(
+        [ollama, "pull", model],
+        env={**os.environ, "OLLAMA_HOST": f"127.0.0.1:{port}"},
+    )
 
     url_file.write_text(local_url)
     print("# Ollama ready locally", file=sys.stderr)
@@ -235,14 +265,17 @@ def _start_slurm(args, model: str, port: int, job_name: str, url_file: Path, oll
     """Start Ollama on a SLURM GPU node."""
     print(f"# Submitting: {job_name} (model={model}, gres={args.gres}, mem={args.mem})", file=sys.stderr)
 
+    q_ollama = shlex.quote(ollama)
+    q_model = shlex.quote(model)
+    q_url_file = shlex.quote(str(url_file))
     wrap_script = f"""\
 export OLLAMA_HOST=0.0.0.0:{port}
 export OLLAMA_MODELS=${{OLLAMA_MODELS:-$HOME/.ollama/models}}
-{ollama} serve &
+{q_ollama} serve &
 SERVE_PID=$!
 sleep 5
-{ollama} pull {model} 2>&1 || true
-echo "http://$(hostname):{port}" > {url_file}
+{q_ollama} pull {q_model} 2>&1 || true
+echo "http://$(hostname):{port}" > {q_url_file}
 wait $SERVE_PID
 """
 
@@ -316,11 +349,22 @@ def cmd_stop(args):
 
     # Stop local ollama if no SLURM and it's running locally
     if not stopped and not shutil.which("sbatch"):
-        local_url = f"http://localhost:{DEFAULT_PORT}"
-        if _probe_ollama(local_url) is not None:
-            subprocess.run(["pkill", "-f", "ollama serve"], check=False)
-            print("Stopped local Ollama process.", file=sys.stderr)
-            stopped = True
+        pid_path = _pid_file(model)
+        if pid_path.is_file():
+            try:
+                pid = int(pid_path.read_text().strip())
+            except ValueError:
+                pid = None
+            if pid and "ollama" in _pid_cmdline(pid):
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                    print(f"Stopped local Ollama (pid={pid}).", file=sys.stderr)
+                    stopped = True
+                except ProcessLookupError:
+                    pass
+                except PermissionError as e:
+                    print(f"# Could not stop pid={pid}: {e}", file=sys.stderr)
+            pid_path.unlink(missing_ok=True)
 
     if not stopped:
         print(f"No running Ollama found for {model}.", file=sys.stderr)

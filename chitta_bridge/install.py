@@ -3,13 +3,26 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
+try:
+    import tomllib
+except ImportError:  # Python 3.10
+    import tomli as tomllib
+
 PLUGIN_NAME = "chitta-bridge"
 MARKETPLACE = "local"
+
+_MANAGED_BEGIN = f"# BEGIN {PLUGIN_NAME} (auto-managed, do not edit)"
+_MANAGED_END = f"# END {PLUGIN_NAME}"
+_MANAGED_RE = re.compile(
+    rf"\n?{re.escape(_MANAGED_BEGIN)}.*?{re.escape(_MANAGED_END)}\n?",
+    re.DOTALL,
+)
 
 
 # ── helpers ──────────────────────────────────────────────────────────
@@ -92,7 +105,6 @@ def _uninstall_claude_code():
 
 
 # ── Codex CLI ────────────────────────────────────────────────────────
-
 def _install_codex():
     source = _plugin_source_dir()
     if not source.is_dir():
@@ -117,21 +129,8 @@ def _install_codex():
     mcp_json = {"mcpServers": {"chitta-bridge": {"command": cb_path, "args": []}}}
     (dest / ".mcp.json").write_text(json.dumps(mcp_json, indent=2) + "\n")
 
-    # Enable plugin in config.toml
-    config = _codex_config()
-    config.parent.mkdir(parents=True, exist_ok=True)
-    config.touch(exist_ok=True)
-    text = config.read_text()
-
-    if "[features]" not in text:
-        text += "\n[features]\nplugins = true\n"
-    elif "plugins" not in text.split("[features]", 1)[1].split("\n[", 1)[0]:
-        text = text.replace("[features]", "[features]\nplugins = true")
-
-    if "chitta-bridge@local" not in text:
-        text += f'\n[plugins."{PLUGIN_NAME}@{MARKETPLACE}"]\nenabled = true\n'
-
-    config.write_text(text)
+    if not _enable_codex_config():
+        return False
 
     print(f"  Codex: installed to {dest}")
     print(f"  Codex: MCP server → {cb_path}")
@@ -139,6 +138,79 @@ def _install_codex():
     return True
 
 
+def _enable_codex_config() -> bool:
+    """Enable plugins feature + register chitta-bridge in config.toml.
+
+    Strategy: parse existing TOML, detect current state, append a
+    sentinel-wrapped managed block only with the keys that are missing.
+    Refuse to modify if the user already has a conflicting [features]
+    table without plugins=true (asks them to flip it manually to avoid
+    corrupting TOML).
+    """
+    config = _codex_config()
+    config.parent.mkdir(parents=True, exist_ok=True)
+    if not config.is_file():
+        config.write_text("")
+
+    raw = config.read_text()
+    # Drop any stale managed block before re-parsing so our own additions
+    # from prior installs don't count as pre-existing state.
+    stripped = _MANAGED_RE.sub("\n", raw)
+
+    try:
+        data = tomllib.loads(stripped)
+    except tomllib.TOMLDecodeError as e:
+        print(f"  Codex: config.toml is not valid TOML ({e}); skipping")
+        return False
+
+    plugin_key = f'{PLUGIN_NAME}@{MARKETPLACE}'
+    features = data.get("features", {})
+    plugins = data.get("plugins", {})
+
+    need_features = features.get("plugins") is not True
+    has_features_table = isinstance(features, dict) and "features" in _top_level_tables(stripped)
+    need_plugin_entry = plugin_key not in plugins
+
+    if not need_features and not need_plugin_entry:
+        # Already enabled and registered; make sure there's no stale block.
+        if raw != stripped:
+            config.write_text(stripped.rstrip() + "\n")
+        return True
+
+    if need_features and has_features_table:
+        print(
+            "  Codex: [features] table already exists without plugins=true; "
+            "please add 'plugins = true' manually."
+        )
+        if need_plugin_entry:
+            return False
+        need_features = False
+
+    block_lines = [_MANAGED_BEGIN]
+    if need_features:
+        block_lines.append("features.plugins = true")
+    if need_plugin_entry:
+        block_lines.append(f'[plugins."{plugin_key}"]')
+        block_lines.append("enabled = true")
+    block_lines.append(_MANAGED_END)
+
+    base = stripped.rstrip()
+    sep = "\n\n" if base else ""
+    new_text = base + sep + "\n".join(block_lines) + "\n"
+    config.write_text(new_text)
+    return True
+
+
+def _top_level_tables(text: str) -> set[str]:
+    """Return the set of top-level table names explicitly declared in TOML."""
+    names: set[str] = set()
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and not stripped.startswith("[["):
+            inner = stripped[1:].split("]", 1)[0].strip()
+            if inner and "." not in inner and '"' not in inner and "'" not in inner:
+                names.add(inner)
+    return names
 def _uninstall_codex():
     dest = _plugin_dir()
     if dest.is_dir():
@@ -149,27 +221,12 @@ def _uninstall_codex():
 
     config = _codex_config()
     if config.is_file():
-        text = config.read_text()
-        if "chitta-bridge@local" in text:
-            # Remove the plugin section
-            lines = text.split("\n")
-            out, skip = [], False
-            for line in lines:
-                if f'plugins."{PLUGIN_NAME}@{MARKETPLACE}"' in line:
-                    skip = True
-                    continue
-                if skip and (line.startswith("[") or not line.strip()):
-                    if not line.strip():
-                        continue
-                    skip = False
-                if skip:
-                    continue
-                out.append(line)
-            config.write_text("\n".join(out))
-            print("  Codex: removed config entry")
+        raw = config.read_text()
+        cleaned = _MANAGED_RE.sub("\n", raw)
+        if cleaned != raw:
+            config.write_text(cleaned.rstrip() + "\n")
+            print("  Codex: removed managed config block")
     return True
-
-
 # ── CLI ──────────────────────────────────────────────────────────────
 
 TARGETS = {

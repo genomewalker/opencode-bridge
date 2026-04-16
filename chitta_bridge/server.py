@@ -21,10 +21,12 @@ import os
 import re
 import sys
 import json
+import signal as _signal
 import asyncio
 import shutil
 import socket
 import tempfile
+import threading as _threading
 import glob as _glob
 import html as _html
 import urllib.request
@@ -52,6 +54,181 @@ def _sanitize_session_id(session_id: str) -> str:
     if not _SAFE_ID_RE.fullmatch(session_id):
         raise ValueError("Invalid session ID: must be alphanumeric, hyphens, underscores only")
     return session_id
+
+
+# ── Path-safety denylist (shared by file/symbol patch + write/edit tools) ──────
+
+_SENSITIVE_SYSTEM_PREFIXES = (
+    "/etc", "/boot", "/sys", "/proc", "/usr", "/dev", "/root",
+)
+_SENSITIVE_HOME_DIRS = frozenset({
+    ".ssh", ".aws", ".gnupg", ".config", ".kube", ".docker",
+})
+_SENSITIVE_HOME_FILES = frozenset({
+    ".gitconfig", ".netrc", ".git-credentials", ".pypirc", ".npmrc",
+})
+_CREDENTIAL_BASENAMES = frozenset({
+    "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
+})
+
+
+def _reject_sensitive_path(path: Path) -> Optional[str]:
+    """Return a block message if writing `path` is forbidden, else None.
+
+    Blocks system dirs (/etc, /boot, /sys, /proc, /usr, /dev, /root),
+    most of /var (except /var/tmp), and credential/config locations under
+    the user's home: ~/.ssh, ~/.aws, ~/.gnupg, ~/.config, ~/.kube, ~/.docker,
+    ~/.gitconfig, ~/.netrc, ~/.npmrc, ~/.pypirc, ~/.git-credentials,
+    plus any file whose basename starts with "credential" or matches a
+    known SSH private-key name.
+    """
+    try:
+        resolved = path.expanduser().resolve()
+    except OSError:
+        return f"(blocked: cannot resolve path — {path})"
+    s = str(resolved)
+
+    for prefix in _SENSITIVE_SYSTEM_PREFIXES:
+        if s == prefix or s.startswith(prefix + "/"):
+            return f"(blocked: system path — {resolved})"
+
+    if s.startswith("/var/") and not s.startswith("/var/tmp/") and s != "/var/tmp":
+        return f"(blocked: system path — {resolved})"
+
+    home = str(Path.home())
+    if s == home or s.startswith(home + "/"):
+        rel = s[len(home):].lstrip("/")
+        first = rel.split("/", 1)[0] if rel else ""
+        if first in _SENSITIVE_HOME_DIRS:
+            return f"(blocked: sensitive home dir — {resolved})"
+        if first in _SENSITIVE_HOME_FILES:
+            return f"(blocked: sensitive config file — {resolved})"
+
+    name = resolved.name.lower()
+    if name.startswith("credential") or name in _CREDENTIAL_BASENAMES:
+        return f"(blocked: credential file — {resolved})"
+
+    return None
+
+
+# ── Atomic write + per-path locks (concurrent patch/write safety) ──────────────
+
+_path_write_locks: dict[str, _threading.Lock] = {}
+_path_write_locks_mu = _threading.Lock()
+
+
+def _path_write_lock(path: Path) -> _threading.Lock:
+    key = str(path)
+    with _path_write_locks_mu:
+        lock = _path_write_locks.get(key)
+        if lock is None:
+            lock = _threading.Lock()
+            _path_write_locks[key] = lock
+    return lock
+
+
+def _atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> None:
+    """Atomically write `content` to `path` via temp + os.replace on the same fs."""
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding=encoding,
+        dir=str(parent),
+        prefix="." + path.name + ".",
+        suffix=".tmp",
+        delete=False,
+    )
+    try:
+        tmp.write(content)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        tmp.close()
+        os.replace(tmp.name, path)
+    except Exception:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+        raise
+
+
+# ── Subprocess process-group termination (shell grandchildren safety) ──────────
+
+
+def _sync_kill_group(proc) -> None:
+    """SIGKILL a subprocess and its process group. Drop-in for ``proc.kill()``.
+
+    Requires the process was spawned with ``start_new_session=True``; without
+    that, the group contains only ``proc`` itself and this degrades cleanly
+    to the single-process kill.
+    """
+    if proc is None or getattr(proc, "returncode", None) is not None:
+        return
+    pid = getattr(proc, "pid", None)
+    if pid is None:
+        return
+    try:
+        pgid = os.getpgid(pid)
+    except (ProcessLookupError, OSError):
+        pgid = None
+    if pgid is not None:
+        try:
+            os.killpg(pgid, _signal.SIGKILL)
+            return
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    try:
+        proc.kill()
+    except (ProcessLookupError, OSError):
+        pass
+
+
+# ── Secret-denylist environment scrub (subprocess credential exposure) ────────
+
+_SECRET_EXACT = frozenset({
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+    "OPENAI_API_KEY", "OPENAI_ORG_ID",
+    "GITHUB_TOKEN", "GH_TOKEN", "GITHUB_OAUTH",
+    "HUGGINGFACE_TOKEN", "HF_TOKEN",
+    "NPM_TOKEN", "PYPI_TOKEN", "TWINE_PASSWORD",
+    "SLACK_TOKEN", "DISCORD_TOKEN",
+    "CLOUDFLARE_API_TOKEN", "CLOUDFLARE_API_KEY",
+    "DIGITALOCEAN_TOKEN",
+    "GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS",
+    "DOCKER_PASSWORD", "DOCKER_AUTH_TOKEN",
+})
+_SECRET_PREFIXES = (
+    "AWS_", "AZURE_", "GCP_",
+)
+_SECRET_SUFFIXES = (
+    "_TOKEN", "_API_KEY", "_APIKEY", "_SECRET", "_PASSWORD",
+    "_PASSWD", "_CREDENTIALS", "_CREDS", "_PRIVATE_KEY",
+    "_ACCESS_KEY", "_ACCESS_TOKEN", "_AUTH", "_AUTH_TOKEN",
+    "_SESSION_TOKEN",
+)
+
+
+def _scrub_env(env: Optional[dict] = None) -> dict:
+    """Return a copy of `env` (default: os.environ) with likely secrets dropped.
+
+    Drops exact matches in `_SECRET_EXACT`, keys starting with
+    `AWS_|AZURE_|GCP_`, and keys ending with secret-ish suffixes. Keeps
+    safe operational vars (PATH, HOME, USER, LANG, TERM, TMPDIR, CONDA_*,
+    SLURM_*, OLLAMA_*) so tools that depend on them still work.
+    """
+    src = env if env is not None else os.environ
+    out = {}
+    for k, v in src.items():
+        ku = k.upper()
+        if ku in _SECRET_EXACT:
+            continue
+        if any(ku.startswith(p) for p in _SECRET_PREFIXES):
+            continue
+        if any(ku.endswith(s) for s in _SECRET_SUFFIXES):
+            continue
+        out[k] = v
+    return out
 
 
 # File size thresholds
@@ -170,39 +347,44 @@ def _infer_backend(participant_name: str, model: Optional[str] = None) -> str:
         f"{f' (model={model!r})' if model else ''}. "
         "Set backend explicitly to one of: claude, opencode, codex, local"
     )
-
-
 def _apply_file_patch(filepath: str, old_str: str, new_str: str) -> str:
     """Apply a search-replace patch. Returns compact diff summary on success."""
-    p = Path(filepath).resolve()
+    p = Path(filepath).expanduser().resolve()
     if not p.is_file():
         return f"Error: file not found: {filepath}"
-    try:
-        content = p.read_text(encoding="utf-8")
-    except OSError as e:
-        return f"Error reading {p.name}: {e}"
+    blocked = _reject_sensitive_path(p)
+    if blocked:
+        return f"Error: {blocked}"
 
-    count = content.count(old_str)
-    if count == 0:
-        preview = old_str[:80].replace('\n', '↵')
-        return f"Error: old_str not found in {p.name}\nSearched for: {preview!r}"
-    if count > 1:
-        return f"Error: old_str matches {count} locations in {p.name} — make it more specific"
+    with _path_write_lock(p):
+        try:
+            pre_mtime = p.stat().st_mtime_ns
+            content = p.read_text(encoding="utf-8")
+        except OSError as e:
+            return f"Error reading {p.name}: {e}"
 
-    line_num = content[:content.index(old_str)].count('\n') + 1
-    old_lines = old_str.count('\n') + 1
-    new_lines = new_str.count('\n') + (1 if new_str else 0)
-    delta = new_lines - old_lines
+        count = content.count(old_str)
+        if count == 0:
+            preview = old_str[:80].replace('\n', '↵')
+            return f"Error: old_str not found in {p.name}\nSearched for: {preview!r}"
+        if count > 1:
+            return f"Error: old_str matches {count} locations in {p.name} — make it more specific"
 
-    try:
-        p.write_text(content.replace(old_str, new_str, 1), encoding="utf-8")
-    except OSError as e:
-        return f"Error writing {p.name}: {e}"
+        line_num = content[:content.index(old_str)].count('\n') + 1
+        old_lines = old_str.count('\n') + 1
+        new_lines = new_str.count('\n') + (1 if new_str else 0)
+        delta = new_lines - old_lines
+
+        try:
+            cur_mtime = p.stat().st_mtime_ns
+            if cur_mtime != pre_mtime:
+                return f"Error: {p.name} changed on disk since read — retry"
+            _atomic_write_text(p, content.replace(old_str, new_str, 1))
+        except OSError as e:
+            return f"Error writing {p.name}: {e}"
 
     sign = "+" if delta >= 0 else ""
     return f"✓ {p.name} patched @ L{line_num} (+{new_lines}/-{old_lines} lines, net {sign}{delta})"
-
-
 def _find_symbol_range(content: str, symbol: str, ext: str):
     """Return (start, end) byte range of a named symbol. Returns None if not found."""
     import re
@@ -260,39 +442,44 @@ def _find_symbol_range(content: str, symbol: str, ext: str):
                                 return idx, end
                 idx = content.find(needle, idx + 1)
     return None
-
-
 def _apply_symbol_patch(filepath: str, symbol: str, new_body: str) -> str:
     """Replace a named function/class/method. No old_str needed — finds by name."""
-    p = Path(filepath).resolve()
+    p = Path(filepath).expanduser().resolve()
     if not p.is_file():
         return f"Error: file not found: {filepath}"
-    try:
-        content = p.read_text(encoding="utf-8")
-    except OSError as e:
-        return f"Error reading {p.name}: {e}"
+    blocked = _reject_sensitive_path(p)
+    if blocked:
+        return f"Error: {blocked}"
 
-    ext = p.suffix.lower()
-    result = _find_symbol_range(content, symbol, ext)
-    if result is None:
-        return f"Error: symbol '{symbol}' not found in {p.name}"
+    with _path_write_lock(p):
+        try:
+            pre_mtime = p.stat().st_mtime_ns
+            content = p.read_text(encoding="utf-8")
+        except OSError as e:
+            return f"Error reading {p.name}: {e}"
 
-    start, end = result
-    line_num = content[:start].count('\n') + 1
-    old_lines = content[start:end].count('\n') + 1
-    body = new_body if new_body.endswith('\n') else new_body + '\n'
-    new_lines = body.count('\n')
-    delta = new_lines - old_lines
+        ext = p.suffix.lower()
+        result = _find_symbol_range(content, symbol, ext)
+        if result is None:
+            return f"Error: symbol '{symbol}' not found in {p.name}"
 
-    try:
-        p.write_text(content[:start] + body + content[end:], encoding="utf-8")
-    except OSError as e:
-        return f"Error writing {p.name}: {e}"
+        start, end = result
+        line_num = content[:start].count('\n') + 1
+        old_lines = content[start:end].count('\n') + 1
+        body = new_body if new_body.endswith('\n') else new_body + '\n'
+        new_lines = body.count('\n')
+        delta = new_lines - old_lines
+
+        try:
+            cur_mtime = p.stat().st_mtime_ns
+            if cur_mtime != pre_mtime:
+                return f"Error: {p.name} changed on disk since read — retry"
+            _atomic_write_text(p, content[:start] + body + content[end:])
+        except OSError as e:
+            return f"Error writing {p.name}: {e}"
 
     sign = "+" if delta >= 0 else ""
     return f"✓ {p.name}::{symbol} patched @ L{line_num} (+{new_lines}/-{old_lines} lines, net {sign}{delta})"
-
-
 def get_file_info(filepath: str) -> dict:
     """Get metadata about a file: size, lines, language, etc. Results are cached per path."""
     filepath = str(Path(filepath).resolve())
@@ -805,7 +992,8 @@ class Config:
             "codex_model": self.codex_model,
             "codex_sandbox": self.codex_sandbox,
         }
-        config_path.write_text(json.dumps(data, indent=2))
+        with _path_write_lock(config_path):
+            _atomic_write_text(config_path, json.dumps(data, indent=2))
 
 
 def find_opencode() -> Optional[Path]:
@@ -970,7 +1158,8 @@ class Session:
             "created": self.created,
             "messages": [asdict(m) for m in self.messages]
         }
-        path.write_text(json.dumps(data, indent=2))
+        with _path_write_lock(path):
+            _atomic_write_text(path, json.dumps(data, indent=2))
 
     @classmethod
     def load(cls, path: Path) -> "Session":
@@ -1017,7 +1206,8 @@ class CodexSession:
             "created": self.created,
             "messages": [asdict(m) for m in self.messages]
         }
-        path.write_text(json.dumps(data, indent=2))
+        with _path_write_lock(path):
+            _atomic_write_text(path, json.dumps(data, indent=2))
 
     @classmethod
     def load(cls, path: Path) -> "CodexSession":
@@ -1055,7 +1245,8 @@ class CodexJob:
     codex_session_id: Optional[str] = None
 
     def save(self, path: Path):
-        path.write_text(json.dumps(asdict(self), indent=2))
+        with _path_write_lock(path):
+            _atomic_write_text(path, json.dumps(asdict(self), indent=2))
 
     @classmethod
     def load(cls, path: Path) -> "CodexJob":
@@ -1104,7 +1295,8 @@ class OpenCodeBridge:
                 str(OPENCODE_BIN), *args,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
             )
             proc.stdin.close()
 
@@ -1121,7 +1313,7 @@ class OpenCodeBridge:
             while True:
                 remaining = deadline - asyncio.get_event_loop().time()
                 if remaining <= 0:
-                    proc.kill()
+                    _sync_kill_group(proc)
                     await proc.wait()
                     stderr_task.cancel()
                     return f"Timed out after {timeout}s", 1
@@ -1132,7 +1324,7 @@ class OpenCodeBridge:
                         timeout=read_timeout
                     )
                 except asyncio.TimeoutError:
-                    proc.kill()
+                    _sync_kill_group(proc)
                     await proc.wait()
                     stderr_task.cancel()
                     return f"Model stalled — no output for {stall_timeout}s", 1
@@ -1159,14 +1351,14 @@ class OpenCodeBridge:
             return output, proc.returncode or 0
         except asyncio.TimeoutError:
             if proc:
-                proc.kill()
+                _sync_kill_group(proc)
                 await proc.wait()
             if stderr_task and not stderr_task.done():
                 stderr_task.cancel()
             return f"Command timed out after {timeout}s", 1
         except Exception as e:
             if proc:
-                proc.kill()
+                _sync_kill_group(proc)
                 await proc.wait()
             if stderr_task and not stderr_task.done():
                 stderr_task.cancel()
@@ -2005,7 +2197,8 @@ class CodexBridge:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=cwd
+                cwd=cwd,
+                start_new_session=True,
             )
             proc.stdin.close()
 
@@ -2019,7 +2212,7 @@ class CodexBridge:
             while True:
                 remaining = deadline - asyncio.get_event_loop().time()
                 if remaining <= 0:
-                    proc.kill()
+                    _sync_kill_group(proc)
                     await proc.wait()
                     stderr_task.cancel()
                     return f"Timed out after {timeout}s", 1
@@ -2030,7 +2223,7 @@ class CodexBridge:
                         timeout=read_timeout
                     )
                 except asyncio.TimeoutError:
-                    proc.kill()
+                    _sync_kill_group(proc)
                     await proc.wait()
                     stderr_task.cancel()
                     return f"Model stalled — no output for {stall_timeout}s", 1
@@ -2055,14 +2248,14 @@ class CodexBridge:
             return output, proc.returncode or 0
         except asyncio.TimeoutError:
             if proc:
-                proc.kill()
+                _sync_kill_group(proc)
                 await proc.wait()
             if stderr_task and not stderr_task.done():
                 stderr_task.cancel()
             return "Command timed out", 1
         except Exception as e:
             if proc:
-                proc.kill()
+                _sync_kill_group(proc)
                 await proc.wait()
             if stderr_task and not stderr_task.done():
                 stderr_task.cancel()
@@ -2087,7 +2280,8 @@ class CodexBridge:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=cwd
+                cwd=cwd,
+                start_new_session=True,
             )
             proc.stdin.write(stdin_data.encode())
             await proc.stdin.drain()
@@ -2101,7 +2295,7 @@ class CodexBridge:
             while True:
                 remaining = deadline - asyncio.get_event_loop().time()
                 if remaining <= 0:
-                    proc.kill()
+                    _sync_kill_group(proc)
                     await proc.wait()
                     stderr_task.cancel()
                     return f"Timed out after {timeout}s", 1
@@ -2109,7 +2303,7 @@ class CodexBridge:
                 try:
                     line = await asyncio.wait_for(proc.stdout.readline(), timeout=read_timeout)
                 except asyncio.TimeoutError:
-                    proc.kill()
+                    _sync_kill_group(proc)
                     await proc.wait()
                     stderr_task.cancel()
                     return f"Model stalled — no output for {stall_timeout}s", 1
@@ -2132,14 +2326,14 @@ class CodexBridge:
             return out, 0
         except asyncio.CancelledError:
             if proc:
-                proc.kill()
+                _sync_kill_group(proc)
                 await proc.wait()
             if stderr_task and not stderr_task.done():
                 stderr_task.cancel()
             raise
         except Exception as e:
             if proc:
-                proc.kill()
+                _sync_kill_group(proc)
                 await proc.wait()
             if stderr_task and not stderr_task.done():
                 stderr_task.cancel()
@@ -2209,6 +2403,7 @@ class CodexBridge:
         full_auto: bool = True,
         working_dir: Optional[str] = None
     ) -> str:
+        session_id = _sanitize_session_id(session_id)
         model = model or self.config.codex_model
         sandbox = sandbox or self.config.codex_sandbox
 
@@ -2316,7 +2511,8 @@ Set via:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=session.working_dir
+                cwd=session.working_dir,
+                start_new_session=True,
             )
             proc.stdin.write(message.encode())
             await proc.stdin.drain()
@@ -2333,7 +2529,7 @@ Set via:
             while True:
                 remaining = deadline - asyncio.get_event_loop().time()
                 if remaining <= 0:
-                    proc.kill()
+                    _sync_kill_group(proc)
                     await proc.wait()
                     stderr_task.cancel()
                     return "Timed out after 300s"
@@ -2344,7 +2540,7 @@ Set via:
                         timeout=read_timeout
                     )
                 except asyncio.TimeoutError:
-                    proc.kill()
+                    _sync_kill_group(proc)
                     await proc.wait()
                     stderr_task.cancel()
                     return f"Model stalled — no output for {stall_timeout}s"
@@ -2366,14 +2562,14 @@ Set via:
                 return f"Error: {err or output}"
         except asyncio.TimeoutError:
             if proc:
-                proc.kill()
+                _sync_kill_group(proc)
                 await proc.wait()
             if stderr_task and not stderr_task.done():
                 stderr_task.cancel()
             return "Command timed out"
         except Exception as e:
             if proc:
-                proc.kill()
+                _sync_kill_group(proc)
                 await proc.wait()
             if stderr_task and not stderr_task.done():
                 stderr_task.cancel()
@@ -4458,7 +4654,6 @@ class RoomManager:
             return header + "\n" + "\n".join(numbered)
         except Exception as e:
             return f"(read error: {e})"
-
     def _tool_write_file(self, args: dict, participant_name: str = "") -> str:
         """Write a file. Beats Claude Code's Write:
         CC: overwrites without checking if file was read, no backup.
@@ -4468,17 +4663,9 @@ class RoomManager:
         """
         path = Path(args.get("path", "")).expanduser().resolve()
         content = args.get("content", "")
-        str_path = str(path)
-        blocked_prefixes = ("/proc", "/sys", "/dev", "/etc")
-        blocked_dotpaths = (
-            "/.ssh/", "/.gnupg/", "/.aws/", "/.azure/", "/.gcloud/",
-            "/.config/gh/", "/.docker/config.json", "/.kube/config",
-            "/.netrc", "/.env", "/.npmrc",
-        )
-        if any(str_path.startswith(b) for b in blocked_prefixes):
-            return f"(blocked: cannot write to {path})"
-        if any(bp in str_path for bp in blocked_dotpaths):
-            return f"(blocked: sensitive path — {path})"
+        blocked = _reject_sensitive_path(path)
+        if blocked:
+            return blocked
 
         # Read-before-overwrite check
         key = participant_name or "_global"
@@ -4490,15 +4677,15 @@ class RoomManager:
             )
 
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            # Backup existing file
-            old_content = ""
-            if path.exists():
-                old_content = path.read_text(errors="replace")
-                bak = path.with_suffix(path.suffix + ".bak")
-                bak.write_text(old_content)
+            with _path_write_lock(path):
+                # Backup existing file
+                old_content = ""
+                if path.exists():
+                    old_content = path.read_text(errors="replace")
+                    bak = path.with_suffix(path.suffix + ".bak")
+                    _atomic_write_text(bak, old_content)
 
-            path.write_text(content)
+                _atomic_write_text(path, content)
             new_lines = len(content.splitlines())
 
             if old_content:
@@ -4513,7 +4700,7 @@ class RoomManager:
             return f"(created {path} — {len(content)} bytes, {new_lines} lines)"
         except Exception as e:
             return f"(write error: {e})"
-
+    @staticmethod
     @staticmethod
     def _tool_edit_file(args: dict) -> str:
         """Edit a file. Beats Claude Code's Edit:
@@ -4532,47 +4719,55 @@ class RoomManager:
             return "(old_string and new_string are identical)"
         if not path.exists():
             return f"(file not found: {path})"
+        blocked = _reject_sensitive_path(path)
+        if blocked:
+            return blocked
         try:
-            text = path.read_text(errors="replace")
-            count = text.count(old)
-            if count == 0:
-                # Help the model: show similar lines
-                old_first_line = old.splitlines()[0].strip() if old.strip() else old
-                lines = text.splitlines()
-                near = [
-                    f"  {i + 1}: {line.rstrip()}"
-                    for i, line in enumerate(lines)
-                    if old_first_line[:30] in line
-                ][:5]
-                hint = ""
-                if near:
-                    hint = "\nSimilar lines found:\n" + "\n".join(near)
-                return f"(old_string not found in {path}){hint}"
+            with _path_write_lock(path):
+                pre_mtime = path.stat().st_mtime_ns
+                text = path.read_text(errors="replace")
+                count = text.count(old)
+                if count == 0:
+                    # Help the model: show similar lines
+                    old_first_line = old.splitlines()[0].strip() if old.strip() else old
+                    lines = text.splitlines()
+                    near = [
+                        f"  {i + 1}: {line.rstrip()}"
+                        for i, line in enumerate(lines)
+                        if old_first_line[:30] in line
+                    ][:5]
+                    hint = ""
+                    if near:
+                        hint = "\nSimilar lines found:\n" + "\n".join(near)
+                    return f"(old_string not found in {path}){hint}"
 
-            if count > 1 and not replace_all:
-                # Show all match locations to help disambiguate
-                lines = text.splitlines()
-                old_first = old.splitlines()[0] if old.splitlines() else old
-                locations = [
-                    f"  line {i + 1}: {line.rstrip()}"
-                    for i, line in enumerate(lines)
-                    if old_first in line
-                ][:10]
-                return (
-                    f"(old_string matches {count} locations in {path} — "
-                    f"add surrounding context to make it unique, "
-                    f"or set replace_all=true)\n"
-                    + "\n".join(locations)
-                )
+                if count > 1 and not replace_all:
+                    # Show all match locations to help disambiguate
+                    lines = text.splitlines()
+                    old_first = old.splitlines()[0] if old.splitlines() else old
+                    locations = [
+                        f"  line {i + 1}: {line.rstrip()}"
+                        for i, line in enumerate(lines)
+                        if old_first in line
+                    ][:10]
+                    return (
+                        f"(old_string matches {count} locations in {path} — "
+                        f"add surrounding context to make it unique, "
+                        f"or set replace_all=true)\n"
+                        + "\n".join(locations)
+                    )
 
-            # Apply edit
-            if replace_all:
-                updated = text.replace(old, new)
-                replaced = count
-            else:
-                updated = text.replace(old, new, 1)
-                replaced = 1
-            path.write_text(updated)
+                # Apply edit (with mtime guard)
+                if replace_all:
+                    updated = text.replace(old, new)
+                    replaced = count
+                else:
+                    updated = text.replace(old, new, 1)
+                    replaced = 1
+
+                if path.stat().st_mtime_ns != pre_mtime:
+                    return f"({path} changed on disk since read — retry)"
+                _atomic_write_text(path, updated)
 
             # Show unified diff of the change
             old_lines = old.splitlines(keepends=True)
@@ -4594,7 +4789,6 @@ class RoomManager:
             )
         except Exception as e:
             return f"(edit error: {e})"
-
     @staticmethod
     def _tool_glob(args: dict) -> str:
         """Find files. Beats Claude Code's Glob:
@@ -4693,6 +4887,7 @@ class RoomManager:
             proc = await asyncio.wait_for(
                 asyncio.create_subprocess_exec(
                     *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                    start_new_session=True,
                 ),
                 timeout=15,
             )
@@ -4867,25 +5062,17 @@ class RoomManager:
 
         # ── Build subprocess ──────────────────────────────────────────
         import shutil
-        env = os.environ.copy()
+        env = _scrub_env(os.environ)
         env["PATH"] = "/usr/local/bin:/usr/bin:/bin"
 
         use_unshare = shutil.which("unshare") is not None
         if use_unshare:
             shell_cmd = ["unshare", "--net", "--", "bash", "-c", command]
         else:
-            # Fail-closed: without network isolation, only allow safe commands
-            safe_prefixes = (
-                "ls", "cat", "head", "tail", "wc", "sort", "uniq", "cut",
-                "grep", "find", "file", "stat", "du", "df", "echo", "printf",
-                "pwd", "date", "whoami", "uname", "which", "env", "id",
-                "diff", "md5sum", "sha256sum", "tr", "sed", "awk",
-                "python", "python3", "pip", "rg", "fd", "jq",
-            )
-            first_cmd = tokens[0] if tokens else ""
-            base_cmd = os.path.basename(first_cmd)
-            if base_cmd not in safe_prefixes:
-                return f"(blocked: '{base_cmd}' not allowed without network isolation — unshare not available)"
+            # No network isolation available — run unsandboxed. The structural
+            # safety checks above (privilege, rm -rf /, fork bomb, encoding
+            # bypasses) still apply, but the command has full network access
+            # and inherits the scrubbed but otherwise normal environment.
             shell_cmd = ["bash", "-c", command]
 
         # ── Background execution ──────────────────────────────────────
@@ -4896,6 +5083,7 @@ class RoomManager:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     env=env, cwd=cwd,
+                    start_new_session=True,
                 )
                 from datetime import datetime
                 task_id = f"bg-{proc.pid}"
@@ -4916,6 +5104,7 @@ class RoomManager:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     env=env, cwd=cwd,
+                    start_new_session=True,
                 ),
                 timeout=5,
             )
@@ -4923,7 +5112,7 @@ class RoomManager:
                 stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             except asyncio.TimeoutError:
                 try:
-                    proc.kill()
+                    _sync_kill_group(proc)
                     await proc.wait()
                 except ProcessLookupError:
                     pass
@@ -5077,6 +5266,7 @@ class RoomManager:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
             )
             proc.stdin.write(full_prompt.encode())
             await proc.stdin.drain()
@@ -5120,7 +5310,7 @@ class RoomManager:
         finally:
             if proc is not None:
                 try:
-                    proc.kill()
+                    _sync_kill_group(proc)
                     await asyncio.wait_for(proc.wait(), timeout=2)
                 except Exception:
                     pass
