@@ -2179,7 +2179,7 @@ class CodexBridge:
         if job.model:
             args.extend(["--model", job.model])
         if job.effort:
-            args.extend(["--effort", job.effort])
+            args.extend(["-c", f'model_reasoning_effort="{job.effort}"'])
         if job.sandbox:
             args.extend(["--sandbox", job.sandbox])
         args.extend(["--full-auto", "--json", "-"])
@@ -2500,7 +2500,7 @@ Set via:
             if base:
                 args.extend(["--base", base])
             if effort:
-                args.extend(["--effort", effort])
+                args.extend(["-c", f'model_reasoning_effort="{effort}"'])
             if sandbox:
                 args.extend(["--sandbox", sandbox])
             if background:
@@ -2522,7 +2522,7 @@ Set via:
         if model:
             args.extend(["--model", model])
         if effort:
-            args.extend(["--effort", effort])
+            args.extend(["-c", f'model_reasoning_effort="{effort}"'])
         if sandbox:
             args.extend(["--sandbox", sandbox])
             if full_auto:
