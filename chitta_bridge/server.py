@@ -42,6 +42,30 @@ from mcp.server import Server, InitializationOptions
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent, ServerCapabilities, ToolsCapability
 
+# MCP cancel-response suppression.
+# Default RequestResponder.cancel() sends ErrorData(code=0, "Request cancelled")
+# for the cancelled request id. Claude Code's stdio client already treats the
+# request as cancelled locally (code -32001) and, on receiving that late
+# response, logs "Received a response for an unknown message ID" and closes
+# the transport, killing the whole MCP subprocess. We cancel the scope +
+# mark completed WITHOUT emitting the duplicate response; our handlers
+# propagate CancelledError, and the SDK's respond() path is already guarded
+# by `if not self.cancelled`, so no response goes out either way.
+try:
+    from mcp.shared.session import RequestResponder as _RequestResponder
+
+    async def _cancel_without_response(self):
+        if not self._entered:
+            raise RuntimeError("RequestResponder must be used as a context manager")
+        if not self._cancel_scope:
+            raise RuntimeError("No active cancel scope")
+        self._cancel_scope.cancel()
+        self._completed = True
+
+    _RequestResponder.cancel = _cancel_without_response
+except Exception:
+    pass
+
 from chitta_bridge import __version__
 
 
@@ -1451,6 +1475,16 @@ class OpenCodeBridge:
             if stderr_task and not stderr_task.done():
                 stderr_task.cancel()
             return f"Command timed out after {timeout}s", 1
+        except asyncio.CancelledError:
+            if proc:
+                _sync_kill_group(proc)
+                try:
+                    await proc.wait()
+                except Exception:
+                    pass
+            if stderr_task and not stderr_task.done():
+                stderr_task.cancel()
+            raise
         except Exception as e:
             if proc:
                 _sync_kill_group(proc)
@@ -2348,6 +2382,16 @@ class CodexBridge:
             if stderr_task and not stderr_task.done():
                 stderr_task.cancel()
             return "Command timed out", 1
+        except asyncio.CancelledError:
+            if proc:
+                _sync_kill_group(proc)
+                try:
+                    await proc.wait()
+                except Exception:
+                    pass
+            if stderr_task and not stderr_task.done():
+                stderr_task.cancel()
+            raise
         except Exception as e:
             if proc:
                 _sync_kill_group(proc)
@@ -2662,6 +2706,16 @@ Set via:
             if stderr_task and not stderr_task.done():
                 stderr_task.cancel()
             return "Command timed out"
+        except asyncio.CancelledError:
+            if proc:
+                _sync_kill_group(proc)
+                try:
+                    await proc.wait()
+                except Exception:
+                    pass
+            if stderr_task and not stderr_task.done():
+                stderr_task.cancel()
+            raise
         except Exception as e:
             if proc:
                 _sync_kill_group(proc)
@@ -4073,6 +4127,16 @@ class DiscussionRoom:
     challenge_mode: bool = False
     files: list = field(default_factory=list)
 
+    def save(self, path: Path):
+        with _path_write_lock(path):
+            _atomic_write_text(path, json.dumps(asdict(self), indent=2))
+
+    @classmethod
+    def load(cls, path: Path) -> "DiscussionRoom":
+        data = json.loads(path.read_text())
+        valid = {f.name for f in dc_fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in valid})
+
 
 class RoomManager:
     """Manage discussion rooms and run async multi-agent conversations."""
@@ -4082,9 +4146,33 @@ class RoomManager:
         self.codex = codex_bridge
         self.local = local_bridge
         self.rooms: dict[str, DiscussionRoom] = {}
+        self.rooms_dir = Path.home() / ".chitta-bridge" / "rooms"
+        self.rooms_dir.mkdir(parents=True, exist_ok=True)
+        self._load_rooms()
+
+    def _load_rooms(self):
+        for path in self.rooms_dir.glob("*.json"):
+            try:
+                room = DiscussionRoom.load(path)
+                self.rooms[room.id] = room
+            except Exception as e:
+                print(f"Warning: skipping corrupted room {path.name}: {e}", file=sys.stderr)
+
+    def _room_path(self, room_id: str) -> Path:
+        return self.rooms_dir / f"{_sanitize_session_id(room_id)}.json"
+
+    def _save_room(self, room_id: str) -> None:
+        room = self.rooms.get(room_id)
+        if room is None:
+            return
+        try:
+            room.save(self._room_path(room_id))
+        except Exception as e:
+            print(f"Warning: failed to persist room {room_id}: {e}", file=sys.stderr)
 
     def create(self, room_id: str, topic: str, participants: list[dict],
                files: Optional[list[str]] = None) -> str:
+        _sanitize_session_id(room_id)
         if room_id in self.rooms:
             return f"Room '{room_id}' already exists."
         expanded = _expand_paths(files or [])
@@ -4102,6 +4190,7 @@ class RoomManager:
                         "ts": datetime.now().isoformat(),
                     })
         self.rooms[room_id] = room
+        self._save_room(room_id)
         names = ", ".join(p["name"] for p in participants)
         soul_tag = " (with soul context)" if len(room.messages) > 1 else ""
         return f"Room '{room_id}' created with {len(participants)} participants: {names}{soul_tag}"
@@ -4111,6 +4200,7 @@ class RoomManager:
             return f"Room '{room_id}' not found."
         room = self.rooms[room_id]
         room.participants.append(participant)
+        self._save_room(room_id)
         return f"Added '{participant['name']}' to room '{room_id}'. Now {len(room.participants)} participants."
 
     def read(self, room_id: str) -> str:
@@ -4191,6 +4281,7 @@ class RoomManager:
             reply = f"[synthesis error: {e}]"
 
         room.messages.append({"name": f"⟳ {synth_name}", "content": reply, "ts": datetime.now().isoformat()})
+        self._save_room(room_id)
         # Store synthesis back to soul memory
         if SoulClient.is_available():
             participants = ", ".join(p["name"] for p in room.participants)
@@ -5560,6 +5651,7 @@ class RoomManager:
                         "content": challenge_text,
                         "ts": datetime.now().isoformat(),
                     })
+                    self._save_room(room_id)
 
             # Filter participants who haven't hit their round limit
             active = []
@@ -5602,6 +5694,7 @@ class RoomManager:
 
             for resp in responses:
                 room.messages.append(resp)
+            self._save_room(room_id)
 
         return self.read(room_id)
 
@@ -6852,6 +6945,7 @@ async def call_tool(name: str, arguments: dict):
                     "content": prompt,
                     "ts": datetime.now().isoformat(),
                 })
+                rooms._save_room(rid)
             files_arg = arguments.get("files")
             if files_arg:
                 if isinstance(files_arg, str):
@@ -6860,6 +6954,7 @@ async def call_tool(name: str, arguments: dict):
                     expanded = _expand_paths(files_arg)
                     existing = set(rooms.rooms[rid].files or [])
                     rooms.rooms[rid].files = list(existing | set(expanded))
+                    rooms._save_room(rid)
             result = await rooms.run_rounds(
                 room_id=rid,
                 rounds=arguments.get("rounds", 2),
