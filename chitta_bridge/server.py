@@ -798,18 +798,44 @@ def build_message_prompt(message: str, file_paths: list[str]) -> str:
 # Companion System — Auto-Framing
 # ---------------------------------------------------------------------------
 
-
+# Hone candidate-2 prompt — optimized for haiku bug-fix tasks (+20pp on unseen challenges)
+# Source: github.com/twaldin/hone writeup/2026-04-18-haiku-20train-9holdout.md
+_HAIKU_CODING_PREAMBLE = (
+    "You are an AI coding agent fixing a bug in an open-source project.\n\n"
+    "Follow this process:\n\n"
+    "1. **Read ALL failing tests first.** Read test files completely. Run the suite — "
+    "note every failing case, not just the first. Group failures by type.\n\n"
+    "2. **Find the root cause.** Trace each failure to specific source lines. "
+    "Check if failures share a root cause or need separate fixes. Check git log if unclear.\n\n"
+    "3. **Fix root cause, not symptom.** Minimal change to pass failing tests without "
+    "breaking others. If the same error appears in multiple places, fix all of them.\n\n"
+    "4. **Handle edge cases.** Empty/null, special chars, numeric bounds, nested structures, "
+    "encoding, array notation, option flags. For configurable libraries, check option paths.\n\n"
+    "5. **Verify all tests pass.** Keep iterating until every originally-failing test passes "
+    "and no regressions. If some still fail, re-read them and revise.\n\n"
+    "6. **Persist through partial fixes.** Partial progress is not success. Check for "
+    "second locations needing the same fix.\n\n"
+    "Keep changes minimal. Do not refactor unrelated code or add new tests.\n\n"
+)
 def build_companion_prompt(
     message: str,
     files: Optional[list[str]] = None,
     domain_override: Optional[str] = None,
     is_followup: bool = False,
+    model: Optional[str] = None,
 ) -> str:
-    """Assemble a companion prompt that auto-detects the domain.
+    user_files = [f for f in (files or []) if not Path(f).name.startswith("opencode_msg_")]
 
-    The LLM identifies the domain and adopts an appropriate expert persona.
-    An optional *domain_override* hint biases the framing toward a specific field.
-    """
+    # Haiku: skip discussion scaffolding, inject bug-fix methodology
+    if model and "haiku" in model.lower():
+        parts = [_HAIKU_CODING_PREAMBLE]
+        if user_files:
+            file_context = build_file_context(user_files)
+            if file_context:
+                parts.extend(["## Context", file_context, ""])
+        parts.append(message)
+        return "\n".join(parts)
+
     # Follow-up: lightweight prompt
     if is_followup:
         return "\n".join([
@@ -823,8 +849,6 @@ def build_companion_prompt(
     # --- Full initial prompt ---
     parts = []
 
-    # File context
-    user_files = [f for f in (files or []) if not Path(f).name.startswith("opencode_msg_")]
     if user_files:
         file_context = build_file_context(user_files)
         if file_context:
@@ -832,7 +856,6 @@ def build_companion_prompt(
             parts.append(file_context)
             parts.append("")
 
-    # Domain hint
     domain_hint = ""
     if domain_override:
         domain_hint = (
@@ -883,22 +906,6 @@ def build_companion_prompt(
     parts.append("4. Open questions worth exploring")
 
     return "\n".join(parts)
-
-
-# ---------------------------------------------------------------------------
-# Chunked Processing — map-reduce for large files
-# ---------------------------------------------------------------------------
-
-# Regex for natural code boundaries (language-agnostic)
-_BOUNDARY_RE = re.compile(
-    r"^(?:\s*$"
-    r"|(?:(?:async )?def |class |(?:export )?(?:default )?function |func |fn |pub fn |impl |module |package )"
-    r"|(?:(?:export )?(?:const|let|var|interface|struct|enum|trait) )"
-    r"|(?:})\s*$"
-    r"|(?://|#|/\*|\*/).{0,80}$"
-    r")",
-    re.MULTILINE,
-)
 
 
 def chunk_file(
@@ -1851,7 +1858,7 @@ Set via:
                 is_followup = len(session.messages) > 1
                 run_prompt = build_companion_prompt(
                     message, files, domain_override=domain_override,
-                    is_followup=is_followup,
+                    is_followup=is_followup, model=session.model,
                 )
 
             args = ["run", run_prompt]
@@ -4197,13 +4204,28 @@ class RoomManager:
 
     def add_participant(self, room_id: str, participant: dict) -> str:
         if room_id not in self.rooms:
+            self._try_load_room(room_id)
+        if room_id not in self.rooms:
             return f"Room '{room_id}' not found."
         room = self.rooms[room_id]
         room.participants.append(participant)
         self._save_room(room_id)
         return f"Added '{participant['name']}' to room '{room_id}'. Now {len(room.participants)} participants."
 
+    def _try_load_room(self, room_id: str) -> bool:
+        """Load a room from disk into memory if not already present. Returns True if loaded."""
+        path = self._room_path(room_id)
+        if path.exists():
+            try:
+                self.rooms[room_id] = DiscussionRoom.load(path)
+                return True
+            except Exception as e:
+                print(f"Warning: failed to load room {room_id}: {e}", file=sys.stderr)
+        return False
+
     def read(self, room_id: str) -> str:
+        if room_id not in self.rooms:
+            self._try_load_room(room_id)
         if room_id not in self.rooms:
             return f"Room '{room_id}' not found."
         room = self.rooms[room_id]
@@ -4217,6 +4239,8 @@ class RoomManager:
 
     async def synthesize(self, room_id: str, synthesizer: Optional[dict] = None) -> str:
         """Run a final synthesis pass over the full transcript — distills all responses into one answer."""
+        if room_id not in self.rooms:
+            self._try_load_room(room_id)
         if room_id not in self.rooms:
             return f"Room '{room_id}' not found."
         room = self.rooms[room_id]
@@ -5628,6 +5652,8 @@ class RoomManager:
     async def run_rounds(self, room_id: str, rounds: int = 2,
                           challenge: bool = False) -> str:
         """Run N rounds of async discussion — all participants respond in parallel each round."""
+        if room_id not in self.rooms:
+            self._try_load_room(room_id)
         if room_id not in self.rooms:
             return f"Room '{room_id}' not found."
         room = self.rooms[room_id]
