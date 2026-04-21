@@ -198,6 +198,13 @@ def cmd_start(args):
     has_slurm = shutil.which("sbatch") is not None
 
     if has_slurm:
+        # Block if a job with this name is already queued or running
+        existing = [j for j in _find_jobs(model=model) if j["state"] in ("PENDING", "RUNNING")]
+        if existing:
+            j = existing[0]
+            print(f"# Job already active for {model}: {j['job_id']} ({j['state']})", file=sys.stderr)
+            print(f"# Cancel with: scancel {j['job_id']}", file=sys.stderr)
+            sys.exit(1)
         _start_slurm(args, model, port, job_name, url_file, ollama)
     else:
         _start_local(args, model, port, url_file, ollama)
