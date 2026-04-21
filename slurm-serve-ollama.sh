@@ -30,8 +30,8 @@ MODEL_SAFE="${MODEL//[\/:]/-}"
 URL_DIR="${CHITTA_BRIDGE_URL_DIR:-/maps/projects/caeg/scratch/kbd606/tmp}"
 URL_FILE="${URL_DIR}/ollama-server-${MODEL_SAFE}.url"
 
-# Abort if a job with this name is already queued or running
-EXISTING=$(squeue -u "$USER" -h -o "%i %T" --name="ollama-${MODEL_SAFE}" 2>/dev/null | head -1)
+# Abort if a job for this model is already queued or running (match on prefix, tolerates : vs - in name)
+EXISTING=$(squeue -u "$USER" -h -o "%i %j %T" 2>/dev/null | grep -i "ollama-${MODEL_SAFE}\|ollama-${MODEL}" | head -1)
 if [[ -n "$EXISTING" ]]; then
     echo "Job already active for model '${MODEL}': ${EXISTING}"
     echo "Cancel it first with: scancel <job_id>"
