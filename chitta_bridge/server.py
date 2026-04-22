@@ -682,12 +682,21 @@ def _apply_symbol_patch(filepath: str, symbol: str, new_body: str) -> str:
             return f"Error reading {p.name}: {e}"
 
         ext = p.suffix.lower()
-        result = _find_symbol_range(content, symbol, ext)
-        if result is None:
-            return f"Error: symbol '{symbol}' not found in {p.name}"
 
-        start, end = result
-        line_num = content[:start].count('\n') + 1
+        # Prefer chitta tree-sitter index; fall back to regex
+        ts_loc = SoulClient.find_symbol_location(str(p), symbol)
+        if ts_loc is not None:
+            ls, le = ts_loc
+            lines = content.splitlines(keepends=True)
+            start = sum(len(lines[i]) for i in range(ls - 1))
+            end = min(sum(len(lines[i]) for i in range(le)), len(content))
+            line_num = ls
+        else:
+            result = _find_symbol_range(content, symbol, ext)
+            if result is None:
+                return f"Error: symbol '{symbol}' not found in {p.name}"
+            start, end = result
+            line_num = content[:start].count('\n') + 1
         old_lines = content[start:end].count('\n') + 1
 
         original_body = content[start:end]
@@ -3768,6 +3777,60 @@ class SoulClient:
         if realm:
             args["realm"] = realm
         return cls._call("hybrid_recall", args)
+
+    @classmethod
+    def _call_json(cls, method: str, arguments: dict, timeout: float = 5.0) -> Optional[dict]:
+        """Like _call but returns the full structured result dict (not just text)."""
+        path = cls._socket_path()
+        if not os.path.exists(path):
+            return None
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            sock.connect(path)
+            req = json.dumps({
+                "jsonrpc": "2.0", "id": 1,
+                "method": "tools/call",
+                "params": {"name": method, "arguments": arguments},
+            })
+            sock.sendall((req + "\n").encode())
+            response = b""
+            while True:
+                chunk = sock.recv(8192)
+                if not chunk:
+                    break
+                response += chunk
+                if b"\n" in response:
+                    break
+            sock.close()
+            data = json.loads(response.decode().strip())
+            return data.get("result", {})
+        except Exception:
+            return None
+
+    @classmethod
+    def find_symbol_location(cls, filepath: str, symbol: str) -> Optional[tuple[int, int]]:
+        """Use chitta tree-sitter index to locate a symbol.
+
+        Returns (line_start, line_end) 1-based inclusive, or None if not found/unavailable.
+        """
+        result = cls._call_json("find_symbol", {"name": symbol})
+        if not result:
+            return None
+        symbols = result.get("symbols", [])
+        if not symbols:
+            return None
+        fp = str(Path(filepath).resolve())
+        for sym in symbols:
+            sym_file = str(Path(sym.get("file", "")).resolve())
+            if sym_file == fp and sym.get("name") == symbol:
+                return (int(sym["line_start"]), int(sym["line_end"]))
+        # Fallback: if only one candidate returned, use it regardless of path
+        # (handles cases where file path differs by symlink / relative form)
+        if len(symbols) == 1:
+            s = symbols[0]
+            return (int(s["line_start"]), int(s["line_end"]))
+        return None
 
     @classmethod
     def is_available(cls) -> bool:
