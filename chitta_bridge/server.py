@@ -561,8 +561,112 @@ def _find_symbol_range(content: str, symbol: str, ext: str):
                                 return idx, end
                 idx = content.find(needle, idx + 1)
     return None
+_DELTA_MARKERS = frozenset({
+    '# ... existing code ...',
+    '// ... existing code ...',
+    '# ...',
+    '// ...',
+})
+
+
+def _merge_delta(original_body: str, delta: str) -> str:
+    """Merge compact delta with `... existing code ...` markers into original_body.
+
+    Each marker is replaced with original lines bracketed by the surrounding
+    context anchors in the delta. Falls back to full replacement if no markers.
+
+    Chitta advantage over FastEdit: purely deterministic, no model, works in-process.
+    """
+    orig_lines = original_body.splitlines(keepends=True)
+    delta_lines = delta.splitlines(keepends=True)
+
+    marker_positions = [i for i, l in enumerate(delta_lines) if l.strip() in _DELTA_MARKERS]
+    if not marker_positions:
+        return delta  # No markers — full replacement (backward compat)
+
+    result: list[str] = []
+    orig_cursor = 0
+    delta_cursor = 0
+
+    for mi in marker_positions:
+        result.extend(delta_lines[delta_cursor:mi])
+
+        # Locate orig_start via longest-common-prefix match:
+        # Walk delta lines before the marker and advance orig_cursor
+        # for each line that matches the original. This handles the case
+        # where the pre-context introduces new constructs (try:, if ...) not
+        # yet in the original — we skip past lines that DO match (e.g. the
+        # function signature) and set orig_start to just after them.
+        before_delta = delta_lines[delta_cursor:mi]
+        orig_start = orig_cursor
+        for dl in before_delta:
+            if orig_start < len(orig_lines) and orig_lines[orig_start].strip() == dl.strip():
+                orig_start += 1
+
+        # Post-anchor: first non-empty delta line after marker (before next marker)
+        next_mi = (marker_positions[marker_positions.index(mi) + 1]
+                   if mi != marker_positions[-1] else len(delta_lines))
+        post_anchor = None
+        for j in range(mi + 1, next_mi):
+            s = delta_lines[j].strip()
+            if s:
+                post_anchor = s
+                break
+
+        # Locate orig_end: original line matching post_anchor
+        orig_end = len(orig_lines)
+        post_found = False
+        if post_anchor:
+            for j in range(orig_start, len(orig_lines)):
+                if orig_lines[j].strip() == post_anchor:
+                    orig_end = j
+                    post_found = True
+                    break
+
+        if not post_found:
+            # post_anchor missing from original (new code added after marker, or
+            # brace-language closing delimiter): trim original tail lines that
+            # also appear in the delta suffix to avoid duplicating braces/dedents.
+            delta_suffix = [l.strip() for l in delta_lines[mi + 1:next_mi] if l.strip()]
+            while orig_end > orig_start and delta_suffix:
+                if orig_lines[orig_end - 1].strip() == delta_suffix[-1]:
+                    orig_end -= 1
+                    delta_suffix.pop()
+                else:
+                    break
+
+        # Reindent preserved lines to match marker indentation
+        marker_indent = len(delta_lines[mi]) - len(delta_lines[mi].lstrip())
+        preserved = list(orig_lines[orig_start:orig_end])
+        if preserved:
+            non_empty = [l for l in preserved if l.strip()]
+            if non_empty:
+                orig_indent = len(non_empty[0]) - len(non_empty[0].lstrip())
+                diff = marker_indent - orig_indent
+                if diff != 0:
+                    adjusted = []
+                    for l in preserved:
+                        if l.strip():
+                            cur = len(l) - len(l.lstrip())
+                            adjusted.append(' ' * max(0, cur + diff) + l.lstrip())
+                        else:
+                            adjusted.append(l)
+                    preserved = adjusted
+
+        result.extend(preserved)
+        orig_cursor = orig_end
+        delta_cursor = mi + 1
+
+    result.extend(delta_lines[delta_cursor:])
+    return ''.join(result)
+
+
 def _apply_symbol_patch(filepath: str, symbol: str, new_body: str) -> str:
-    """Replace a named function/class/method. No old_str needed — finds by name."""
+    """Replace a named function/class/method. No old_str needed — finds by name.
+
+    new_body may contain `# ... existing code ...` (or `// ...`) markers.
+    Markers are replaced with the original lines bracketed by surrounding context.
+    """
     p = Path(filepath).expanduser().resolve()
     if not p.is_file():
         return f"Error: file not found: {filepath}"
@@ -585,7 +689,10 @@ def _apply_symbol_patch(filepath: str, symbol: str, new_body: str) -> str:
         start, end = result
         line_num = content[:start].count('\n') + 1
         old_lines = content[start:end].count('\n') + 1
-        body = new_body if new_body.endswith('\n') else new_body + '\n'
+
+        original_body = content[start:end]
+        merged = _merge_delta(original_body, new_body)
+        body = merged if merged.endswith('\n') else merged + '\n'
         new_lines = body.count('\n')
         delta = new_lines - old_lines
 
@@ -597,8 +704,14 @@ def _apply_symbol_patch(filepath: str, symbol: str, new_body: str) -> str:
         except OSError as e:
             return f"Error writing {p.name}: {e}"
 
+    used_delta = any(l.strip() in _DELTA_MARKERS for l in new_body.splitlines())
+    mode = " [compact-delta]" if used_delta else ""
     sign = "+" if delta >= 0 else ""
-    return f"✓ {p.name}::{symbol} patched @ L{line_num} (+{new_lines}/-{old_lines} lines, net {sign}{delta})"
+    SoulClient.remember(
+        f"[edit] {p.name}::{symbol} patched{mode} @ L{line_num} (+{new_lines}/-{old_lines})",
+        kind="episode", tags="file-edit,symbol-patch", confidence=0.7,
+    )
+    return f"✓ {p.name}::{symbol} patched{mode} @ L{line_num} (+{new_lines}/-{old_lines} lines, net {sign}{delta})"
 def get_file_info(filepath: str) -> dict:
     """Get metadata about a file: size, lines, language, etc. Results are cached per path."""
     filepath = str(Path(filepath).resolve())
@@ -3661,6 +3774,129 @@ class SoulClient:
         return os.path.exists(cls._socket_path())
 
 
+# ---------------------------------------------------------------------------
+# chitta_ingest — regex-only post-processor for bridge tool responses
+# ---------------------------------------------------------------------------
+
+_SSL_PATTERN = re.compile(r'\[[\w:]+\]\s+\S+→\S+→\S+(?:\s+@\S+)?')
+_CORRECTION_PATTERN = re.compile(r'(?:wrong|incorrect|fix|correction):\s*(.+?)(?:\.|$)', re.I)
+_DECISION_PATTERN = re.compile(r'(?:chose|use|prefer|adopt)\s+(\w+)\s+over\s+(\w+)', re.I)
+_LOCUS_PATTERN = re.compile(r'@([\w/\.\-]+:\d+)')
+_REVIEW_COMMENT_PATTERN = re.compile(r'(.+?)\s+at\s+([\w/\.\-]+\.[\w]+:\d+)')
+
+
+def _code_intel(symbol: str = "", path: str = "", realm: Optional[str] = None) -> str:
+    """Composite code analysis: structure + call graph + imports + chitta memory.
+
+    Smarter than tldr: fuses static analysis with chitta's knowledge graph so
+    you get callers, callees, imports, and every memory chitta holds about this
+    symbol — in one call, zero extra tokens spent navigating.
+    """
+    parts: list[str] = []
+
+    # 1. File-level structure
+    if path:
+        ctx = SoulClient._call("code_context", {"path": path})
+        if ctx:
+            parts.append(f"## Structure: {path}\n{ctx}")
+        imports = SoulClient._call("file_imports", {"path": path})
+        if imports:
+            parts.append(f"## Imports\n{imports}")
+
+    # 2. Symbol call graph
+    if symbol:
+        source = SoulClient._call("read_symbol", {"name": symbol})
+        if source:
+            parts.append(f"## Source: {symbol}\n{source}")
+        callers = SoulClient._call("symbol_callers", {"name": symbol})
+        if callers:
+            parts.append(f"## Callers → {symbol}\n{callers}")
+        callees = SoulClient._call("symbol_callees", {"name": symbol})
+        if callees:
+            parts.append(f"## {symbol} → Callees\n{callees}")
+
+    # 3. Chitta memory recall — what the system remembers about this symbol/file
+    query = " ".join(filter(None, [symbol, path]))
+    if query:
+        mem = SoulClient.hybrid_recall(query, limit=5, realm=realm)
+        if mem:
+            parts.append(f"## Memory\n{mem}")
+
+    if not parts:
+        return "(no symbol or path provided)"
+    return "\n\n".join(parts)
+
+
+def chitta_ingest(text: str) -> int:
+    """Extract SSL triplets and decisions from text, write each to soul memory.
+
+    Pure regex — no LLM call. Returns count of memories written.
+    """
+    triplets: list[str] = []
+
+    for m in _SSL_PATTERN.finditer(text):
+        triplets.append(m.group(0).strip())
+
+    for m in _CORRECTION_PATTERN.finditer(text):
+        triplets.append(f"correction→is→{m.group(1).strip()}")
+
+    for m in _DECISION_PATTERN.finditer(text):
+        triplets.append(f"{m.group(1)}→preferred-over→{m.group(2)}")
+
+    for m in _REVIEW_COMMENT_PATTERN.finditer(text):
+        locus = m.group(2).strip()
+        comment = m.group(1).strip()
+        triplets.append(f"review-comment→at→{locus} {comment[:120]}")
+
+    if not triplets:
+        return 0
+
+    written = 0
+    for t in triplets:
+        content = f"[source:opencode-bridge] {t}"
+        r = SoulClient.remember(content, kind="episode", tags="bridge-ingest,episodic", confidence=0.6)
+        if r is not None:
+            written += 1
+
+    return written
+
+
+def distill_event(event_type: str, content: str, context: dict) -> None:
+    """Post-process a bridge event: ingest triplets + write a typed digest memory.
+
+    event_type: one of room_synth | checkpoint | file_edit
+    context keys:
+      symbol  — for file_edit events, the symbol name (optional)
+    """
+    chitta_ingest(content)
+
+    truncated = content[:500]
+
+    if event_type == "room_synth":
+        SoulClient.remember(
+            f"[digest-node] {truncated}",
+            kind="digest-node",
+            tags="digest-node,room-synth",
+            confidence=0.75,
+        )
+    elif event_type == "checkpoint":
+        SoulClient.remember(
+            f"[rollup] {truncated}",
+            kind="rollup",
+            tags="checkpoint,rollup",
+            confidence=0.8,
+        )
+    elif event_type == "file_edit":
+        symbol = context.get("symbol")
+        if symbol:
+            SoulClient.remember(
+                f"[symbol-summary] {symbol}: {truncated}",
+                kind="symbol-summary",
+                tags="file-edit,symbol-summary",
+                confidence=0.7,
+            )
+
+
 class Orchestrator:
     """Multi-agent orchestration for complex workflows."""
 
@@ -4071,6 +4307,11 @@ AGENT_TOOL_DEFINITIONS = [
           ["command"]),
 
     # ── Code intelligence (via chitta) ─────────────────────────────────
+    _tool("code_intel",
+          "Memory-aware code analysis: symbol source + call graph (callers/callees) + file imports + chitta memory recall. One call replaces read_symbol + symbol_callers + symbol_callees + file_imports + recall.",
+          {"symbol": {"type": "string", "description": "Symbol name (function/class/method)"},
+           "path":   {"type": "string", "description": "File path for structure + imports"}},
+          []),
     _tool("read_function", "Read a specific function's source code by name (uses chitta symbol index).",
           {"name": {"type": "string", "description": "Function or method name to read"}},
           ["name"]),
@@ -4635,6 +4876,13 @@ class RoomManager:
                 return await self._tool_bash(args, participant_name=participant_name)
 
             # ── Code intelligence ──────────────────────────────────────
+            elif tool_name == "code_intel":
+                return _code_intel(
+                    symbol=args.get("symbol", ""),
+                    path=args.get("path", ""),
+                    realm=realm,
+                )
+
             elif tool_name == "read_function":
                 return SoulClient._call("read_function", {"name": args.get("name", "")}) or "(not found)"
 
@@ -6673,6 +6921,25 @@ async def list_tools():
                 "required": ["file", "symbol", "new_body"]
             }
         ),
+        Tool(
+            name="chitta_ingest",
+            description=(
+                "Manually ingest text into soul memory via regex extraction. "
+                "Extracts SSL triplets, corrections, decisions, and review comments from text "
+                "and writes each as an episodic memory tagged bridge-ingest. "
+                "Returns count of memories written. Useful for testing or manual ingestion."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "Text to extract and ingest into soul memory"
+                    }
+                },
+                "required": ["text"]
+            }
+        ),
     ]
     if not _HAS_CODEX:
         _tools = [t for t in _tools if not t.name.startswith("codex_")]
@@ -6738,6 +7005,7 @@ async def call_tool(name: str, arguments: dict):
                 files=arguments.get("files"),
                 domain_override=arguments.get("domain"),
             )
+            _threading.Thread(target=distill_event, args=("checkpoint", result, {}), daemon=True).start()
         elif name == "opencode_plan":
             result = await bridge.plan(
                 task=arguments["task"],
@@ -6750,6 +7018,7 @@ async def call_tool(name: str, arguments: dict):
                 code_or_file=arguments["code_or_file"],
                 focus=arguments.get("focus", "correctness, efficiency, and potential bugs")
             )
+            _threading.Thread(target=distill_event, args=("checkpoint", result, {}), daemon=True).start()
         elif name == "opencode_model":
             result = bridge.set_model(arguments["model"])
         elif name == "opencode_agent":
@@ -6797,6 +7066,7 @@ async def call_tool(name: str, arguments: dict):
                 message=arguments["message"],
                 images=arguments.get("images")
             )
+            _threading.Thread(target=distill_event, args=("checkpoint", result, {}), daemon=True).start()
         elif name == "codex_run":
             result = await codex_bridge.run_task(
                 task=arguments["task"],
@@ -6993,6 +7263,7 @@ async def call_tool(name: str, arguments: dict):
             if isinstance(synth, str):
                 synth = json.loads(synth)
             result = await rooms.synthesize(room_id=arguments["room_id"], synthesizer=synth)
+            _threading.Thread(target=distill_event, args=("room_synth", result, {}), daemon=True).start()
         # Local model tools
         elif name == "local_discover":
             nodes = await asyncio.get_event_loop().run_in_executor(None, GpuNodeDiscovery.discover)
@@ -7164,6 +7435,9 @@ async def call_tool(name: str, arguments: dict):
                     arguments["new_body"],
                 ),
             )
+        elif name == "chitta_ingest":
+            n = chitta_ingest(arguments["text"])
+            result = f"chitta_ingest: wrote {n} memories"
         else:
             result = f"Unknown tool: {name}"
 
