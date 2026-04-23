@@ -71,6 +71,17 @@ from chitta_bridge import __version__
 
 _SAFE_ID_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")
 
+# Natural chunk-boundary markers used by chunk_file() to snap cuts to readable
+# spots: blank lines, top-level defs/classes, markdown headings, closing braces.
+_BOUNDARY_RE = re.compile(
+    r"^\s*$"
+    r"|^(def|class|async\s+def)\s"
+    r"|^(function|const|export)\s"
+    r"|^(fn|pub\s+fn|impl|struct|mod)\s"
+    r"|^#{1,6}\s"
+    r"|^\s*[}\])]\s*$"
+)
+
 
 def _sanitize_session_id(session_id: str) -> str:
     """Sanitize session ID to prevent path traversal."""
@@ -580,7 +591,7 @@ def _merge_delta(original_body: str, delta: str) -> str:
     orig_lines = original_body.splitlines(keepends=True)
     delta_lines = delta.splitlines(keepends=True)
 
-    marker_positions = [i for i, l in enumerate(delta_lines) if l.strip() in _DELTA_MARKERS]
+    marker_positions = [i for i, ln in enumerate(delta_lines) if ln.strip() in _DELTA_MARKERS]
     if not marker_positions:
         return delta  # No markers — full replacement (backward compat)
 
@@ -627,7 +638,7 @@ def _merge_delta(original_body: str, delta: str) -> str:
             # post_anchor missing from original (new code added after marker, or
             # brace-language closing delimiter): trim original tail lines that
             # also appear in the delta suffix to avoid duplicating braces/dedents.
-            delta_suffix = [l.strip() for l in delta_lines[mi + 1:next_mi] if l.strip()]
+            delta_suffix = [ln.strip() for ln in delta_lines[mi + 1:next_mi] if ln.strip()]
             while orig_end > orig_start and delta_suffix:
                 if orig_lines[orig_end - 1].strip() == delta_suffix[-1]:
                     orig_end -= 1
@@ -639,18 +650,18 @@ def _merge_delta(original_body: str, delta: str) -> str:
         marker_indent = len(delta_lines[mi]) - len(delta_lines[mi].lstrip())
         preserved = list(orig_lines[orig_start:orig_end])
         if preserved:
-            non_empty = [l for l in preserved if l.strip()]
+            non_empty = [ln for ln in preserved if ln.strip()]
             if non_empty:
                 orig_indent = len(non_empty[0]) - len(non_empty[0].lstrip())
                 diff = marker_indent - orig_indent
                 if diff != 0:
                     adjusted = []
-                    for l in preserved:
-                        if l.strip():
-                            cur = len(l) - len(l.lstrip())
-                            adjusted.append(' ' * max(0, cur + diff) + l.lstrip())
+                    for ln in preserved:
+                        if ln.strip():
+                            cur = len(ln) - len(ln.lstrip())
+                            adjusted.append(' ' * max(0, cur + diff) + ln.lstrip())
                         else:
-                            adjusted.append(l)
+                            adjusted.append(ln)
                     preserved = adjusted
 
         result.extend(preserved)
@@ -713,7 +724,7 @@ def _apply_symbol_patch(filepath: str, symbol: str, new_body: str) -> str:
         except OSError as e:
             return f"Error writing {p.name}: {e}"
 
-    used_delta = any(l.strip() in _DELTA_MARKERS for l in new_body.splitlines())
+    used_delta = any(ln.strip() in _DELTA_MARKERS for ln in new_body.splitlines())
     mode = " [compact-delta]" if used_delta else ""
     sign = "+" if delta >= 0 else ""
     SoulClient.remember(
