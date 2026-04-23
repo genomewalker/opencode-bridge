@@ -732,6 +732,196 @@ def _apply_symbol_patch(filepath: str, symbol: str, new_body: str) -> str:
         kind="episode", tags="file-edit,symbol-patch", confidence=0.7,
     )
     return f"✓ {p.name}::{symbol} patched{mode} @ L{line_num} (+{new_lines}/-{old_lines} lines, net {sign}{delta})"
+
+
+def _locate_symbol(p: Path, symbol: str, content: str):
+    """Shared symbol lookup: tree-sitter first, regex fallback.
+    Returns (start, end, line_num) byte range + 1-indexed start line."""
+    ts_loc = SoulClient.find_symbol_location(str(p), symbol)
+    if ts_loc is not None:
+        ls, le = ts_loc
+        lines = content.splitlines(keepends=True)
+        start = sum(len(lines[i]) for i in range(ls - 1))
+        end = min(sum(len(lines[i]) for i in range(le)), len(content))
+        return start, end, ls
+    r = _find_symbol_range(content, symbol, p.suffix.lower())
+    if r is None:
+        return None
+    s, e = r
+    return s, e, content[:s].count("\n") + 1
+
+
+def _apply_symbol_delete(filepath: str, symbol: str) -> str:
+    """Delete a named function/class/method by symbol name.
+
+    Uses tree-sitter (via chitta) to locate the symbol, then splices its
+    range plus up to one trailing blank line. No old_str required.
+    """
+    p = Path(filepath).expanduser().resolve()
+    if not p.is_file():
+        return f"Error: file not found: {filepath}"
+    blocked = _reject_sensitive_path(p)
+    if blocked:
+        return f"Error: {blocked}"
+
+    with _path_write_lock(p):
+        try:
+            pre_mtime = p.stat().st_mtime_ns
+            content = p.read_text(encoding="utf-8")
+        except OSError as e:
+            return f"Error reading {p.name}: {e}"
+
+        loc = _locate_symbol(p, symbol, content)
+        if loc is None:
+            return f"Error: symbol '{symbol}' not found in {p.name}"
+        start, end, line_num = loc
+
+        # Swallow one trailing blank line so the file doesn't grow orphan gaps
+        tail_end = end
+        if tail_end < len(content) and content[tail_end] == "\n":
+            nxt = content.find("\n", tail_end + 1)
+            line = content[tail_end + 1:nxt if nxt >= 0 else len(content)]
+            if line.strip() == "":
+                tail_end = (nxt + 1) if nxt >= 0 else len(content)
+
+        removed = content[start:tail_end].count("\n")
+
+        try:
+            if p.stat().st_mtime_ns != pre_mtime:
+                return f"Error: {p.name} changed on disk since read — retry"
+            _atomic_write_text(p, content[:start] + content[tail_end:])
+        except OSError as e:
+            return f"Error writing {p.name}: {e}"
+
+    SoulClient.remember(
+        f"[edit] {p.name}::{symbol} deleted @ L{line_num} (-{removed} lines)",
+        kind="episode", tags="file-edit,symbol-delete", confidence=0.7,
+    )
+    return f"✓ {p.name}::{symbol} deleted @ L{line_num} (-{removed} lines)"
+
+
+_IDENT_RE_TMPL = r"(?<![A-Za-z0-9_])%s(?![A-Za-z0-9_])"
+
+
+def _apply_symbol_rename(filepath: str, old_name: str, new_name: str) -> str:
+    """Rename every occurrence of an identifier in a single file.
+
+    Uses a word-boundary regex — won't touch substrings of larger
+    identifiers, won't edit string literals if they happen to embed the
+    name (simple heuristic: skip lines that are pure comments/strings is
+    out of scope; callers should review diff).
+
+    For cross-file rename use symbol_callers + batch rename (TODO).
+    """
+    import re
+    if not old_name or not new_name or old_name == new_name:
+        return f"Error: invalid rename {old_name!r} → {new_name!r}"
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", new_name):
+        return f"Error: {new_name!r} is not a valid identifier"
+
+    p = Path(filepath).expanduser().resolve()
+    if not p.is_file():
+        return f"Error: file not found: {filepath}"
+    blocked = _reject_sensitive_path(p)
+    if blocked:
+        return f"Error: {blocked}"
+
+    with _path_write_lock(p):
+        try:
+            pre_mtime = p.stat().st_mtime_ns
+            content = p.read_text(encoding="utf-8")
+        except OSError as e:
+            return f"Error reading {p.name}: {e}"
+
+        pattern = re.compile(_IDENT_RE_TMPL % re.escape(old_name))
+        new_content, n = pattern.subn(new_name, content)
+        if n == 0:
+            return f"Error: identifier '{old_name}' not found in {p.name}"
+
+        try:
+            if p.stat().st_mtime_ns != pre_mtime:
+                return f"Error: {p.name} changed on disk since read — retry"
+            _atomic_write_text(p, new_content)
+        except OSError as e:
+            return f"Error writing {p.name}: {e}"
+
+    SoulClient.remember(
+        f"[edit] {p.name} rename {old_name}→{new_name} ({n} sites)",
+        kind="episode", tags="file-edit,symbol-rename", confidence=0.7,
+    )
+    return f"✓ {p.name}: renamed {old_name} → {new_name} at {n} site(s)"
+
+
+def _apply_symbol_move(filepath: str, symbol: str, dest_filepath: str) -> str:
+    """Move a named symbol from one file to another.
+
+    Extracts the symbol range from `filepath`, appends it to
+    `dest_filepath` (creating the file if needed), and removes the
+    original. Atomic per-file writes with mtime guards on both sides.
+    """
+    src = Path(filepath).expanduser().resolve()
+    dst = Path(dest_filepath).expanduser().resolve()
+    if not src.is_file():
+        return f"Error: source file not found: {filepath}"
+    for bad in (_reject_sensitive_path(src), _reject_sensitive_path(dst)):
+        if bad:
+            return f"Error: {bad}"
+    if src == dst:
+        return "Error: source and destination are the same file"
+
+    with _path_write_lock(src):
+        try:
+            src_pre = src.stat().st_mtime_ns
+            src_content = src.read_text(encoding="utf-8")
+        except OSError as e:
+            return f"Error reading {src.name}: {e}"
+
+        loc = _locate_symbol(src, symbol, src_content)
+        if loc is None:
+            return f"Error: symbol '{symbol}' not found in {src.name}"
+        start, end, line_num = loc
+        block = src_content[start:end]
+        if not block.endswith("\n"):
+            block += "\n"
+
+        # Swallow one trailing blank line on the cut so we don't leave a double-blank
+        cut_end = end
+        if cut_end < len(src_content) and src_content[cut_end] == "\n":
+            nxt = src_content.find("\n", cut_end + 1)
+            line = src_content[cut_end + 1:nxt if nxt >= 0 else len(src_content)]
+            if line.strip() == "":
+                cut_end = (nxt + 1) if nxt >= 0 else len(src_content)
+
+        with _path_write_lock(dst):
+            dst_pre = dst.stat().st_mtime_ns if dst.exists() else 0
+            try:
+                dst_content = dst.read_text(encoding="utf-8") if dst.exists() else ""
+            except OSError as e:
+                return f"Error reading {dst.name}: {e}"
+
+            separator = "" if (not dst_content or dst_content.endswith("\n\n")) else (
+                "\n" if dst_content.endswith("\n") else "\n\n"
+            )
+            new_dst = dst_content + separator + block
+
+            try:
+                if src.stat().st_mtime_ns != src_pre:
+                    return f"Error: {src.name} changed on disk since read — retry"
+                if dst.exists() and dst.stat().st_mtime_ns != dst_pre:
+                    return f"Error: {dst.name} changed on disk since read — retry"
+                _atomic_write_text(dst, new_dst)
+                _atomic_write_text(src, src_content[:start] + src_content[cut_end:])
+            except OSError as e:
+                return f"Error writing: {e}"
+
+    moved_lines = block.count("\n")
+    SoulClient.remember(
+        f"[edit] moved {symbol}: {src.name}→{dst.name} ({moved_lines} lines)",
+        kind="episode", tags="file-edit,symbol-move", confidence=0.7,
+    )
+    return f"✓ moved {symbol} from {src.name} (L{line_num}) → {dst.name} ({moved_lines} lines)"
+
+
 def get_file_info(filepath: str) -> dict:
     """Get metadata about a file: size, lines, language, etc. Results are cached per path."""
     filepath = str(Path(filepath).resolve())
@@ -6996,6 +7186,56 @@ async def list_tools():
             }
         ),
         Tool(
+            name="symbol_delete",
+            description=(
+                "Delete an entire function, class, or method by name. AST-aware "
+                "via tree-sitter; no old_str needed. Cheaper than Read+Edit for "
+                "removing obsolete code."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file":   {"type": "string", "description": "Absolute path to the file"},
+                    "symbol": {"type": "string", "description": "Symbol name to delete"},
+                },
+                "required": ["file", "symbol"],
+            },
+        ),
+        Tool(
+            name="symbol_rename",
+            description=(
+                "Rename every occurrence of an identifier in a single file using "
+                "word-boundary matching. Won't touch substrings of larger names. "
+                "For cross-file rename, combine with symbol_callers."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file":     {"type": "string", "description": "Absolute path to the file"},
+                    "old_name": {"type": "string", "description": "Current identifier"},
+                    "new_name": {"type": "string", "description": "New identifier (must be valid)"},
+                },
+                "required": ["file", "old_name", "new_name"],
+            },
+        ),
+        Tool(
+            name="symbol_move",
+            description=(
+                "Move a named function, class, or method from one file to another. "
+                "AST-aware via tree-sitter. Appends to destination (creating it if "
+                "needed) and removes from source atomically."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file":   {"type": "string", "description": "Source file (absolute path)"},
+                    "symbol": {"type": "string", "description": "Symbol name to move"},
+                    "dest":   {"type": "string", "description": "Destination file (absolute path)"},
+                },
+                "required": ["file", "symbol", "dest"],
+            },
+        ),
+        Tool(
             name="chitta_ingest",
             description=(
                 "Manually ingest text into soul memory via regex extraction. "
@@ -7507,6 +7747,25 @@ async def call_tool(name: str, arguments: dict):
                     arguments["file"],
                     arguments["symbol"],
                     arguments["new_body"],
+                ),
+            )
+        elif name == "symbol_delete":
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: _apply_symbol_delete(arguments["file"], arguments["symbol"]),
+            )
+        elif name == "symbol_rename":
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: _apply_symbol_rename(
+                    arguments["file"], arguments["old_name"], arguments["new_name"],
+                ),
+            )
+        elif name == "symbol_move":
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: _apply_symbol_move(
+                    arguments["file"], arguments["symbol"], arguments["dest"],
                 ),
             )
         elif name == "chitta_ingest":
