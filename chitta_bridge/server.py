@@ -513,6 +513,7 @@ def _apply_file_patch(filepath: str, old_str: str, new_str: str) -> str:
         except OSError as e:
             return f"Error writing {p.name}: {e}"
 
+    _post_write_refresh(p)
     sign = "+" if delta >= 0 else ""
     return f"✓ {p.name} patched @ L{line_num} (+{new_lines}/-{old_lines} lines, net {sign}{delta})"
 def _find_symbol_range(content: str, symbol: str, ext: str):
@@ -727,11 +728,73 @@ def _apply_symbol_patch(filepath: str, symbol: str, new_body: str) -> str:
     used_delta = any(ln.strip() in _DELTA_MARKERS for ln in new_body.splitlines())
     mode = " [compact-delta]" if used_delta else ""
     sign = "+" if delta >= 0 else ""
+    _post_write_refresh(p)
     SoulClient.remember(
         f"[edit] {p.name}::{symbol} patched{mode} @ L{line_num} (+{new_lines}/-{old_lines})",
         kind="episode", tags="file-edit,symbol-patch", confidence=0.7,
     )
     return f"✓ {p.name}::{symbol} patched{mode} @ L{line_num} (+{new_lines}/-{old_lines} lines, net {sign}{delta})"
+
+
+def _apply_symbol_edit(filepath: str, symbol: str, old_str: str, new_str: str) -> str:
+    """Replace old_str with new_str inside a named symbol's body.
+
+    Uniqueness is scoped to the symbol — old_str must match exactly once
+    *within the symbol body*, not within the whole file. This makes
+    old_str short and stable (no need to pad for file-wide uniqueness).
+    Fails closed on 0 or >1 matches in-scope.
+    """
+    p = Path(filepath).expanduser().resolve()
+    if not p.is_file():
+        return f"Error: file not found: {filepath}"
+    blocked = _reject_sensitive_path(p)
+    if blocked:
+        return f"Error: {blocked}"
+    if not old_str:
+        return "Error: old_str is empty"
+
+    with _path_write_lock(p):
+        try:
+            pre_mtime = p.stat().st_mtime_ns
+            content = p.read_text(encoding="utf-8")
+        except OSError as e:
+            return f"Error reading {p.name}: {e}"
+
+        loc = _locate_symbol(p, symbol, content)
+        if loc is None:
+            return f"Error: symbol '{symbol}' not found in {p.name}"
+        sym_start, sym_end, sym_line = loc
+        body = content[sym_start:sym_end]
+        count = body.count(old_str)
+        if count == 0:
+            return f"Error: old_str not found inside {symbol} (in {p.name})"
+        if count > 1:
+            return f"Error: old_str matches {count} locations inside {symbol} — make it more specific"
+
+        local_idx = body.index(old_str)
+        abs_idx = sym_start + local_idx
+        line_num = content[:abs_idx].count("\n") + 1
+        old_lines = old_str.count("\n") + 1
+        new_lines = new_str.count("\n") + (1 if new_str else 0)
+        delta = new_lines - old_lines
+
+        new_body_content = body[:local_idx] + new_str + body[local_idx + len(old_str):]
+        new_content = content[:sym_start] + new_body_content + content[sym_end:]
+
+        try:
+            if p.stat().st_mtime_ns != pre_mtime:
+                return f"Error: {p.name} changed on disk since read — retry"
+            _atomic_write_text(p, new_content)
+        except OSError as e:
+            return f"Error writing {p.name}: {e}"
+
+    _post_write_refresh(p)
+    SoulClient.remember(
+        f"[edit] {p.name}::{symbol} edited @ L{line_num} (+{new_lines}/-{old_lines})",
+        kind="episode", tags="file-edit,symbol-edit", confidence=0.7,
+    )
+    sign = "+" if delta >= 0 else ""
+    return f"✓ {p.name}::{symbol} edited @ L{line_num} (+{new_lines}/-{old_lines} lines, net {sign}{delta})"
 
 
 def _locate_symbol(p: Path, symbol: str, content: str):
@@ -793,6 +856,7 @@ def _apply_symbol_delete(filepath: str, symbol: str) -> str:
         except OSError as e:
             return f"Error writing {p.name}: {e}"
 
+    _post_write_refresh(p)
     SoulClient.remember(
         f"[edit] {p.name}::{symbol} deleted @ L{line_num} (-{removed} lines)",
         kind="episode", tags="file-edit,symbol-delete", confidence=0.7,
@@ -845,6 +909,7 @@ def _apply_symbol_rename(filepath: str, old_name: str, new_name: str) -> str:
         except OSError as e:
             return f"Error writing {p.name}: {e}"
 
+    _post_write_refresh(p)
     SoulClient.remember(
         f"[edit] {p.name} rename {old_name}→{new_name} ({n} sites)",
         kind="episode", tags="file-edit,symbol-rename", confidence=0.7,
@@ -915,11 +980,155 @@ def _apply_symbol_move(filepath: str, symbol: str, dest_filepath: str) -> str:
                 return f"Error writing: {e}"
 
     moved_lines = block.count("\n")
+    _post_write_refresh([src, dst])
     SoulClient.remember(
         f"[edit] moved {symbol}: {src.name}→{dst.name} ({moved_lines} lines)",
         kind="episode", tags="file-edit,symbol-move", confidence=0.7,
     )
     return f"✓ moved {symbol} from {src.name} (L{line_num}) → {dst.name} ({moved_lines} lines)"
+
+
+# Valid position specifiers for symbol_insert_child
+_INSERT_POSITIONS = (
+    "start", "end", "before_return", "after_last_import", "after_docstring",
+)
+
+
+def _apply_symbol_insert_child(
+    filepath: str, parent: str, position: str, new_body: str,
+) -> str:
+    """Insert a block inside a parent symbol at a named position.
+
+    position one of:
+      start, end, before_return, after_last_import, after_docstring,
+      before:<child>, after:<child>
+
+    new_body is inserted with the parent's body indent level. Parent
+    `"__module__"` targets the top-level scope (for after_last_import,
+    after_docstring at module).
+    """
+    import re
+    p = Path(filepath).expanduser().resolve()
+    if not p.is_file():
+        return f"Error: file not found: {filepath}"
+    blocked = _reject_sensitive_path(p)
+    if blocked:
+        return f"Error: {blocked}"
+
+    with _path_write_lock(p):
+        try:
+            pre_mtime = p.stat().st_mtime_ns
+            content = p.read_text(encoding="utf-8")
+        except OSError as e:
+            return f"Error reading {p.name}: {e}"
+
+        # Determine parent range
+        if parent == "__module__":
+            start, end = 0, len(content)
+            body_indent = ""
+            header_end = 0
+        else:
+            loc = _locate_symbol(p, parent, content)
+            if loc is None:
+                return f"Error: parent '{parent}' not found in {p.name}"
+            start, end, _ = loc
+            block = content[start:end]
+            # body indent = indent of first non-empty line after header
+            m = re.match(r"^[^\n]*\n([ \t]*)\S", block)
+            body_indent = m.group(1) if m else "    "
+            # header_end = position after the `def/class foo(...):` line
+            header_match = re.search(r":\s*\n", block)
+            header_end = start + (header_match.end() if header_match else 0)
+
+        # Reindent new_body to parent's body indent
+        body_lines = new_body.splitlines()
+        # Strip common leading indent so we can re-apply
+        nonempty = [l for l in body_lines if l.strip()]
+        common = min((len(l) - len(l.lstrip()) for l in nonempty), default=0)
+        reindented = "\n".join(
+            (body_indent + l[common:]) if l.strip() else ""
+            for l in body_lines
+        )
+        if not reindented.endswith("\n"):
+            reindented += "\n"
+
+        # Resolve insertion offset
+        insert_at = None
+        if position == "start":
+            insert_at = header_end
+        elif position == "end":
+            insert_at = end
+            # Back off any trailing whitespace so we land flush with last stmt
+            while insert_at > header_end and content[insert_at - 1] in " \t":
+                insert_at -= 1
+            if insert_at > 0 and content[insert_at - 1] != "\n":
+                reindented = "\n" + reindented
+        elif position == "after_docstring":
+            # Search for a triple-quoted string right after header_end
+            rest = content[header_end:end]
+            ds = re.match(r"\s*([\"']{3}).*?\1\s*\n", rest, re.S)
+            if not ds:
+                return f"Error: no docstring found in {parent}"
+            insert_at = header_end + ds.end()
+        elif position == "after_last_import":
+            rest = content[start:end]
+            last = None
+            for m in re.finditer(r"^[ \t]*(?:from |import )[^\n]*\n", rest, re.M):
+                last = m
+            if last is None:
+                return f"Error: no imports found in {parent}"
+            insert_at = start + last.end()
+        elif position == "before_return":
+            rest = content[header_end:end]
+            last = None
+            for m in re.finditer(r"^[ \t]+return\b[^\n]*\n", rest, re.M):
+                last = m
+            if last is None:
+                return f"Error: no return statement in {parent}"
+            insert_at = header_end + last.start()
+        elif position.startswith("before:") or position.startswith("after:"):
+            mode, _, child = position.partition(":")
+            if not child:
+                return f"Error: position '{position}' needs a child name"
+            child_re = re.compile(
+                rf"^([ \t]*)(?:async\s+)?(?:def|class)\s+{re.escape(child)}\b", re.M,
+            )
+            m = child_re.search(content, start, end)
+            if not m:
+                return f"Error: child '{child}' not found in {parent}"
+            if mode == "before":
+                insert_at = m.start()
+            else:
+                # after = end of child's block
+                child_loc = _locate_symbol(p, child, content)
+                if child_loc is None:
+                    return f"Error: cannot locate end of child '{child}'"
+                insert_at = child_loc[1]
+                if insert_at > 0 and content[insert_at - 1] != "\n":
+                    reindented = "\n" + reindented
+        else:
+            return (
+                f"Error: unknown position '{position}'. "
+                f"Valid: {', '.join(_INSERT_POSITIONS)}, before:<child>, after:<child>"
+            )
+
+        new_content = content[:insert_at] + reindented + content[insert_at:]
+        inserted_lines = reindented.count("\n")
+        line_num = content[:insert_at].count("\n") + 1
+
+        try:
+            if p.stat().st_mtime_ns != pre_mtime:
+                return f"Error: {p.name} changed on disk since read — retry"
+            _atomic_write_text(p, new_content)
+        except OSError as e:
+            return f"Error writing {p.name}: {e}"
+
+    _post_write_refresh(p)
+    SoulClient.remember(
+        f"[edit] {p.name}::{parent} +child @ {position} L{line_num} (+{inserted_lines} lines)",
+        kind="episode", tags="file-edit,symbol-insert", confidence=0.7,
+    )
+    return f"✓ {p.name}::{parent} inserted {inserted_lines} lines @ {position} (L{line_num})"
 
 
 def get_file_info(filepath: str) -> dict:
@@ -4034,8 +4243,38 @@ class SoulClient:
         return None
 
     @classmethod
+    def learn_codebase(cls, path: str, project: Optional[str] = None) -> Optional[str]:
+        """Trigger tree-sitter re-index for a path. Short timeout — best-effort."""
+        args: dict[str, Any] = {"path": path}
+        if project:
+            args["project"] = project
+        return cls._call("learn_codebase", args, timeout=3.0)
+
+    @classmethod
     def is_available(cls) -> bool:
         return os.path.exists(cls._socket_path())
+
+
+def _post_write_refresh(paths) -> None:
+    """Fast-path reindex after a bridge-owned write. Bypasses the
+    5-min rate limiter in file-changed-hook.sh because these writes
+    come from our own MCP tools. Best-effort — short timeout; failure
+    is logged but never blocks the patch."""
+    if not paths:
+        return
+    if isinstance(paths, (str, Path)):
+        paths = [paths]
+    seen_dirs = set()
+    for p in paths:
+        try:
+            path_obj = Path(p) if not isinstance(p, Path) else p
+            dir_path = str(path_obj.parent)
+            if dir_path in seen_dirs:
+                continue
+            seen_dirs.add(dir_path)
+            SoulClient.learn_codebase(dir_path)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -7236,6 +7475,45 @@ async def list_tools():
             },
         ),
         Tool(
+            name="symbol_edit",
+            description=(
+                "Replace old_str with new_str inside a named symbol's body. "
+                "Uniqueness scoped to the symbol (not whole file) — old_str "
+                "can be short and stable. Fails if old_str is missing or "
+                "matches multiple times within the symbol."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file":    {"type": "string", "description": "Absolute path to the file"},
+                    "symbol":  {"type": "string", "description": "Containing symbol name"},
+                    "old_str": {"type": "string", "description": "Exact string inside symbol body (must be unique in scope)"},
+                    "new_str": {"type": "string", "description": "Replacement string"},
+                },
+                "required": ["file", "symbol", "old_str", "new_str"],
+            },
+        ),
+        Tool(
+            name="symbol_insert_child",
+            description=(
+                "Insert a block inside a parent function/class at a named position. "
+                "AST-aware via tree-sitter. Auto-reindents body to parent's indent level. "
+                "position: 'start', 'end', 'before_return', 'after_last_import', "
+                "'after_docstring', 'before:<child>', 'after:<child>'. "
+                "parent='__module__' targets top-level scope."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file":     {"type": "string", "description": "Absolute path to the file"},
+                    "parent":   {"type": "string", "description": "Parent symbol name, or '__module__' for top-level"},
+                    "position": {"type": "string", "description": "start|end|before_return|after_last_import|after_docstring|before:<child>|after:<child>"},
+                    "new_body": {"type": "string", "description": "Block to insert (will be reindented)"},
+                },
+                "required": ["file", "parent", "position", "new_body"],
+            },
+        ),
+        Tool(
             name="chitta_ingest",
             description=(
                 "Manually ingest text into soul memory via regex extraction. "
@@ -7766,6 +8044,22 @@ async def call_tool(name: str, arguments: dict):
                 None,
                 lambda: _apply_symbol_move(
                     arguments["file"], arguments["symbol"], arguments["dest"],
+                ),
+            )
+        elif name == "symbol_edit":
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: _apply_symbol_edit(
+                    arguments["file"], arguments["symbol"],
+                    arguments["old_str"], arguments["new_str"],
+                ),
+            )
+        elif name == "symbol_insert_child":
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: _apply_symbol_insert_child(
+                    arguments["file"], arguments["parent"],
+                    arguments["position"], arguments["new_body"],
                 ),
             )
         elif name == "chitta_ingest":
