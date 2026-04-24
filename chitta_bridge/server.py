@@ -729,6 +729,10 @@ def _apply_symbol_patch(filepath: str, symbol: str, new_body: str) -> str:
     mode = " [compact-delta]" if used_delta else ""
     sign = "+" if delta >= 0 else ""
     _post_write_refresh(p)
+    try:
+        _cache_put(p, symbol, new_body, line_num, line_num + new_lines - 1)
+    except Exception:
+        pass
     SoulClient.remember(
         f"[edit] {p.name}::{symbol} patched{mode} @ L{line_num} (+{new_lines}/-{old_lines})",
         kind="episode", tags="file-edit,symbol-patch", confidence=0.7,
@@ -789,6 +793,11 @@ def _apply_symbol_edit(filepath: str, symbol: str, old_str: str, new_str: str) -
             return f"Error writing {p.name}: {e}"
 
     _post_write_refresh(p)
+    try:
+        _cache_put(p, symbol, new_body_content, sym_line,
+                   sym_line + new_body_content.count("\n"))
+    except Exception:
+        pass
     SoulClient.remember(
         f"[edit] {p.name}::{symbol} edited @ L{line_num} (+{new_lines}/-{old_lines})",
         kind="episode", tags="file-edit,symbol-edit", confidence=0.7,
@@ -857,6 +866,10 @@ def _apply_symbol_delete(filepath: str, symbol: str) -> str:
             return f"Error writing {p.name}: {e}"
 
     _post_write_refresh(p)
+    try:
+        _cache_pop(p, symbol)
+    except Exception:
+        pass
     SoulClient.remember(
         f"[edit] {p.name}::{symbol} deleted @ L{line_num} (-{removed} lines)",
         kind="episode", tags="file-edit,symbol-delete", confidence=0.7,
@@ -910,6 +923,11 @@ def _apply_symbol_rename(filepath: str, old_name: str, new_name: str) -> str:
             return f"Error writing {p.name}: {e}"
 
     _post_write_refresh(p)
+    try:
+        _cache_pop(p, old_name)
+        _cache_pop(p, new_name)
+    except Exception:
+        pass
     SoulClient.remember(
         f"[edit] {p.name} rename {old_name}→{new_name} ({n} sites)",
         kind="episode", tags="file-edit,symbol-rename", confidence=0.7,
@@ -981,6 +999,11 @@ def _apply_symbol_move(filepath: str, symbol: str, dest_filepath: str) -> str:
 
     moved_lines = block.count("\n")
     _post_write_refresh([src, dst])
+    try:
+        _cache_pop(src, symbol)
+        _cache_pop(dst, symbol)
+    except Exception:
+        pass
     SoulClient.remember(
         f"[edit] moved {symbol}: {src.name}→{dst.name} ({moved_lines} lines)",
         kind="episode", tags="file-edit,symbol-move", confidence=0.7,
@@ -1124,6 +1147,10 @@ def _apply_symbol_insert_child(
             return f"Error writing {p.name}: {e}"
 
     _post_write_refresh(p)
+    try:
+        _cache_pop(p, parent)
+    except Exception:
+        pass
     SoulClient.remember(
         f"[edit] {p.name}::{parent} +child @ {position} L{line_num} (+{inserted_lines} lines)",
         kind="episode", tags="file-edit,symbol-insert", confidence=0.7,
@@ -4253,6 +4280,81 @@ class SoulClient:
     @classmethod
     def is_available(cls) -> bool:
         return os.path.exists(cls._socket_path())
+
+
+# ─── Sticky per-session symbol body cache ────────────────────────────────────
+# After a bridge-owned write successfully mutates a symbol, we already hold
+# the new body in memory. Caching it avoids a daemon roundtrip + file re-read
+# on the next read_symbol for the same (file, symbol) within the same session.
+# Key: (session_id, file_resolved, symbol_name). Invalidated on mtime_ns change.
+# Size-bounded LRU (~64 entries) to avoid unbounded growth in long sessions.
+_symbol_body_cache: "collections.OrderedDict[tuple, dict]" = None  # type: ignore
+_SYMBOL_CACHE_MAX = 64
+
+
+def _cache_get():
+    global _symbol_body_cache
+    if _symbol_body_cache is None:
+        import collections as _c
+        _symbol_body_cache = _c.OrderedDict()
+    return _symbol_body_cache
+
+
+def _current_session_id() -> str:
+    """Best-effort session id. Falls back to 'default' if not available."""
+    return os.environ.get("CLAUDE_SESSION_ID") or os.environ.get("CODEX_SESSION_ID") or "default"
+
+
+def _cache_put(file: Path, symbol: str, body: str,
+               line_start: int, line_end: int) -> None:
+    try:
+        mtime = file.stat().st_mtime_ns
+    except OSError:
+        return
+    key = (_current_session_id(), str(file.resolve()), symbol)
+    cache = _cache_get()
+    cache[key] = {"mtime_ns": mtime, "body": body,
+                  "line_start": line_start, "line_end": line_end}
+    cache.move_to_end(key)
+    while len(cache) > _SYMBOL_CACHE_MAX:
+        cache.popitem(last=False)
+
+
+def _cache_get_fresh(file_hint: Optional[str], symbol: str) -> Optional[dict]:
+    """Return cached entry if (session, file, symbol) matches AND file mtime
+    is unchanged. If file_hint is None, accept only if there's exactly one
+    session-local cached hit for this symbol (avoids name collisions)."""
+    cache = _cache_get()
+    sid = _current_session_id()
+    candidates = []
+    for (s, f, sym), v in cache.items():
+        if s == sid and sym == symbol:
+            if file_hint is None or Path(f) == Path(file_hint).resolve():
+                candidates.append((f, v))
+    if not candidates:
+        return None
+    if file_hint is None and len(candidates) > 1:
+        return None
+    f, v = candidates[0]
+    try:
+        if Path(f).stat().st_mtime_ns != v["mtime_ns"]:
+            cache.pop((sid, f, symbol), None)
+            return None
+    except OSError:
+        return None
+    return {**v, "file": f}
+
+
+def _cache_pop(file: Path, symbol: str) -> None:
+    """Invalidate a cached symbol entry across all sessions for this file."""
+    cache = _cache_get()
+    try:
+        resolved = str(file.resolve())
+    except OSError:
+        resolved = str(file)
+    for key in list(cache.keys()):
+        if key[1] == resolved and key[2] == symbol:
+            cache.pop(key, None)
 
 
 def _post_write_refresh(paths) -> None:
@@ -7494,6 +7596,23 @@ async def list_tools():
             },
         ),
         Tool(
+            name="read_symbol",
+            description=(
+                "Read a function/class/method body by name. Checks a sticky "
+                "session cache first (hot after symbol_patch/edit/insert_child) "
+                "before falling back to the chitta daemon. Optional `file` narrows "
+                "the lookup and enables the cache fast-path."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Symbol name"},
+                    "file": {"type": "string", "description": "Optional absolute path; enables sticky-cache hit"},
+                },
+                "required": ["name"],
+            },
+        ),
+        Tool(
             name="symbol_insert_child",
             description=(
                 "Insert a block inside a parent function/class at a named position. "
@@ -8054,6 +8173,14 @@ async def call_tool(name: str, arguments: dict):
                     arguments["old_str"], arguments["new_str"],
                 ),
             )
+        elif name == "read_symbol":
+            sym = arguments.get("name", "")
+            file_hint = arguments.get("file")
+            cached = _cache_get_fresh(file_hint, sym) if sym else None
+            if cached:
+                result = f"[cache] {cached['file']}:{cached['line_start']}\n{cached['body']}"
+            else:
+                result = SoulClient._call("read_symbol", {"name": sym}) or "(not found)"
         elif name == "symbol_insert_child":
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
