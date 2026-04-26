@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "chitta-bridge"
-version = "0.11.18"
+version = "0.11.19"
 description = "MCP server for multi-model AI discussions — cloud, agentic CLIs, local GPU models, soul memory"
 readme = "README.md"
 license = "MIT"

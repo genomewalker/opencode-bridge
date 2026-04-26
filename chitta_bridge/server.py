@@ -3072,13 +3072,13 @@ class CodexBridge:
         job.started = datetime.now().isoformat()
         job.save(self.jobs_dir / f"{job_id}.json")
 
+        model, effort = self._apply_codex_policy(job.model, job.effort)
         args = ["exec"]
         if job.resume_from:
             args.extend(["resume", job.resume_from])
-        if job.model:
-            args.extend(["--model", job.model])
-        if job.effort:
-            args.extend(["-c", f'model_reasoning_effort="{job.effort}"'])
+        if model:
+            args.extend(["--model", model])
+        args.extend(["-c", f'model_reasoning_effort="{effort}"'])
         if job.sandbox:
             args.extend(["--sandbox", job.sandbox])
         args.extend(["--full-auto", "--json", "-"])
@@ -3407,11 +3407,11 @@ Set via:
             return result
         else:
             # Normal review via `codex exec review`
+            model, effort = self._apply_codex_policy(model, effort)
             args = ["exec", "review", "--model", model, "--json"]
             if base:
                 args.extend(["--base", base])
-            if effort:
-                args.extend(["-c", f'model_reasoning_effort="{effort}"'])
+            args.extend(["-c", f'model_reasoning_effort="{effort}"'])
             if sandbox:
                 args.extend(["--sandbox", sandbox])
             if background:
@@ -3422,6 +3422,16 @@ Set via:
                 return f"Error: {output}"
             return output or "Review complete"
 
+    @staticmethod
+    def _apply_codex_policy(model: Optional[str], effort: Optional[str]) -> tuple:
+        """Enforce defaults: reject Fast variants unless CODEX_ALLOW_FAST=1; default effort=high."""
+        if model and "fast" in model.lower() and os.environ.get("CODEX_ALLOW_FAST") != "1":
+            raise ValueError(
+                f"Refusing to use Fast Codex variant '{model}' implicitly. "
+                "Set CODEX_ALLOW_FAST=1 to override, or pick a non-fast model."
+            )
+        return model, effort or "high"
+
     def _build_exec_args(
         self,
         model: Optional[str],
@@ -3429,11 +3439,11 @@ Set via:
         sandbox: Optional[str] = None,
         full_auto: bool = True,
     ) -> list:
+        model, effort = self._apply_codex_policy(model, effort)
         args = ["exec", "--skip-git-repo-check"]
         if model:
             args.extend(["--model", model])
-        if effort:
-            args.extend(["-c", f'model_reasoning_effort="{effort}"'])
+        args.extend(["-c", f'model_reasoning_effort="{effort}"'])
         if sandbox:
             args.extend(["--sandbox", sandbox])
             if full_auto:
