@@ -3422,15 +3422,22 @@ Set via:
                 return f"Error: {output}"
             return output or "Review complete"
 
+    CODEX_EFFORTS = ("low", "medium", "high", "xhigh")
+
     @staticmethod
     def _apply_codex_policy(model: Optional[str], effort: Optional[str]) -> tuple:
-        """Enforce defaults: reject Fast variants unless CODEX_ALLOW_FAST=1; default effort=high."""
+        """Enforce defaults: reject Fast variants unless CODEX_ALLOW_FAST=1; default effort=high; validate effort enum."""
         if model and "fast" in model.lower() and os.environ.get("CODEX_ALLOW_FAST") != "1":
             raise ValueError(
                 f"Refusing to use Fast Codex variant '{model}' implicitly. "
                 "Set CODEX_ALLOW_FAST=1 to override, or pick a non-fast model."
             )
-        return model, effort or "high"
+        effort = effort or "high"
+        if effort not in CodexBridge.CODEX_EFFORTS:
+            raise ValueError(
+                f"Invalid Codex effort '{effort}'. Must be one of: {', '.join(CodexBridge.CODEX_EFFORTS)}."
+            )
+        return model, effort
 
     def _build_exec_args(
         self,
