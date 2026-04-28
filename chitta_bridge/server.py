@@ -1810,6 +1810,28 @@ def _strip_startup_warnings(text: str) -> str:
     return "\n".join(lines).strip()
 
 
+# Persisted state schema version. Bump whenever an on-disk shape changes
+# in a way that needs migration. Absence in a JSON file means v0 (pre-versioning).
+PERSISTED_SCHEMA_VERSION = 1
+
+
+def _migrate_persisted(data: dict, kind: str) -> dict:
+    """Lazily migrate a loaded JSON dict to PERSISTED_SCHEMA_VERSION.
+
+    kind: "session" | "codex_session" | "codex_job" | "room" — reserved for
+    per-kind migration steps. Currently v0→v1 is a no-op (load() already
+    tolerates missing fields via .get with defaults), so we just stamp the
+    version. Newer-than-current files are left untouched and surfaced by
+    chitta-bridge-doctor as WARN.
+    """
+    version = data.get("schema_version", 0)
+    if version > PERSISTED_SCHEMA_VERSION:
+        return data  # forward-compat: don't downgrade, doctor will warn
+    # v0 → v1: no field shape changes, just stamp.
+    data["schema_version"] = PERSISTED_SCHEMA_VERSION
+    return data
+
+
 @dataclass
 class Message:
     role: str
@@ -1828,12 +1850,14 @@ class Session:
     claude_session_ids: list = field(default_factory=list)
     messages: list[Message] = field(default_factory=list)
     created: str = field(default_factory=lambda: datetime.now().isoformat())
+    schema_version: int = PERSISTED_SCHEMA_VERSION
 
     def add_message(self, role: str, content: str):
         self.messages.append(Message(role=role, content=content))
 
     def save(self, path: Path):
         data = {
+            "schema_version": self.schema_version,
             "id": self.id,
             "model": self.model,
             "agent": self.agent,
@@ -1848,7 +1872,7 @@ class Session:
 
     @classmethod
     def load(cls, path: Path) -> "Session":
-        data = json.loads(path.read_text())
+        data = _migrate_persisted(json.loads(path.read_text()), "session")
         session = cls(
             id=data["id"],
             model=data["model"],
@@ -1856,7 +1880,8 @@ class Session:
             variant=data.get("variant", DEFAULT_VARIANT),
             opencode_session_id=data.get("opencode_session_id"),
             claude_session_ids=data.get("claude_session_ids", []),
-            created=data.get("created", datetime.now().isoformat())
+            created=data.get("created", datetime.now().isoformat()),
+            schema_version=data.get("schema_version", PERSISTED_SCHEMA_VERSION),
         )
         for m in data.get("messages", []):
             session.messages.append(Message(**m))
@@ -1875,12 +1900,14 @@ class CodexSession:
     claude_session_ids: list = field(default_factory=list)
     messages: list[Message] = field(default_factory=list)
     created: str = field(default_factory=lambda: datetime.now().isoformat())
+    schema_version: int = PERSISTED_SCHEMA_VERSION
 
     def add_message(self, role: str, content: str):
         self.messages.append(Message(role=role, content=content))
 
     def save(self, path: Path):
         data = {
+            "schema_version": self.schema_version,
             "id": self.id,
             "model": self.model,
             "sandbox": self.sandbox,
@@ -1896,7 +1923,7 @@ class CodexSession:
 
     @classmethod
     def load(cls, path: Path) -> "CodexSession":
-        data = json.loads(path.read_text())
+        data = _migrate_persisted(json.loads(path.read_text()), "codex_session")
         session = cls(
             id=data["id"],
             model=data["model"],
@@ -1905,7 +1932,8 @@ class CodexSession:
             codex_session_id=data.get("codex_session_id"),
             working_dir=data.get("working_dir"),
             claude_session_ids=data.get("claude_session_ids", []),
-            created=data.get("created", datetime.now().isoformat())
+            created=data.get("created", datetime.now().isoformat()),
+            schema_version=data.get("schema_version", PERSISTED_SCHEMA_VERSION),
         )
         for m in data.get("messages", []):
             session.messages.append(Message(**m))
@@ -1928,6 +1956,7 @@ class CodexJob:
     finished: Optional[str] = None
     result: Optional[str] = None
     codex_session_id: Optional[str] = None
+    schema_version: int = PERSISTED_SCHEMA_VERSION
 
     def save(self, path: Path):
         with _path_write_lock(path):
@@ -1935,7 +1964,7 @@ class CodexJob:
 
     @classmethod
     def load(cls, path: Path) -> "CodexJob":
-        data = json.loads(path.read_text())
+        data = _migrate_persisted(json.loads(path.read_text()), "codex_job")
         valid = {f.name for f in dc_fields(cls)}
         return cls(**{k: v for k, v in data.items() if k in valid})
 
@@ -1950,7 +1979,15 @@ class OpenCodeBridge:
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self.available_models: list[str] = []
         self.available_agents: list[str] = []
+        self._session_locks: dict[str, asyncio.Lock] = {}
         self._load_sessions()
+
+    def _session_lock(self, sid: str) -> asyncio.Lock:
+        lock = self._session_locks.get(sid)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._session_locks[sid] = lock
+        return lock
 
     def _load_sessions(self):
         for path in self.sessions_dir.glob("*.json"):
@@ -2381,6 +2418,19 @@ Set via:
         if not sid or sid not in self.sessions:
             return "No active session. Use opencode_start first."
 
+        async with self._session_lock(sid):
+            return await self._send_message_locked(
+                sid, message, files=files, domain_override=domain_override, _raw=_raw,
+            )
+
+    async def _send_message_locked(
+        self,
+        sid: str,
+        message: str,
+        files: Optional[list[str]] = None,
+        domain_override: Optional[str] = None,
+        _raw: bool = False,
+    ) -> str:
         session = self.sessions[sid]
         session.add_message("user", message)
         # Save immediately so user messages aren't lost if OpenCode fails
@@ -2850,12 +2900,28 @@ class CodexBridge:
         self.active_session: Optional[str] = None
         self.sessions_dir = Path.home() / ".chitta-bridge" / "codex-sessions"
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        self._session_locks: dict[str, asyncio.Lock] = {}
+        self._job_locks: dict[str, asyncio.Lock] = {}
         self._load_sessions()
         self.jobs: dict[str, CodexJob] = {}
         self._job_tasks: dict[str, "asyncio.Task"] = {}
         self.jobs_dir = Path.home() / ".chitta-bridge" / "codex-jobs"
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
         self._load_jobs()
+
+    def _session_lock(self, sid: str) -> asyncio.Lock:
+        lock = self._session_locks.get(sid)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._session_locks[sid] = lock
+        return lock
+
+    def _job_lock(self, jid: str) -> asyncio.Lock:
+        lock = self._job_locks.get(jid)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._job_locks[jid] = lock
+        return lock
 
     def _load_sessions(self):
         for path in self.sessions_dir.glob("*.json"):
@@ -3174,6 +3240,12 @@ Set via:
         if not sid or sid not in self.sessions:
             return "No active Codex session. Use codex_start first."
 
+        async with self._session_lock(sid):
+            return await self._send_message_locked(sid, message, images)
+
+    async def _send_message_locked(
+        self, sid: str, message: str, images: Optional[list[str]] = None,
+    ) -> str:
         session = self.sessions[sid]
         session.add_message("user", message)
 
@@ -3926,6 +3998,14 @@ class LocalModelBridge:
         self.sessions: dict[str, LocalSession] = {}
         self._active_id: Optional[str] = None
         self._start_time = datetime.now()
+        self._session_locks: dict[str, asyncio.Lock] = {}
+
+    def _session_lock(self, sid: str) -> asyncio.Lock:
+        lock = self._session_locks.get(sid)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._session_locks[sid] = lock
+        return lock
 
     # ------------------------------------------------------------------
     # Session management
@@ -4003,27 +4083,28 @@ class LocalModelBridge:
         sid = session_id or self._active_id
         if not sid or sid not in self.sessions:
             return "Error: no active local session."
-        s = self.sessions[sid]
-        s.messages.append({"role": "user", "content": message})
+        async with self._session_lock(sid):
+            s = self.sessions[sid]
+            s.messages.append({"role": "user", "content": message})
 
-        payload: dict = {
-            "model": s.model,
-            "messages": s.messages.copy(),
-            "stream": False,
-        }
-        if system_prompt:
-            payload["messages"] = [{"role": "system", "content": system_prompt}] + payload["messages"]
+            payload: dict = {
+                "model": s.model,
+                "messages": s.messages.copy(),
+                "stream": False,
+            }
+            if system_prompt:
+                payload["messages"] = [{"role": "system", "content": system_prompt}] + payload["messages"]
 
-        try:
-            reply = await asyncio.get_event_loop().run_in_executor(
-                None, self._post_completion, s.endpoint, payload
-            )
-        except Exception as e:
-            s.messages.pop()  # roll back user message on error
-            return f"Error calling local model: {e}"
+            try:
+                reply = await asyncio.get_event_loop().run_in_executor(
+                    None, self._post_completion, s.endpoint, payload
+                )
+            except Exception as e:
+                s.messages.pop()  # roll back user message on error
+                return f"Error calling local model: {e}"
 
-        s.messages.append({"role": "assistant", "content": reply})
-        return reply
+            s.messages.append({"role": "assistant", "content": reply})
+            return reply
 
     @staticmethod
     def _post_completion(endpoint: str, payload: dict, timeout: int = 300) -> str:
@@ -4999,6 +5080,7 @@ class DiscussionRoom:
     turn_counts: dict = field(default_factory=dict)  # {name: int} per-participant round count
     challenge_mode: bool = False
     files: list = field(default_factory=list)
+    schema_version: int = PERSISTED_SCHEMA_VERSION
 
     def save(self, path: Path):
         with _path_write_lock(path):
@@ -5006,7 +5088,7 @@ class DiscussionRoom:
 
     @classmethod
     def load(cls, path: Path) -> "DiscussionRoom":
-        data = json.loads(path.read_text())
+        data = _migrate_persisted(json.loads(path.read_text()), "room")
         valid = {f.name for f in dc_fields(cls)}
         return cls(**{k: v for k, v in data.items() if k in valid})
 
@@ -5021,7 +5103,15 @@ class RoomManager:
         self.rooms: dict[str, DiscussionRoom] = {}
         self.rooms_dir = Path.home() / ".chitta-bridge" / "rooms"
         self.rooms_dir.mkdir(parents=True, exist_ok=True)
+        self._room_locks: dict[str, asyncio.Lock] = {}
         self._load_rooms()
+
+    def _room_lock(self, room_id: str) -> asyncio.Lock:
+        lock = self._room_locks.get(room_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._room_locks[room_id] = lock
+        return lock
 
     def _load_rooms(self):
         for path in self.rooms_dir.glob("*.json"):
