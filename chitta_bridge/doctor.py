@@ -21,7 +21,7 @@ STATE_DIRS = {
     "codex-jobs": CONFIG_DIR / "codex-jobs",
     "rooms": CONFIG_DIR / "rooms",
 }
-DEFAULT_GPU_URL_DIR = "/maps/projects/caeg/scratch/kbd606/tmp"
+DEFAULT_GPU_URL_DIR = str(CONFIG_DIR / "endpoints")
 CODEX_EFFORTS = {"low", "medium", "high", "xhigh"}
 CODEX_SANDBOXES = {"read-only", "workspace-write", "danger-full-access"}
 
@@ -124,13 +124,29 @@ def check_state() -> list[str]:
 
 
 def main() -> int:
+    import argparse
+    parser = argparse.ArgumentParser(
+        prog="chitta-bridge-doctor",
+        description="Diagnose chitta-bridge install and state.",
+    )
+    parser.add_argument(
+        "--strict", action="store_true",
+        help="Exit non-zero on WARN as well as FAIL (useful for CI).",
+    )
+    args = parser.parse_args()
+
     print(f"chitta-bridge doctor — diagnostic for {CONFIG_DIR}")
     results = check_clis() + check_gpu_url_dir() + check_state()
     fails = results.count(FAIL)
     warns = results.count(WARN)
     passes = results.count(PASS)
-    print(f"\nSummary: {passes} pass, {warns} warn, {fails} fail")
-    return 1 if fails else 0
+    print(f"\nSummary: {passes} pass, {warns} warn, {fails} fail"
+          + (" (strict)" if args.strict else ""))
+    if fails:
+        return 1
+    if args.strict and warns:
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

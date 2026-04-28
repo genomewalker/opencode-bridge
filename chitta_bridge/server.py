@@ -3791,10 +3791,13 @@ Set via:
 # Default port for Ollama / vLLM (OpenAI-compatible)
 _LOCAL_LLM_PORT = 11434
 
-# URL cache files written by slurm-serve-ollama.sh
+# URL cache files written by slurm-serve-ollama.sh.
+# Default lives under the user's home so it works on any host without
+# requiring a shared scratch path. Override with CHITTA_BRIDGE_URL_DIR
+# (e.g. a shared NFS path on multi-node clusters).
+_DEFAULT_URL_DIR = str(Path.home() / ".chitta-bridge" / "endpoints")
 _OLLAMA_URL_GLOB = os.environ.get(
-    "CHITTA_BRIDGE_URL_DIR",
-    "/maps/projects/caeg/scratch/kbd606/tmp"
+    "CHITTA_BRIDGE_URL_DIR", _DEFAULT_URL_DIR
 ) + "/ollama-server-*.url"
 
 

@@ -61,6 +61,21 @@ chitta-bridge-uninstall codex       # uninstall from Codex only
 
 Verify: `claude mcp list` (Claude Code) or check `~/.codex/plugins/` (Codex)
 
+## Shared With cc-soul
+
+When `cc-soul` is installed on the same machine, `chitta-bridge` should be treated as a frontend adapter, not a separate memory stack:
+
+- `cc-soul` owns the shared backend: `chittad`, `chitta`, `chitta-mcp`, and `~/.claude/mind`
+- `chitta-bridge` adds Codex- and MCP-facing tools on top of that backend
+- updating `chitta-bridge` changes frontend glue, not the shared daemon or memory store
+
+For a dual-frontend setup, install the shared backend first, then add adapters:
+
+```bash
+cd cc-soul
+./scripts/shared-stack.sh install all
+```
+
 ## OpenCode Backend
 
 | Tool | Description |
@@ -255,7 +270,9 @@ room_synthesize(
 Chat with local LLMs (Ollama / vLLM) running on GPU nodes — via Slurm auto-discovery or direct hostname.
 
 ```bash
-# 1. Start Ollama on a Slurm GPU node (writes URL to /tmp/ollama-server-<model>.url)
+# 1. Start Ollama on a Slurm GPU node — writes URL to
+#    $CHITTA_BRIDGE_URL_DIR/ollama-server-<model>.url
+#    (default: ~/.chitta-bridge/endpoints)
 slurm-serve-ollama.sh llama3.3:70b
 
 # 2. Discover available nodes and models
@@ -273,10 +290,23 @@ local_start(session_id="llm2", model="qwen3:30b-a3b", endpoint="http://gpunode01
 
 ### Discovery order
 
-1. `/tmp/ollama-server-*.url` cache files (written by `slurm-serve-ollama.sh`)
+1. URL cache files in `$CHITTA_BRIDGE_URL_DIR` (default `~/.chitta-bridge/endpoints`, written by `slurm-serve-ollama.sh`)
 2. Your running Slurm GPU jobs (`squeue --me`)
 3. `CHITTA_BRIDGE_GPU_NODES=node1,node2` environment variable
 4. `localhost:11434` fallback
+
+### Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CHITTA_BRIDGE_URL_DIR` | `~/.chitta-bridge/endpoints` | Where `slurm-serve-ollama.sh` writes endpoint URL files and the bridge reads them. Set to a shared NFS path on multi-node clusters. |
+| `CHITTA_BRIDGE_LOG_DIR` | `~/.chitta-bridge/logs` | Slurm/ollama log destination used by `slurm-serve-ollama.sh`. |
+| `CHITTA_BRIDGE_GPU_NODES` | _unset_ | Comma-separated nodes to probe for Ollama (`node1,node2`). |
+| `OLLAMA_BIN` | `$(command -v ollama)` | Path to the `ollama` binary used by the slurm script. |
+| `OLLAMA_MODELS` | `~/.ollama/models` | Where Ollama stores pulled models. |
+| `CODEX_ALLOW_FAST` | _unset_ | Set to `1` to allow Codex Fast variants (refused by default). |
+
+Run `chitta-bridge-doctor` to verify the install: it checks CLI presence, the URL directory, persisted session/job JSON integrity, and any unknown `effort`/`sandbox` values in saved state.
 
 | Tool | Description |
 |------|-------------|
