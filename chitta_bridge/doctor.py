@@ -24,6 +24,7 @@ STATE_DIRS = {
 DEFAULT_GPU_URL_DIR = str(CONFIG_DIR / "endpoints")
 CODEX_EFFORTS = {"low", "medium", "high", "xhigh"}
 CODEX_SANDBOXES = {"read-only", "workspace-write", "danger-full-access"}
+CURRENT_SCHEMA_VERSION = 1
 
 PASS, WARN, FAIL = "PASS", "WARN", "FAIL"
 SYMBOL = {PASS: "✓", WARN: "!", FAIL: "✗"}
@@ -78,6 +79,7 @@ def _scan_json_dir(label: str, path: Path,
         return [PASS]
     bad = []
     bad_enum = []
+    future_schema = []
     total = 0
     for f in sorted(path.glob("*.json")):
         total += 1
@@ -90,18 +92,31 @@ def _scan_json_dir(label: str, path: Path,
             value = data.get(field)
             if value is not None and value not in allowed:
                 bad_enum.append((f.name, field, value))
+        sv = data.get("schema_version", 0)
+        if isinstance(sv, int) and sv > CURRENT_SCHEMA_VERSION:
+            future_schema.append((f.name, sv))
     if bad:
         for fname, err in bad[:5]:
             _print(FAIL, f"{label}/{fname}", f"unparseable: {err}")
         if len(bad) > 5:
             print(f"    … and {len(bad) - 5} more unparseable")
         return [FAIL]
+    levels: list[str] = []
     if bad_enum:
         for fname, field, value in bad_enum[:5]:
             _print(WARN, f"{label}/{fname}", f"unknown {field}={value!r}")
         if len(bad_enum) > 5:
             print(f"    … and {len(bad_enum) - 5} more")
-        return [WARN]
+        levels.append(WARN)
+    if future_schema:
+        for fname, sv in future_schema[:5]:
+            _print(WARN, f"{label}/{fname}",
+                   f"schema_version={sv} > {CURRENT_SCHEMA_VERSION} (newer chitta-bridge wrote this)")
+        if len(future_schema) > 5:
+            print(f"    … and {len(future_schema) - 5} more future-schema")
+        levels.append(WARN)
+    if levels:
+        return levels
     _print(PASS, label, f"{total} file(s) parse cleanly")
     return [PASS]
 
