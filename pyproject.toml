@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "chitta-bridge"
-version = "0.11.19"
+version = "0.11.20"
 description = "MCP server for multi-model AI discussions — cloud, agentic CLIs, local GPU models, soul memory"
 readme = "README.md"
 license = "MIT"
@@ -41,6 +41,7 @@ Repository = "https://github.com/genomewalker/chitta-bridge"
 chitta-bridge = "chitta_bridge.server:main"
 chitta-bridge-install = "chitta_bridge.install:install"
 chitta-bridge-uninstall = "chitta_bridge.install:uninstall"
+chitta-bridge-doctor = "chitta_bridge.doctor:main"
 chitta-gpu = "chitta_bridge.gpu_serve:main"
 
 [tool.hatch.build.targets.wheel]
