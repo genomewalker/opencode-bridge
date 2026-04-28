@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # slurm-serve-ollama.sh <model> [--gpus N] [--partition P] [--time HH:MM:SS]
 # Submits a SLURM job that starts ollama serve on a GPU node and writes the
-# endpoint URL to /tmp/ollama-server-<model>.url for chitta-bridge discovery.
+# endpoint URL to $CHITTA_BRIDGE_URL_DIR/ollama-server-<model>.url for
+# chitta-bridge discovery (default: ~/.chitta-bridge/endpoints).
 set -euo pipefail
 
-OLLAMA_BIN="${OLLAMA_BIN:-/maps/projects/caeg/people/kbd606/.local/bin/ollama}"
-OLLAMA_MODELS="${OLLAMA_MODELS:-/maps/projects/caeg/scratch/kbd606/ollama-models}"
+OLLAMA_BIN="${OLLAMA_BIN:-$(command -v ollama || echo ollama)}"
+OLLAMA_MODELS="${OLLAMA_MODELS:-$HOME/.ollama/models}"
 OLLAMA_PORT="${OLLAMA_PORT:-11434}"
 PARTITION="${SLURM_PARTITION:-compregular}"
 GRES="${SLURM_GRES:-gpu:a100:1}"
 TIME="${SLURM_TIME:-04:00:00}"
-LOG_DIR="/maps/projects/caeg/scratch/kbd606/tmp"
+LOG_DIR="${CHITTA_BRIDGE_LOG_DIR:-$HOME/.chitta-bridge/logs}"
 
 usage() { echo "Usage: $0 <model> [--gpus N] [--partition P] [--time HH:MM:SS]"; exit 1; }
 [ $# -lt 1 ] && usage
@@ -27,7 +28,8 @@ done
 
 # Sanitize model name for filename (replace / and : with -)
 MODEL_SAFE="${MODEL//[\/:]/-}"
-URL_DIR="${CHITTA_BRIDGE_URL_DIR:-/maps/projects/caeg/scratch/kbd606/tmp}"
+URL_DIR="${CHITTA_BRIDGE_URL_DIR:-$HOME/.chitta-bridge/endpoints}"
+mkdir -p "$URL_DIR"
 URL_FILE="${URL_DIR}/ollama-server-${MODEL_SAFE}.url"
 
 # Abort if a job for this model is already queued or running (match on prefix, tolerates : vs - in name)
@@ -43,7 +45,7 @@ rm -f "$URL_FILE"
 
 mkdir -p "$LOG_DIR"
 
-JOB_SCRIPT=$(mktemp /maps/projects/caeg/scratch/kbd606/tmp/slurm-ollama-XXXXXX.sh)
+JOB_SCRIPT=$(mktemp "${TMPDIR:-/tmp}/slurm-ollama-XXXXXX.sh")
 cat > "$JOB_SCRIPT" <<EOF
 #!/usr/bin/env bash
 #SBATCH --job-name=ollama-${MODEL_SAFE}
