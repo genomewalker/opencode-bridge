@@ -33,7 +33,7 @@ mkdir -p "$URL_DIR"
 URL_FILE="${URL_DIR}/ollama-server-${MODEL_SAFE}.url"
 
 # Abort if a job for this model is already queued or running (match on prefix, tolerates : vs - in name)
-EXISTING=$(squeue -u "$USER" -h -o "%i %j %T" 2>/dev/null | grep -i "ollama-${MODEL_SAFE}\|ollama-${MODEL}" | head -1)
+EXISTING=$(squeue -u "$USER" -h -o "%i %j %T" 2>/dev/null | grep -i "ollama-${MODEL_SAFE}\|ollama-${MODEL}" | head -1 || true)
 if [[ -n "$EXISTING" ]]; then
     echo "Job already active for model '${MODEL}': ${EXISTING}"
     echo "Cancel it first with: scancel <job_id>"
