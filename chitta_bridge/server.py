@@ -27,6 +27,7 @@ import asyncio
 import shutil
 import socket
 import tempfile
+import uuid
 import threading as _threading
 import glob as _glob
 import html as _html
@@ -1627,7 +1628,7 @@ DEFAULT_VARIANT = "medium"
 
 # Codex defaults
 DEFAULT_CODEX_MODEL = "gpt-5.3-codex"
-DEFAULT_CODEX_SANDBOX = "workspace-write"
+DEFAULT_CODEX_SANDBOX = "danger-full-access"
 
 
 @dataclass
@@ -3252,10 +3253,10 @@ Set via:
         # Build args for codex exec (or resume if we have a session)
         if session.codex_session_id:
             # Resume existing conversation
-            args = ["exec", "resume", session.codex_session_id]
+            args = ["exec", "--skip-git-repo-check", "resume", session.codex_session_id]
         else:
             # Start new conversation
-            args = ["exec"]
+            args = ["exec", "--skip-git-repo-check"]
 
         # Add model only if explicitly set (otherwise use codex config default)
         if session.model:
@@ -3523,14 +3524,14 @@ Set via:
         if model:
             args.extend(["--model", model])
         args.extend(["-c", f'model_reasoning_effort="{effort}"'])
-        if sandbox:
-            args.extend(["--sandbox", sandbox])
-            if full_auto:
-                args.append("--full-auto")
-        elif full_auto:
+        effective_sandbox = sandbox or self.config.codex_sandbox
+        # danger-full-access: omit --sandbox entirely so codex reads config file
+        # (use_linux_sandbox_bwrap = false), which skips bwrap before the lock check.
+        # Passing --sandbox overrides config and re-enables bwrap initialization.
+        if effective_sandbox != "danger-full-access":
+            args.extend(["--sandbox", effective_sandbox])
+        if full_auto:
             args.append("--full-auto")
-        else:
-            args.extend(["--sandbox", self.config.codex_sandbox])
         args.extend(["--json", "-"])
         return args
 
@@ -4245,10 +4246,13 @@ class SoulClient:
         xdg = os.environ.get("XDG_RUNTIME_DIR")
         if xdg and os.access(xdg, os.W_OK):
             base = os.path.join(xdg, "chitta")
+        elif os.access(f"/run/user/{os.getuid()}", os.W_OK):
+            base = os.path.join(f"/run/user/{os.getuid()}", "chitta")
         elif home:
             base = os.path.join(home, ".cache", "chitta")
         else:
             base = "/tmp"
+        os.makedirs(base, mode=0o700, exist_ok=True)
         return os.path.join(base, f"chitta-{hash_val}.sock")
 
     @classmethod
@@ -5104,6 +5108,7 @@ class RoomManager:
         self.rooms_dir = Path.home() / ".chitta-bridge" / "rooms"
         self.rooms_dir.mkdir(parents=True, exist_ok=True)
         self._room_locks: dict[str, asyncio.Lock] = {}
+        self._endpoint_locks: dict[str, asyncio.Lock] = {}
         self._load_rooms()
 
     def _room_lock(self, room_id: str) -> asyncio.Lock:
@@ -5111,6 +5116,13 @@ class RoomManager:
         if lock is None:
             lock = asyncio.Lock()
             self._room_locks[room_id] = lock
+        return lock
+
+    def _endpoint_lock(self, url: str) -> asyncio.Lock:
+        lock = self._endpoint_locks.get(url)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._endpoint_locks[url] = lock
         return lock
 
     def _load_rooms(self):
@@ -5133,8 +5145,8 @@ class RoomManager:
         except Exception as e:
             print(f"Warning: failed to persist room {room_id}: {e}", file=sys.stderr)
 
-    def create(self, room_id: str, topic: str, participants: list[dict],
-               files: Optional[list[str]] = None) -> str:
+    async def create(self, room_id: str, topic: str, participants: list[dict],
+                     files: Optional[list[str]] = None) -> str:
         _sanitize_session_id(room_id)
         if room_id in self.rooms:
             return f"Room '{room_id}' already exists."
@@ -5143,7 +5155,9 @@ class RoomManager:
         room.messages.append({"name": "TOPIC", "content": topic, "ts": datetime.now().isoformat()})
         # Inject soul context if chittad is running (filter code symbols)
         if SoulClient.is_available():
-            ctx = SoulClient.hybrid_recall(topic, limit=5)
+            ctx = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: SoulClient.hybrid_recall(topic, limit=5)
+            )
             if ctx and len(ctx.strip()) > 20:
                 code_markers = ["[code]", "[symbol]", "function ", "class ", "method "]
                 if not any(m in ctx[:200] for m in code_markers):
@@ -5158,14 +5172,15 @@ class RoomManager:
         soul_tag = " (with soul context)" if len(room.messages) > 1 else ""
         return f"Room '{room_id}' created with {len(participants)} participants: {names}{soul_tag}"
 
-    def add_participant(self, room_id: str, participant: dict) -> str:
+    async def add_participant(self, room_id: str, participant: dict) -> str:
         if room_id not in self.rooms:
             self._try_load_room(room_id)
         if room_id not in self.rooms:
             return f"Room '{room_id}' not found."
-        room = self.rooms[room_id]
-        room.participants.append(participant)
-        self._save_room(room_id)
+        async with self._room_lock(room_id):
+            room = self.rooms[room_id]
+            room.participants.append(participant)
+            self._save_room(room_id)
         return f"Added '{participant['name']}' to room '{room_id}'. Now {len(room.participants)} participants."
 
     def _try_load_room(self, room_id: str) -> bool:
@@ -5219,7 +5234,12 @@ class RoomManager:
         else:
             # Infer backend from participants — if all use the same backend, reuse it
             backends = [p.get("backend", "claude") for p in room.participants]
-            inferred = backends[0] if backends and len(set(backends)) == 1 else "claude"
+            if backends and len(set(backends)) == 1:
+                inferred = backends[0]
+            elif backends and all(b == "local" for b in backends):
+                inferred = "local"
+            else:
+                inferred = "claude"
             synth = {"name": "Synthesizer", "backend": inferred}
         synth_name = synth.get("name", "Synthesizer")
         backend = synth.get("backend", "claude")
@@ -6385,15 +6405,16 @@ class RoomManager:
                     model = node["models"][0]
             if base_url:
                 msg_with_files = _embed_files_in_prompt(message, files or [])
-                if sid and sid in self.local.sessions:
-                    return await self.local.send_message(msg_with_files, sid, system_prompt=system_prompt)
-                else:
-                    safe_name = re.sub(r"[^a-zA-Z0-9_-]", "-", name.lower())
-                    tmp = f"room-{participant.get('_room_id', 'r')}-{safe_name}"
-                    if tmp not in self.local.sessions:
-                        self.local.start_session(tmp, model=model or "default", endpoint=base_url)
-                    participant["session_id"] = tmp
-                    return await self.local.send_message(msg_with_files, tmp, system_prompt=system_prompt)
+                async with self._endpoint_lock(base_url):
+                    if sid and sid in self.local.sessions:
+                        return await self.local.send_message(msg_with_files, sid, system_prompt=system_prompt)
+                    else:
+                        safe_name = re.sub(r"[^a-zA-Z0-9_-]", "-", name.lower())
+                        tmp = f"room-{participant.get('_room_id', 'r')}-{safe_name}"
+                        if tmp not in self.local.sessions:
+                            self.local.start_session(tmp, model=model or "default", endpoint=base_url)
+                        participant["session_id"] = tmp
+                        return await self.local.send_message(msg_with_files, tmp, system_prompt=system_prompt)
             return "[error: no endpoint]"
 
         elif backend == "codex":
@@ -6520,7 +6541,7 @@ class RoomManager:
             count = room.turn_counts.get(name, 0)
             if count >= soul.max_rounds:
                 return {"name": name, "content": "(max rounds reached — sitting out)",
-                        "ts": datetime.now().isoformat()}
+                        "ts": datetime.now().isoformat(), "dispatch_id": str(uuid.uuid4())}
 
         system_prompt, user_msg = self._build_thread_context(room, participant)
         max_tool_turns = soul.max_tool_turns if soul and soul.tools else 0
@@ -6577,7 +6598,7 @@ class RoomManager:
         # Track round count
         room.turn_counts[name] = room.turn_counts.get(name, 0) + 1
 
-        return {"name": name, "content": final, "ts": datetime.now().isoformat()}
+        return {"name": name, "content": final, "ts": datetime.now().isoformat(), "dispatch_id": str(uuid.uuid4())}
 
     # ------------------------------------------------------------------
     # Challenge round support
@@ -6654,32 +6675,8 @@ class RoomManager:
             if not active:
                 break
 
-            # Detect if participants use different local models on the same endpoint.
-            # If so, run sequentially to avoid GPU model-loading contention.
-            local_models = set()
-            local_endpoints = set()
-            for p in active:
-                if p.get("backend") == "local":
-                    local_models.add(p.get("model", ""))
-                    ep = p.get("base_url") or p.get("endpoint") or ""
-                    if p.get("session_id") and p["session_id"] in self.local.sessions:
-                        s = self.local.sessions[p["session_id"]]
-                        local_models.add(s.model)
-                        ep = s.endpoint
-                    local_endpoints.add(ep)
-
-            needs_sequential = len(local_models) > 1 and len(local_endpoints) <= 1
-
-            if needs_sequential:
-                # Sequential: different models on same GPU — avoid model swap thrashing
-                responses = []
-                for p in active:
-                    resp = await self._participant_respond(room, p)
-                    responses.append(resp)
-            else:
-                # Parallel: same model or different endpoints
-                coros = [self._participant_respond(room, p) for p in active]
-                responses = await asyncio.gather(*coros)
+            coros = [self._participant_respond(room, p) for p in active]
+            responses = await asyncio.gather(*coros)
 
             for resp in responses:
                 room.messages.append(resp)
@@ -7804,7 +7801,10 @@ async def call_tool(name: str, arguments: dict):
             else:
                 # Re-dispatch to the hidden tool
                 hidden_name = arguments["tool"]
-                hidden_args = arguments.get("arguments", {})
+                hidden_args = arguments.get("arguments") or {
+                    k: v for k, v in arguments.items()
+                    if k not in ("tool", "action", "arguments")
+                }
                 if hidden_name not in HIDDEN_TOOLS:
                     result = f"Unknown hidden tool: {hidden_name}\nUse action='list' to see available tools."
                 else:
@@ -8038,20 +8038,32 @@ async def call_tool(name: str, arguments: dict):
                             inferred = "opencode"
                         normalized.append({"name": s, "backend": inferred, "model": s})
             participants = normalized
-            files_arg = arguments.get("files")
-            if isinstance(files_arg, str):
-                files_arg = json.loads(files_arg)
-            result = rooms.create(
-                room_id=arguments["room_id"],
-                topic=arguments["topic"],
-                participants=participants,
-                files=files_arg,
-            )
+            # Resolve backend at create time — never silently at dispatch
+            unresolved = None
+            for p in participants:
+                if not p.get("backend"):
+                    try:
+                        p["backend"] = _infer_backend(p.get("name", ""), p.get("model"))
+                    except ValueError as e:
+                        unresolved = f"Error resolving backend for '{p.get('name', '?')}': {e}"
+                        break
+            if unresolved:
+                result = unresolved
+            else:
+                files_arg = arguments.get("files")
+                if isinstance(files_arg, str):
+                    files_arg = json.loads(files_arg)
+                result = await rooms.create(
+                    room_id=arguments["room_id"],
+                    topic=arguments["topic"],
+                    participants=participants,
+                    files=files_arg,
+                )
         elif name == "room_add_participant":
             p = arguments["participant"]
             if isinstance(p, str):
                 p = json.loads(p)
-            result = rooms.add_participant(room_id=arguments["room_id"], participant=p)
+            result = await rooms.add_participant(room_id=arguments["room_id"], participant=p)
         elif name == "room_run":
             rid = arguments["room_id"]
             prompt = arguments.get("prompt")
