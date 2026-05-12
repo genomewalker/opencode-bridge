@@ -6708,6 +6708,7 @@ HIDDEN_TOOLS = {
     "codex_switch", "codex_sessions", "codex_history",
     "codex_model", "codex_config", "codex_configure",
     "codex_review", "codex_rescue", "codex_health",
+    "codex_job_status", "codex_job_result", "codex_job_cancel",
     # Local model management
     "local_start", "local_end", "local_switch",
     "local_sessions", "local_history", "local_models",
@@ -7182,6 +7183,37 @@ async def list_tools():
             name="codex_health",
             description="Codex health check: returns status and installation info",
             inputSchema={"type": "object", "properties": {}}
+        ),
+        Tool(
+            name="codex_job_status",
+            description="Check status of a background Codex job. Omit job_id to see all jobs.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "string", "description": "Job ID (omit for all jobs)"}
+                }
+            }
+        ),
+        Tool(
+            name="codex_job_result",
+            description="Retrieve the result of a completed Codex background job.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "string", "description": "Job ID to retrieve result for"}
+                }
+            }
+        ),
+        Tool(
+            name="codex_job_cancel",
+            description="Cancel a running Codex background job.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "string", "description": "Job ID to cancel"}
+                },
+                "required": ["job_id"]
+            }
         ),
         # Orchestration tools
         Tool(
