@@ -8019,7 +8019,7 @@ async def call_tool(name: str, arguments: dict):
                             d = {"name": s, "backend": "claude"}
                             if sid_or_model:
                                 _CLAUDE_SHORTHANDS = {
-                                    "opus": "claude-opus-4-6",
+                                    "opus": "claude-opus-4-7",
                                     "sonnet": "claude-sonnet-4-6",
                                     "haiku": "claude-haiku-4-5-20251001",
                                 }
