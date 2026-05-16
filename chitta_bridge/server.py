@@ -703,7 +703,19 @@ def _apply_symbol_patch(filepath: str, symbol: str, new_body: str) -> str:
             lines = content.splitlines(keepends=True)
             start = sum(len(lines[i]) for i in range(ls - 1))
             end = min(sum(len(lines[i]) for i in range(le)), len(content))
-            line_num = ls
+            # Snap start to the beginning of its line — tree-sitter may point to
+            # the `fn` keyword, leaving `pub ` / `pub(crate) ` in content[:start].
+            line_begin = content.rfind('\n', 0, start)
+            start = line_begin + 1 if line_begin >= 0 else 0
+            # Walk back further to include attribute lines (#[...]) above the symbol.
+            while start > 0:
+                prev_nl = content.rfind('\n', 0, start - 1)
+                prev_line = content[prev_nl + 1 if prev_nl >= 0 else 0:start].strip()
+                if prev_line.startswith('#[') or prev_line.startswith('///'):
+                    start = prev_nl + 1 if prev_nl >= 0 else 0
+                else:
+                    break
+            line_num = content[:start].count('\n') + 1
         else:
             result = _find_symbol_range(content, symbol, ext)
             if result is None:
