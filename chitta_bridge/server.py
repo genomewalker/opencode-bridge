@@ -8097,17 +8097,22 @@ async def call_tool(name: str, arguments: dict):
                 files_arg = arguments.get("files")
                 if isinstance(files_arg, str):
                     files_arg = json.loads(files_arg)
+                room_id = arguments.get("room_id") or f"room-{uuid.uuid4().hex[:8]}"
                 result = await rooms.create(
-                    room_id=arguments["room_id"],
-                    topic=arguments["topic"],
+                    room_id=room_id,
+                    topic=arguments.get("topic", ""),
                     participants=participants,
                     files=files_arg,
                 )
         elif name == "room_add_participant":
-            p = arguments["participant"]
-            if isinstance(p, str):
-                p = json.loads(p)
-            result = await rooms.add_participant(room_id=arguments["room_id"], participant=p)
+            p = arguments.get("participant")
+            if not p:
+                result = "Error: 'participant' is required"
+            else:
+                if isinstance(p, str):
+                    p = json.loads(p)
+                rid = arguments.get("room_id")
+                result = await rooms.add_participant(room_id=rid, participant=p) if rid else "Error: 'room_id' is required"
         elif name == "room_run":
             rid = arguments["room_id"]
             prompt = arguments.get("prompt")
@@ -8134,12 +8139,12 @@ async def call_tool(name: str, arguments: dict):
                 challenge=arguments.get("challenge", False),
             )
         elif name == "room_read":
-            result = rooms.read(room_id=arguments["room_id"])
+            result = rooms.read(room_id=arguments.get("room_id", ""))
         elif name == "room_synthesize":
             synth = arguments.get("synthesizer")
             if isinstance(synth, str):
                 synth = json.loads(synth)
-            result = await rooms.synthesize(room_id=arguments["room_id"], synthesizer=synth)
+            result = await rooms.synthesize(room_id=arguments.get("room_id", ""), synthesizer=synth)
             _threading.Thread(target=distill_event, args=("room_synth", result, {}), daemon=True).start()
         # Local model tools
         elif name == "local_discover":
