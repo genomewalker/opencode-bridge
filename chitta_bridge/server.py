@@ -4326,6 +4326,127 @@ class WebSearch:
             except Exception:
                 pass
 
+        # ── Zenodo ───────────────────────────────────────────────────────
+        m = re.match(r"https?://zenodo\.org/(?:records?|deposit)/(\d+)", url)
+        if not m:
+            m = re.match(r"https?://doi\.org/10\.5281/zenodo\.(\d+)", url)
+        if m:
+            record_id = m.group(1)
+            try:
+                api = f"https://zenodo.org/api/records/{record_id}"
+                req = urllib.request.Request(api, headers=cls._HEADERS)
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    data = _json.loads(resp.read())
+                meta = data.get("metadata", {})
+                files = data.get("files", [])
+                lines = [
+                    f"# {meta.get('title', record_id)}",
+                    f"**DOI:** {meta.get('doi', '')}  **Type:** {meta.get('resource_type', {}).get('type', '')}",
+                    f"**Authors:** {'; '.join(a.get('name','') for a in (meta.get('creators') or [])[:6])}",
+                    f"**Date:** {meta.get('publication_date', '')}  **License:** {(meta.get('license') or {}).get('id','')}",
+                    "",
+                    "## Description",
+                    re.sub(r"<[^>]+>", "", meta.get("description", "(none)")),
+                    "",
+                    "## Files",
+                ]
+                for f in files:
+                    key = f.get("key", "")
+                    size = f.get("size", 0)
+                    link = f.get("links", {}).get("self", "")
+                    lines.append(f"- [{key}]({link}) ({size:,} bytes)")
+                return "\n".join(lines)
+            except Exception:
+                pass
+
+        # ── Figshare ──────────────────────────────────────────────────────
+        m = re.match(r"https?://(?:figshare\.com/articles/[^/]+/[^/]+/(\d+)|doi\.org/10\.6084/m9\.figshare\.(\d+))", url)
+        if m:
+            article_id = m.group(1) or m.group(2)
+            try:
+                api = f"https://api.figshare.com/v2/articles/{article_id}"
+                req = urllib.request.Request(api, headers=cls._HEADERS)
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    data = _json.loads(resp.read())
+                lines = [
+                    f"# {data.get('title', article_id)}",
+                    f"**DOI:** {data.get('doi', '')}  **Type:** {data.get('defined_type_name', '')}",
+                    f"**Authors:** {'; '.join(a.get('full_name','') for a in (data.get('authors') or [])[:6])}",
+                    f"**Published:** {data.get('published_date', '')}",
+                    "",
+                    "## Description",
+                    re.sub(r"<[^>]+>", "", data.get("description", "(none)")),
+                    "",
+                    "## Files",
+                ]
+                for f in data.get("files", []):
+                    lines.append(f"- [{f.get('name','')}]({f.get('download_url','')}) ({f.get('size',0):,} bytes)")
+                return "\n".join(lines)
+            except Exception:
+                pass
+
+        # ── GitHub ────────────────────────────────────────────────────────
+        m = re.match(r"https?://github\.com/([^/]+/[^/]+)(?:/tree/([^/]+)(/.*)?)?$", url)
+        if m:
+            repo, branch, path_in_repo = m.group(1), m.group(2) or "HEAD", m.group(3) or ""
+            try:
+                # Repo metadata
+                api = f"https://api.github.com/repos/{repo}"
+                req = urllib.request.Request(api, headers={**cls._HEADERS, "Accept": "application/vnd.github+json"})
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    data = _json.loads(resp.read())
+                readme_url = f"https://raw.githubusercontent.com/{repo}/{branch}/README.md"
+                readme = ""
+                try:
+                    req2 = urllib.request.Request(readme_url, headers=cls._HEADERS)
+                    with urllib.request.urlopen(req2, timeout=timeout) as resp2:
+                        readme = resp2.read().decode("utf-8", errors="replace")[:3000]
+                except Exception:
+                    pass
+                lines = [
+                    f"# {data.get('full_name', repo)}",
+                    f"**Description:** {data.get('description', '')}",
+                    f"**Stars:** {data.get('stargazers_count', 0)}  **Language:** {data.get('language', '')}",
+                    f"**License:** {(data.get('license') or {}).get('spdx_id', '')}",
+                    f"**Last push:** {data.get('pushed_at', '')[:10]}",
+                    f"**URL:** {data.get('html_url', '')}",
+                ]
+                if readme:
+                    lines += ["", "## README", readme]
+                return "\n".join(lines)
+            except Exception:
+                pass
+
+        # ── PubMed ───────────────────────────────────────────────────────
+        m = re.match(r"https?://(?:www\.)?(?:pubmed\.ncbi\.nlm\.nih\.gov|ncbi\.nlm\.nih\.gov/pubmed)/(\d+)", url)
+        if m:
+            pmid = m.group(1)
+            try:
+                api = (f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
+                       f"?db=pubmed&id={pmid}&retmode=json")
+                req = urllib.request.Request(api, headers=cls._HEADERS)
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    data = _json.loads(resp.read())
+                doc = data.get("result", {}).get(pmid, {})
+                # Fetch abstract separately
+                abs_api = (f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+                           f"?db=pubmed&id={pmid}&rettype=abstract&retmode=text")
+                req2 = urllib.request.Request(abs_api, headers=cls._HEADERS)
+                with urllib.request.urlopen(req2, timeout=timeout) as resp2:
+                    abstract_text = resp2.read().decode("utf-8", errors="replace")
+                authors = [a.get("name", "") for a in (doc.get("authors") or [])[:6]]
+                lines = [
+                    f"# {doc.get('title', pmid)}",
+                    f"**PMID:** {pmid}  **Journal:** {doc.get('source', '')}  **Date:** {doc.get('pubdate', '')}",
+                    f"**Authors:** {'; '.join(authors)}",
+                    "",
+                    "## Abstract",
+                    abstract_text[:4000],
+                ]
+                return "\n".join(lines)
+            except Exception:
+                pass
+
         # ── DOI URL → Unpaywall → OpenAlex ───────────────────────────────
         doi = None
         m = re.match(r"https?://doi\.org/(10\.\S+)", url)
@@ -4360,6 +4481,46 @@ class WebSearch:
             except Exception:
                 pass
 
+            # CrossRef — authoritative DOI registry, has relation/supplement links
+            try:
+                api = f"https://api.crossref.org/works/{doi}"
+                req = urllib.request.Request(
+                    api, headers={**cls._HEADERS, "User-Agent": "chitta-bridge/1.0 (mailto:oa-fetch@chitta-bridge)"}
+                )
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    data = _json.loads(resp.read()).get("message", {})
+                authors = [
+                    f"{a.get('family','')} {a.get('given','')}".strip()
+                    for a in (data.get("author") or [])[:6]
+                ]
+                pub_date = ""
+                dp = (data.get("published") or data.get("published-print") or data.get("issued") or {})
+                parts_d = dp.get("date-parts", [[]])[0]
+                if parts_d:
+                    pub_date = "-".join(str(p) for p in parts_d)
+                lines = [
+                    f"# {' '.join(data.get('title', [doi]))}",
+                    f"**Journal:** {data.get('container-title', [''])[0] if data.get('container-title') else ''}  **Year:** {pub_date}",
+                    f"**DOI:** {doi}  **Type:** {data.get('type', '')}",
+                    f"**Authors:** {'; '.join(authors)}",
+                ]
+                # Supplement/related links
+                links = data.get("link", [])
+                for lnk in links:
+                    if lnk.get("content-type") not in ("unspecified",):
+                        lines.append(f"**Full text:** {lnk.get('URL','')} ({lnk.get('content-type','')})")
+                relation = data.get("relation", {})
+                for rel_type, items in relation.items():
+                    for item in (items if isinstance(items, list) else [items]):
+                        lines.append(f"**{rel_type}:** {item.get('id','')} ({item.get('id-type','')})")
+                abstract = data.get("abstract") or ""
+                if abstract:
+                    abstract = re.sub(r"<[^>]+>", "", abstract)
+                    lines += ["", "## Abstract", abstract]
+                return "\n".join(lines)
+            except Exception:
+                pass
+
             # OpenAlex fallback
             try:
                 api = f"https://api.openalex.org/works/doi:{doi}"
@@ -4386,6 +4547,113 @@ class WebSearch:
                 pass
 
         return ""
+
+    @classmethod
+    def paper_fetch(cls, url_or_doi: str, pdf_path: str = "", timeout: int = 20) -> str:
+        """Fetch paper metadata + discover all supplement/data/code resources.
+
+        Strategy (no external services, only stable official APIs):
+        1. Paper metadata via bioRxiv/arXiv/DOI APIs
+        2. Supplement discovery via Zenodo, Figshare, GitHub search by DOI
+        3. URL extraction from local PDF if pdf_path provided
+        """
+        import json as _json
+
+        # Normalise input to a URL
+        url = url_or_doi
+        if re.match(r"^10\.\d{4,}/", url_or_doi):
+            url = f"https://doi.org/{url_or_doi}"
+
+        # 1. Paper metadata
+        meta = cls._academic_fetch(url, timeout=timeout)
+        if not meta:
+            meta = f"(could not fetch metadata for: {url})"
+
+        # 2. Extract DOI from URL or metadata
+        doi = ""
+        m = re.search(r"(10\.\d{4,}/[^\s\]\)\"]+)", url + "\n" + meta)
+        if m:
+            doi = m.group(1).rstrip(".),\"'")
+
+        supplement_lines: list[str] = []
+
+        # 3. Scan local PDF for URLs (supplement/data/code links)
+        if pdf_path:
+            try:
+                import pdfplumber
+                found_urls: list[str] = []
+                with pdfplumber.open(pdf_path) as pdf:
+                    for page in pdf.pages:
+                        text = page.extract_text() or ""
+                        urls = re.findall(r"https?://[^\s\]\)>\"]+", text)
+                        found_urls.extend(urls)
+                academic_urls = [
+                    u for u in dict.fromkeys(found_urls)  # dedupe, preserve order
+                    if any(k in u.lower() for k in (
+                        "zenodo", "figshare", "github", "osf.io", "dryad",
+                        "dataverse", "s3.", "data.", "supplement", "code",
+                        "gitlab", "bitbucket", "sourceforge",
+                    ))
+                ]
+                if academic_urls:
+                    supplement_lines.append("\n## Resources found in PDF")
+                    for u in academic_urls[:20]:
+                        supplement_lines.append(f"- {u}")
+            except Exception as e:
+                supplement_lines.append(f"(pdf scan error: {e})")
+
+        # 4. Zenodo search by DOI
+        if doi:
+            try:
+                api = f"https://zenodo.org/api/records?q=related.identifier:{doi}&size=5"
+                req = urllib.request.Request(api, headers=cls._HEADERS)
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    data = _json.loads(resp.read())
+                hits = (data.get("hits") or {}).get("hits", [])
+                if hits:
+                    supplement_lines.append("\n## Zenodo deposits linked to this paper")
+                    for hit in hits[:5]:
+                        meta_z = hit.get("metadata", {})
+                        files = hit.get("files", [])
+                        record_id = hit.get("id", "")
+                        supplement_lines.append(
+                            f"- [{meta_z.get('title','Zenodo')}]"
+                            f"(https://zenodo.org/records/{record_id})"
+                            f" — {len(files)} file(s), DOI: {meta_z.get('doi','')}"
+                        )
+            except Exception:
+                pass
+
+        # 5. Figshare search by DOI
+        if doi:
+            try:
+                import json as _json2
+                api = "https://api.figshare.com/v2/articles/search"
+                payload = _json2.dumps({"search_for": doi, "item_type": 3}).encode()
+                req = urllib.request.Request(
+                    api, data=payload,
+                    headers={**cls._HEADERS, "Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    results = _json.loads(resp.read())
+                if results:
+                    supplement_lines.append("\n## Figshare datasets linked to this paper")
+                    for r in results[:3]:
+                        supplement_lines.append(
+                            f"- [{r.get('title','')}]({r.get('url_public_html','')}) "
+                            f"DOI: {r.get('doi','')}"
+                        )
+            except Exception:
+                pass
+
+        full = meta
+        if supplement_lines:
+            full += "\n" + "\n".join(supplement_lines)
+        else:
+            full += "\n\n(No supplementary resources found via Zenodo/Figshare search)"
+        return full
+
+
 # ---------------------------------------------------------------------------
 # Soul Integration (chittad Unix socket — bidirectional memory bridge)
 # ---------------------------------------------------------------------------
@@ -5131,6 +5399,13 @@ AGENT_TOOL_DEFINITIONS = [
           {"query": {"type": "string", "description": "Search query"},
            "max_results": {"type": "integer", "description": "Max results (default 5)"}},
           ["query"]),
+    _tool("paper_fetch", "Fetch academic paper metadata + discover supplements/data/code. "
+          "Bypasses Cloudflare on bioRxiv/medRxiv/arXiv via their open APIs. "
+          "Also searches Zenodo, Figshare, and scans a local PDF for resource URLs.",
+          {"url": {"type": "string", "description": "Paper URL (bioRxiv, arXiv, DOI, PubMed) or bare DOI (10.xxx/...)"},
+           "pdf_path": {"type": "string", "description": "Optional local PDF path to scan for supplement/data/code URLs"},
+           "doi": {"type": "string", "description": "Bare DOI as alternative to url"}},
+          []),
     _tool("web_fetch", "Fetch a web page and return its text content (HTML stripped).",
           {"url": {"type": "string", "description": "URL to fetch"},
            "max_chars": {"type": "integer", "description": "Max characters to return (default 8000)"}},
@@ -5765,6 +6040,12 @@ class RoomManager:
                 max_chars = int(args.get("max_chars", 8000))
                 text = WebSearch.fetch_page(url, max_chars=max_chars)
                 return text if text else "(failed to fetch page)"
+
+            elif tool_name == "paper_fetch":
+                return WebSearch.paper_fetch(
+                    url_or_doi=args.get("url", args.get("doi", "")),
+                    pdf_path=args.get("pdf_path", ""),
+                )
 
             # ── File operations ────────────────────────────────────────
             elif tool_name == "read_file":
@@ -7085,6 +7366,7 @@ HIDDEN_TOOLS = {
     # File tools exposed at top-level for direct use
     "pdf_read",
     "doc_read",
+    "paper_fetch",
 }
 
 
@@ -8157,6 +8439,24 @@ async def list_tools():
             }
         ),
         Tool(
+            name="paper_fetch",
+            description=(
+                "Fetch academic paper metadata and discover supplementary resources. "
+                "Bypasses Cloudflare on bioRxiv/medRxiv/arXiv/PubMed via official open APIs. "
+                "Also handles Zenodo, Figshare, GitHub URLs directly. "
+                "Searches Zenodo/Figshare for supplement deposits and scans local PDFs for resource URLs."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "Paper URL (bioRxiv, arXiv, PubMed, Zenodo, Figshare, GitHub) or bare DOI"},
+                    "doi": {"type": "string", "description": "Bare DOI as alternative to url (e.g. '10.1101/2021.01.01.123456')"},
+                    "pdf_path": {"type": "string", "description": "Local PDF path to scan for supplement/data/code URLs"},
+                },
+                "required": []
+            }
+        ),
+        Tool(
             name="pdf_read",
             description=(
                 "Read a PDF file with high-fidelity text and table extraction (pdfplumber + pypdf). "
@@ -8752,6 +9052,11 @@ async def call_tool(name: str, arguments: dict):
             result = rooms._tool_pdf_read(arguments)
         elif name == "doc_read":
             result = rooms._tool_doc_read(arguments)
+        elif name == "paper_fetch":
+            result = WebSearch.paper_fetch(
+                url_or_doi=arguments.get("url", arguments.get("doi", "")),
+                pdf_path=arguments.get("pdf_path", ""),
+            )
         elif name == "chitta_ingest":
             n = chitta_ingest(arguments["text"])
             result = f"chitta_ingest: wrote {n} memories"
