@@ -4222,10 +4222,35 @@ class WebSearch:
         return "\n".join(lines)
 
     @classmethod
+    @classmethod
     def fetch_page(cls, url: str, max_chars: int = 12000, timeout: int = 15) -> str:
-        req = urllib.request.Request(url, headers=cls._HEADERS)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
+        # ── Academic URL router (bypasses Cloudflare on preprint servers) ──
+        academic = cls._academic_fetch(url, timeout=timeout)
+        if academic:
+            return academic[:max_chars]
+
+        # ── General fetch with browser-like headers ────────────────────────
+        headers = {
+            **cls._HEADERS,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        }
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read()
+                enc = resp.headers.get_content_charset("utf-8")
+                body = raw.decode(enc, errors="replace")
+        except urllib.error.HTTPError as e:
+            if e.code == 403:
+                return (
+                    f"(403 Forbidden — site uses bot protection. "
+                    f"Try web_search to find an open-access version, or use pdf_read if you have the file.)"
+                )
+            raise
         text = re.sub(r"<script[^>]*>.*?</script>", "", body, flags=re.DOTALL)
         text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL)
         text = re.sub(r"<[^>]+>", " ", text)
@@ -4235,7 +4260,132 @@ class WebSearch:
             text = text[:max_chars] + "\n\n[truncated]"
         return text
 
+    @classmethod
+    def _academic_fetch(cls, url: str, timeout: int = 15) -> str:
+        """Route known academic URLs to their open APIs. Returns "" if not matched."""
+        import json as _json
 
+        # ── bioRxiv / medRxiv ─────────────────────────────────────────────
+        m = re.match(
+            r"https?://(?:www\.)?(biorxiv|medrxiv)\.org/content/([^?\s]+?)(?:v\d+)?/?$",
+            url,
+        )
+        if m:
+            server, doi = m.group(1), m.group(2)
+            api = f"https://api.biorxiv.org/details/{server}/{doi}/na/json"
+            try:
+                req = urllib.request.Request(api, headers=cls._HEADERS)
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    data = _json.loads(resp.read())
+                items = data.get("collection", [])
+                if items:
+                    p = items[-1]  # latest version
+                    pdf_url = f"https://www.biorxiv.org/content/{doi}.full.pdf"
+                    lines = [
+                        f"# {p.get('title', 'Untitled')}",
+                        f"**Authors:** {p.get('authors', '')}",
+                        f"**Date:** {p.get('date', '')}  **Version:** {p.get('version', '')}",
+                        f"**DOI:** {p.get('doi', '')}  **Category:** {p.get('category', '')}",
+                        f"**License:** {p.get('license', '')}",
+                        "",
+                        "## Abstract",
+                        p.get("abstract", "(no abstract)"),
+                        "",
+                        f"**PDF:** {pdf_url}",
+                        f"**Source XML:** {p.get('jatsxml', '')}",
+                    ]
+                    return "\n".join(lines)
+            except Exception:
+                pass
+
+        # ── arXiv ─────────────────────────────────────────────────────────
+        m = re.match(r"https?://(?:www\.)?arxiv\.org/(?:abs|pdf)/(\S+?)(?:v\d+)?(?:\.pdf)?/?$", url)
+        if m:
+            arxiv_id = m.group(1)
+            api = f"https://export.arxiv.org/api/query?id_list={arxiv_id}&max_results=1"
+            try:
+                req = urllib.request.Request(api, headers=cls._HEADERS)
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    body = resp.read().decode("utf-8", errors="replace")
+                title = re.search(r"<title>([^<]+)</title>", body)
+                authors = re.findall(r"<name>([^<]+)</name>", body)
+                summary = re.search(r"<summary>(.*?)</summary>", body, re.DOTALL)
+                published = re.search(r"<published>([^<]+)</published>", body)
+                lines = [
+                    f"# {_html.unescape(title.group(1).strip()) if title else arxiv_id}",
+                    f"**Authors:** {'; '.join(authors)}",
+                    f"**Published:** {published.group(1)[:10] if published else ''}",
+                    f"**arXiv:** https://arxiv.org/abs/{arxiv_id}",
+                    "",
+                    "## Abstract",
+                    _html.unescape(re.sub(r"\s+", " ", summary.group(1)).strip()) if summary else "(no abstract)",
+                    "",
+                    f"**PDF:** https://arxiv.org/pdf/{arxiv_id}.pdf",
+                ]
+                return "\n".join(lines)
+            except Exception:
+                pass
+
+        # ── DOI URL → Unpaywall → OpenAlex ───────────────────────────────
+        doi = None
+        m = re.match(r"https?://doi\.org/(10\.\S+)", url)
+        if m:
+            doi = m.group(1)
+        if not doi:
+            m = re.search(r"(10\.\d{4,}/\S+)", url)
+            if m:
+                doi = m.group(1).rstrip("/")
+
+        if doi:
+            # Try Unpaywall (no key needed with email)
+            try:
+                api = f"https://api.unpaywall.org/v2/{doi}?email=oa-fetch@chitta-bridge"
+                req = urllib.request.Request(api, headers=cls._HEADERS)
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    data = _json.loads(resp.read())
+                pdf_url = ""
+                best = data.get("best_oa_location") or {}
+                pdf_url = best.get("url_for_pdf") or best.get("url") or ""
+                lines = [
+                    f"# {data.get('title', doi)}",
+                    f"**Journal:** {data.get('journal_name', '')}  **Year:** {data.get('year', '')}",
+                    f"**DOI:** {doi}  **OA status:** {data.get('oa_status', '')}",
+                    f"**Authors:** {'; '.join(a.get('family','') + ', ' + a.get('given','') for a in (data.get('z_authors') or [])[:6])}",
+                ]
+                if pdf_url:
+                    lines.append(f"\n**PDF:** {pdf_url}")
+                abstract = data.get("abstract") or "(abstract not available — try the PDF)"
+                lines += ["", "## Abstract", abstract]
+                return "\n".join(lines)
+            except Exception:
+                pass
+
+            # OpenAlex fallback
+            try:
+                api = f"https://api.openalex.org/works/doi:{doi}"
+                req = urllib.request.Request(api, headers={**cls._HEADERS, "mailto": "oa-fetch@chitta-bridge"})
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    data = _json.loads(resp.read())
+                oa = data.get("open_access", {})
+                authors = [
+                    a.get("author", {}).get("display_name", "")
+                    for a in (data.get("authorships") or [])[:6]
+                ]
+                lines = [
+                    f"# {data.get('display_name', doi)}",
+                    f"**Year:** {data.get('publication_year', '')}",
+                    f"**Authors:** {'; '.join(authors)}",
+                    f"**DOI:** {doi}",
+                ]
+                if oa.get("oa_url"):
+                    lines.append(f"**PDF:** {oa['oa_url']}")
+                abstract = data.get("abstract") or "(abstract not available)"
+                lines += ["", "## Abstract", abstract]
+                return "\n".join(lines)
+            except Exception:
+                pass
+
+        return ""
 # ---------------------------------------------------------------------------
 # Soul Integration (chittad Unix socket — bidirectional memory bridge)
 # ---------------------------------------------------------------------------
