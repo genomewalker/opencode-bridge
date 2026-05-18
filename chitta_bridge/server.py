@@ -4267,7 +4267,7 @@ class WebSearch:
 
         # ── bioRxiv / medRxiv ─────────────────────────────────────────────
         m = re.match(
-            r"https?://(?:www\.)?(biorxiv|medrxiv)\.org/content/([^?\s]+?)(?:v\d+)?/?$",
+            r"https?://(?:www\.)?(biorxiv|medrxiv)\.org/content/([^?\s]+?)(?:v\d+)?(?:\.full(?:\.pdf)?|\.abstract)?/?$",
             url,
         )
         if m:
@@ -4458,30 +4458,57 @@ class WebSearch:
                 doi = m.group(1).rstrip("/")
 
         if doi:
-            # Try Unpaywall (no key needed with email)
+            # Try bioRxiv API for any bioRxiv-style DOI before generic handlers
+            for _server in ("biorxiv", "medrxiv"):
+                try:
+                    api = f"https://api.biorxiv.org/details/{_server}/{doi}/na/json"
+                    req = urllib.request.Request(api, headers=cls._HEADERS)
+                    with urllib.request.urlopen(req, timeout=timeout) as resp:
+                        bdata = _json.loads(resp.read())
+                    items = bdata.get("collection", [])
+                    if items:
+                        p = items[-1]
+                        if p.get("abstract"):
+                            pdf_url = f"https://www.biorxiv.org/content/{doi}.full.pdf"
+                            lines = [
+                                f"# {p.get('title', 'Untitled')}",
+                                f"**Authors:** {p.get('authors', '')}",
+                                f"**Date:** {p.get('date', '')}  **Version:** {p.get('version', '')}",
+                                f"**DOI:** {p.get('doi', '')}  **Category:** {p.get('category', '')}",
+                                f"**License:** {p.get('license', '')}",
+                                "", "## Abstract", p.get("abstract", ""),
+                                "", f"**PDF:** {pdf_url}",
+                            ]
+                            return "\n".join(lines)
+                except Exception:
+                    pass
+
+            # Unpaywall — good for PDF URL, but may lack abstract
+            pdf_url_unpaywall = ""
+            unpaywall_lines: list[str] = []
             try:
                 api = f"https://api.unpaywall.org/v2/{doi}?email=oa-fetch@chitta-bridge"
                 req = urllib.request.Request(api, headers=cls._HEADERS)
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     data = _json.loads(resp.read())
-                pdf_url = ""
                 best = data.get("best_oa_location") or {}
-                pdf_url = best.get("url_for_pdf") or best.get("url") or ""
-                lines = [
+                pdf_url_unpaywall = best.get("url_for_pdf") or best.get("url") or ""
+                unpaywall_lines = [
                     f"# {data.get('title', doi)}",
                     f"**Journal:** {data.get('journal_name', '')}  **Year:** {data.get('year', '')}",
                     f"**DOI:** {doi}  **OA status:** {data.get('oa_status', '')}",
                     f"**Authors:** {'; '.join(a.get('family','') + ', ' + a.get('given','') for a in (data.get('z_authors') or [])[:6])}",
                 ]
-                if pdf_url:
-                    lines.append(f"\n**PDF:** {pdf_url}")
-                abstract = data.get("abstract") or "(abstract not available — try the PDF)"
-                lines += ["", "## Abstract", abstract]
-                return "\n".join(lines)
+                if pdf_url_unpaywall:
+                    unpaywall_lines.append(f"**PDF:** {pdf_url_unpaywall}")
+                if data.get("abstract"):
+                    unpaywall_lines += ["", "## Abstract", data["abstract"]]
+                    return "\n".join(unpaywall_lines)
+                # no abstract — fall through to CrossRef which usually has it
             except Exception:
                 pass
 
-            # CrossRef — authoritative DOI registry, has relation/supplement links
+            # CrossRef — authoritative DOI registry, has abstract + relation/supplement links
             try:
                 api = f"https://api.crossref.org/works/{doi}"
                 req = urllib.request.Request(
@@ -4498,24 +4525,25 @@ class WebSearch:
                 parts_d = dp.get("date-parts", [[]])[0]
                 if parts_d:
                     pub_date = "-".join(str(p) for p in parts_d)
-                lines = [
-                    f"# {' '.join(data.get('title', [doi]))}",
-                    f"**Journal:** {data.get('container-title', [''])[0] if data.get('container-title') else ''}  **Year:** {pub_date}",
-                    f"**DOI:** {doi}  **Type:** {data.get('type', '')}",
-                    f"**Authors:** {'; '.join(authors)}",
-                ]
-                # Supplement/related links
-                links = data.get("link", [])
-                for lnk in links:
-                    if lnk.get("content-type") not in ("unspecified",):
-                        lines.append(f"**Full text:** {lnk.get('URL','')} ({lnk.get('content-type','')})")
+                # Use Unpaywall header if available (has PDF, journal), else CrossRef
+                if unpaywall_lines:
+                    lines = unpaywall_lines
+                else:
+                    lines = [
+                        f"# {' '.join(data.get('title', [doi]))}",
+                        f"**Journal:** {data.get('container-title', [''])[0] if data.get('container-title') else ''}  **Year:** {pub_date}",
+                        f"**DOI:** {doi}  **Type:** {data.get('type', '')}",
+                        f"**Authors:** {'; '.join(authors)}",
+                    ]
+                # Supplement/related links from CrossRef
                 relation = data.get("relation", {})
                 for rel_type, items in relation.items():
                     for item in (items if isinstance(items, list) else [items]):
                         lines.append(f"**{rel_type}:** {item.get('id','')} ({item.get('id-type','')})")
                 abstract = data.get("abstract") or ""
                 if abstract:
-                    abstract = re.sub(r"<[^>]+>", "", abstract)
+                    abstract = re.sub(r"<[^>]+>", " ", abstract)
+                    abstract = re.sub(r"\s+", " ", abstract).strip()
                     lines += ["", "## Abstract", abstract]
                 return "\n".join(lines)
             except Exception:
