@@ -4577,13 +4577,15 @@ class WebSearch:
         return ""
 
     @classmethod
-    def paper_fetch(cls, url_or_doi: str, pdf_path: str = "", timeout: int = 20) -> str:
+    def paper_fetch(cls, url_or_doi: str, pdf_path: str = "",
+                    full_text: bool = False, timeout: int = 20) -> str:
         """Fetch paper metadata + discover all supplement/data/code resources.
 
         Strategy (no external services, only stable official APIs):
         1. Paper metadata via bioRxiv/arXiv/DOI APIs
-        2. Supplement discovery via Zenodo, Figshare, GitHub search by DOI
-        3. URL extraction from local PDF if pdf_path provided
+        2. Full text: auto-find local PDF by DOI, or extract if pdf_path given
+        3. Supplement discovery via Zenodo, Figshare, GitHub search by DOI
+        4. URL extraction from local PDF if available
         """
         import json as _json
 
@@ -4605,18 +4607,71 @@ class WebSearch:
 
         supplement_lines: list[str] = []
 
-        # 3. Scan local PDF for URLs (supplement/data/code links)
+        # 3. Full text — find local PDF by DOI or use provided pdf_path
+        if full_text and not pdf_path and doi:
+            # Search common scratch/download locations for a PDF matching the DOI
+            doi_stem = doi.split("/")[-1].split("v")[0]  # e.g. "2026.01.22.701213"
+            search_dirs = [
+                os.path.expanduser("~/Downloads"),
+                os.path.expanduser("~/scratch"),
+                "/tmp",
+                os.environ.get("SCRATCH", ""),
+            ]
+            # Also try the directory inferred from HOME/scratch patterns
+            home = os.environ.get("HOME", "")
+            if home:
+                search_dirs += [
+                    os.path.join(home, "scratch"),
+                    os.path.join("/maps/projects/caeg/people", os.environ.get("USER", ""), "scratch"),
+                ]
+            for sdir in search_dirs:
+                if not sdir or not os.path.isdir(sdir):
+                    continue
+                try:
+                    for root, _, files in os.walk(sdir):
+                        for f in files:
+                            if f.endswith(".pdf") and doi_stem in f:
+                                pdf_path = os.path.join(root, f)
+                                break
+                        if pdf_path:
+                            break
+                except Exception:
+                    pass
+                if pdf_path:
+                    break
+
+        if full_text and not pdf_path:
+            # PDF not found locally — give actionable download instructions
+            pdf_url = f"https://www.biorxiv.org/content/{doi}.full.pdf" if doi else "(unknown)"
+            supplement_lines.append(
+                f"\n## Full text\n"
+                f"PDF is Cloudflare-protected and cannot be downloaded programmatically. "
+                f"Download it manually and call:\n"
+                f"`paper_fetch(url=\"{url}\", pdf_path=\"/path/to/downloaded.pdf\")`\n"
+                f"or use `pdf_read(path=\"/path/to/downloaded.pdf\")` directly.\n"
+                f"Direct PDF URL (for browser download): {pdf_url}"
+            )
+        elif pdf_path:
+            supplement_lines.append(f"\n(PDF: {pdf_path})")
+
+        # 4. Scan local PDF — extract full text and/or supplement URLs
         if pdf_path:
             try:
                 import pdfplumber
                 found_urls: list[str] = []
+                full_text_pages: list[str] = []
                 with pdfplumber.open(pdf_path) as pdf:
-                    for page in pdf.pages:
+                    for i, page in enumerate(pdf.pages):
                         text = page.extract_text() or ""
                         urls = re.findall(r"https?://[^\s\]\)>\"]+", text)
                         found_urls.extend(urls)
+                        if full_text:
+                            full_text_pages.append(f"\n--- Page {i + 1} ---\n{text.strip()}")
+                if full_text and full_text_pages:
+                    supplement_lines.append("\n## Full Text")
+                    supplement_lines.extend(full_text_pages)
                 academic_urls = [
-                    u for u in dict.fromkeys(found_urls)  # dedupe, preserve order
+                    u for u in dict.fromkeys(found_urls)
                     if any(k in u.lower() for k in (
                         "zenodo", "figshare", "github", "osf.io", "dryad",
                         "dataverse", "s3.", "data.", "supplement", "code",
@@ -5429,10 +5484,11 @@ AGENT_TOOL_DEFINITIONS = [
           ["query"]),
     _tool("paper_fetch", "Fetch academic paper metadata + discover supplements/data/code. "
           "Bypasses Cloudflare on bioRxiv/medRxiv/arXiv via their open APIs. "
-          "Also searches Zenodo, Figshare, and scans a local PDF for resource URLs.",
+          "Use full_text=true to extract full text (auto-finds local PDF by DOI, or provide pdf_path).",
           {"url": {"type": "string", "description": "Paper URL (bioRxiv, arXiv, DOI, PubMed) or bare DOI (10.xxx/...)"},
-           "pdf_path": {"type": "string", "description": "Optional local PDF path to scan for supplement/data/code URLs"},
-           "doi": {"type": "string", "description": "Bare DOI as alternative to url"}},
+           "pdf_path": {"type": "string", "description": "Local PDF path for full text extraction and supplement URL scanning"},
+           "doi": {"type": "string", "description": "Bare DOI as alternative to url"},
+           "full_text": {"type": "boolean", "description": "Auto-find local PDF by DOI and extract full text. Gives download instructions if PDF not cached locally."}},
           []),
     _tool("web_fetch", "Fetch a web page and return its text content (HTML stripped).",
           {"url": {"type": "string", "description": "URL to fetch"},
@@ -6073,6 +6129,7 @@ class RoomManager:
                 return WebSearch.paper_fetch(
                     url_or_doi=args.get("url", args.get("doi", "")),
                     pdf_path=args.get("pdf_path", ""),
+                    full_text=bool(args.get("full_text", False)),
                 )
 
             # ── File operations ────────────────────────────────────────
@@ -8478,8 +8535,9 @@ async def list_tools():
                 "type": "object",
                 "properties": {
                     "url": {"type": "string", "description": "Paper URL (bioRxiv, arXiv, PubMed, Zenodo, Figshare, GitHub) or bare DOI"},
-                    "doi": {"type": "string", "description": "Bare DOI as alternative to url (e.g. '10.1101/2021.01.01.123456')"},
-                    "pdf_path": {"type": "string", "description": "Local PDF path to scan for supplement/data/code URLs"},
+                    "doi": {"type": "string", "description": "Bare DOI as alternative to url"},
+                    "pdf_path": {"type": "string", "description": "Local PDF path for full text extraction and supplement URL scanning"},
+                    "full_text": {"type": "boolean", "description": "Auto-find local PDF by DOI and extract full text. Gives download instructions if not cached."},
                 },
                 "required": []
             }
@@ -9084,6 +9142,7 @@ async def call_tool(name: str, arguments: dict):
             result = WebSearch.paper_fetch(
                 url_or_doi=arguments.get("url", arguments.get("doi", "")),
                 pdf_path=arguments.get("pdf_path", ""),
+                full_text=bool(arguments.get("full_text", False)),
             )
         elif name == "chitta_ingest":
             n = chitta_ingest(arguments["text"])
