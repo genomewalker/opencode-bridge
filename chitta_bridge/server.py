@@ -4993,6 +4993,14 @@ AGENT_TOOL_DEFINITIONS = [
            "limit": {"type": "integer", "description": "Max lines to read (default 200, max 500)"},
            "pages": {"type": "string", "description": "Page range for PDF files (e.g. '1-5', '3')"}},
           ["path"]),
+    _tool("pdf_read", "Read a PDF file with high-fidelity text extraction (PyMuPDF). Supports page ranges, "
+          "metadata, table detection, and optional chitta ingestion for later recall.",
+          {"path": {"type": "string", "description": "Absolute or relative path to the PDF file"},
+           "pages": {"type": "string", "description": "Page range: '3', '1-5', 'all', or 'info' for metadata only. "
+                     "Default: first max_pages pages."},
+           "max_pages": {"type": "integer", "description": "Max pages to return when pages='all' (default 30)"},
+           "ingest": {"type": "boolean", "description": "Auto-ingest extracted text into chitta memory (default false)"}},
+          ["path"]),
     _tool("write_file", "Create or overwrite a file with new content. Must read_file first for existing files.",
           {"path": {"type": "string", "description": "File path to write"},
            "content": {"type": "string", "description": "Content to write"}},
@@ -5606,6 +5614,9 @@ class RoomManager:
             elif tool_name == "read_file":
                 return self._tool_read_file(args, participant_name=participant_name)
 
+            elif tool_name == "pdf_read":
+                return self._tool_pdf_read(args, participant_name=participant_name)
+
             elif tool_name == "write_file":
                 return self._tool_write_file(args, participant_name=participant_name)
 
@@ -5762,35 +5773,7 @@ class RoomManager:
 
         # ── PDF extraction via pdftotext ──────────────────────────────
         if suffix == ".pdf":
-            pages_arg = args.get("pages", "")
-            try:
-                import subprocess as _sp
-                cmd = ["pdftotext", "-layout"]
-                if pages_arg:
-                    # Parse "3" or "1-5"
-                    parts = pages_arg.split("-")
-                    if len(parts) == 2:
-                        cmd += ["-f", parts[0].strip(), "-l", parts[1].strip()]
-                    elif len(parts) == 1:
-                        cmd += ["-f", parts[0].strip(), "-l", parts[0].strip()]
-                cmd += [str(path), "-"]
-                result = _sp.run(cmd, capture_output=True, text=True, timeout=15)
-                if result.returncode == 0 and result.stdout.strip():
-                    text = result.stdout
-                    lines = text.splitlines()
-                    total = len(lines)
-                    limit = min(int(args.get("limit", 200)), 500)
-                    offset = int(args.get("offset", 0))
-                    selected = lines[offset:offset + limit]
-                    numbered = [f"{i + offset + 1:>5}\t{line}" for i, line in enumerate(selected)]
-                    pg = f", pages {pages_arg}" if pages_arg else ""
-                    header = f"# {path} (PDF{pg}, {total} text lines, {self._format_size(size)})"
-                    if total > offset + limit:
-                        header += f" — showing {offset + 1}-{offset + len(selected)}"
-                    return header + "\n" + "\n".join(numbered)
-            except (FileNotFoundError, _sp.TimeoutExpired):
-                pass
-            return f"(PDF file: {path}, {self._format_size(size)} — install pdftotext to read)"
+            return self._tool_pdf_read({"path": str(path), **args}, participant_name=participant_name)
 
         # ── Jupyter notebook (.ipynb) ─────────────────────────────────
         if suffix == ".ipynb":
@@ -5859,6 +5842,117 @@ class RoomManager:
             return header + "\n" + "\n".join(numbered)
         except Exception as e:
             return f"(read error: {e})"
+
+    def _tool_pdf_read(self, args: dict, participant_name: str = "") -> str:
+        """Read a PDF using pdfplumber (tables + layout) with pypdf fallback."""
+        path = Path(args.get("path", "")).expanduser().resolve()
+        if not path.exists():
+            return f"(file not found: {path})"
+        if path.suffix.lower() != ".pdf":
+            return f"(not a PDF: {path})"
+
+        size = path.stat().st_size
+        pages_arg = str(args.get("pages", "")).strip()
+        max_pages = int(args.get("max_pages", 30))
+        do_ingest = args.get("ingest", False)
+
+        try:
+            import pdfplumber
+            with pdfplumber.open(str(path)) as pdf:
+                total_pages = len(pdf.pages)
+
+                if pages_arg == "info":
+                    meta = pdf.metadata or {}
+                    lines = [
+                        f"# {path.name}",
+                        f"Pages: {total_pages}",
+                        f"Size: {self._format_size(size)}",
+                    ]
+                    for k in ("Title", "Author", "Subject", "Creator", "Producer"):
+                        v = meta.get(k) or meta.get(k.lower())
+                        if v:
+                            lines.append(f"{k}: {v}")
+                    return "\n".join(lines)
+
+                # Parse page range
+                if not pages_arg or pages_arg == "all":
+                    start, end = 1, min(total_pages, max_pages)
+                    capped = total_pages > max_pages
+                elif "-" in pages_arg:
+                    lo, hi = pages_arg.split("-", 1)
+                    start, end = int(lo.strip()), int(hi.strip())
+                    capped = False
+                else:
+                    start = end = int(pages_arg)
+                    capped = False
+
+                start = max(1, start)
+                end = min(total_pages, end)
+
+                header = f"# {path.name} (PDF, {total_pages} pages, {self._format_size(size)})"
+                if capped:
+                    header += f" — showing pages {start}-{end}, use pages='N-M' for more"
+
+                page_parts: list[str] = [header]
+                for pg_idx in range(start - 1, end):
+                    page = pdf.pages[pg_idx]
+                    # Extract tables first, then remaining text
+                    tables = page.extract_tables()
+                    text = page.extract_text(x_tolerance=2, y_tolerance=2) or ""
+
+                    page_parts.append(f"\n--- Page {pg_idx + 1} ---")
+                    if text.strip():
+                        page_parts.append(text.strip())
+                    for tbl in tables:
+                        rows = [" | ".join(str(c or "") for c in row) for row in tbl if row]
+                        page_parts.append("\n[table]\n" + "\n".join(rows))
+
+        except ImportError:
+            # pypdf fallback
+            try:
+                from pypdf import PdfReader
+                reader = PdfReader(str(path))
+                total_pages = len(reader.pages)
+                if pages_arg == "info":
+                    meta = reader.metadata or {}
+                    return "\n".join(filter(None, [
+                        f"# {path.name}",
+                        f"Pages: {total_pages}",
+                        f"Size: {self._format_size(size)}",
+                        f"Title: {meta.get('/Title', '')}" if meta.get("/Title") else "",
+                        f"Author: {meta.get('/Author', '')}" if meta.get("/Author") else "",
+                    ]))
+                if not pages_arg or pages_arg == "all":
+                    start, end = 1, min(total_pages, max_pages)
+                    capped = total_pages > max_pages
+                elif "-" in pages_arg:
+                    lo, hi = pages_arg.split("-", 1)
+                    start, end = int(lo.strip()), int(hi.strip())
+                    capped = False
+                else:
+                    start = end = int(pages_arg)
+                    capped = False
+                start, end = max(1, start), min(total_pages, end)
+                header = f"# {path.name} (PDF, {total_pages} pages, {self._format_size(size)})"
+                if capped:
+                    header += f" — showing pages {start}-{end}"
+                page_parts = [header]
+                for pg_idx in range(start - 1, end):
+                    text = reader.pages[pg_idx].extract_text() or ""
+                    page_parts.append(f"\n--- Page {pg_idx + 1} ---\n{text.strip()}")
+            except Exception as e:
+                return f"(pdf_read error: {e})"
+        except Exception as e:
+            return f"(pdf_read error: {e})"
+
+        full_text = "\n".join(page_parts)
+
+        if do_ingest and full_text.strip():
+            n = chitta_ingest(f"PDF: {path.name}\n{full_text}")
+            full_text += f"\n\n(ingested {n} memories into chitta)"
+
+        return full_text
+
     def _tool_write_file(self, args: dict, participant_name: str = "") -> str:
         """Write a file. Beats Claude Code's Write:
         CC: overwrites without checking if file was read, no backup.

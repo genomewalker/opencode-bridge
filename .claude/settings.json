@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__chitta-bridge__opencode_sessions",
+      "mcp__chitta-bridge__soul_recall",
+      "mcp__chitta-bridge__soul_context",
+      "Bash(systemctl status *)",
+      "Bash(samtools view*)",
+      "Bash(zcat *)"
+    ]
+  }
+}
