@@ -5001,6 +5001,12 @@ AGENT_TOOL_DEFINITIONS = [
            "max_pages": {"type": "integer", "description": "Max pages to return when pages='all' (default 30)"},
            "ingest": {"type": "boolean", "description": "Auto-ingest extracted text into chitta memory (default false)"}},
           ["path"]),
+    _tool("doc_read", "Read Office documents: .docx (Word), .xlsx (Excel), .pptx (PowerPoint), .odt/.ods/.odp (LibreOffice). "
+          "Extracts text, tables, slide notes, and sheet data. Optional chitta ingestion.",
+          {"path": {"type": "string", "description": "Absolute or relative path to the document"},
+           "sheets": {"type": "string", "description": "For xlsx/ods: sheet name or index (e.g. 'Sheet1', '0'). Default: all sheets."},
+           "ingest": {"type": "boolean", "description": "Auto-ingest extracted text into chitta memory (default false)"}},
+          ["path"]),
     _tool("write_file", "Create or overwrite a file with new content. Must read_file first for existing files.",
           {"path": {"type": "string", "description": "File path to write"},
            "content": {"type": "string", "description": "Content to write"}},
@@ -5617,6 +5623,9 @@ class RoomManager:
             elif tool_name == "pdf_read":
                 return self._tool_pdf_read(args, participant_name=participant_name)
 
+            elif tool_name == "doc_read":
+                return self._tool_doc_read(args, participant_name=participant_name)
+
             elif tool_name == "write_file":
                 return self._tool_write_file(args, participant_name=participant_name)
 
@@ -5951,6 +5960,104 @@ class RoomManager:
             n = chitta_ingest(f"PDF: {path.name}\n{full_text}")
             full_text += f"\n\n(ingested {n} memories into chitta)"
 
+        return full_text
+
+    def _tool_doc_read(self, args: dict, participant_name: str = "") -> str:
+        """Read Office/LibreOffice documents: docx, xlsx, pptx, odt, ods, odp."""
+        path = Path(args.get("path", "")).expanduser().resolve()
+        if not path.exists():
+            return f"(file not found: {path})"
+        suffix = path.suffix.lower()
+        size = path.stat().st_size
+        do_ingest = args.get("ingest", False)
+        parts: list[str] = []
+
+        try:
+            if suffix == ".docx":
+                import docx as _docx
+                doc = _docx.Document(str(path))
+                parts.append(f"# {path.name} (Word document, {self._format_size(size)})")
+                for para in doc.paragraphs:
+                    if para.text.strip():
+                        style = para.style.name if para.style else ""
+                        prefix = ""
+                        if style.startswith("Heading"):
+                            level = style.replace("Heading", "").strip()
+                            prefix = "#" * int(level) + " " if level.isdigit() else "## "
+                        parts.append(prefix + para.text)
+                for table in doc.tables:
+                    parts.append("\n[table]")
+                    for row in table.rows:
+                        parts.append(" | ".join(c.text.strip() for c in row.cells))
+
+            elif suffix in (".xlsx", ".xlsm", ".xls"):
+                import openpyxl as _xl
+                wb = _xl.load_workbook(str(path), read_only=True, data_only=True)
+                sheet_filter = args.get("sheets", "")
+                parts.append(f"# {path.name} (Excel workbook, {self._format_size(size)})")
+                for sname in wb.sheetnames:
+                    if sheet_filter and sname != sheet_filter:
+                        try:
+                            if int(sheet_filter) != wb.sheetnames.index(sname):
+                                continue
+                        except (ValueError, IndexError):
+                            continue
+                    ws = wb[sname]
+                    parts.append(f"\n## Sheet: {sname}")
+                    rows_written = 0
+                    for row in ws.iter_rows(values_only=True):
+                        cells = [str(c) if c is not None else "" for c in row]
+                        if any(c.strip() for c in cells):
+                            parts.append(" | ".join(cells))
+                            rows_written += 1
+                            if rows_written >= 500:
+                                parts.append("… (truncated at 500 rows — use sheets= to target a specific sheet)")
+                                break
+                wb.close()
+
+            elif suffix == ".pptx":
+                import pptx as _pptx
+                prs = _pptx.Presentation(str(path))
+                parts.append(f"# {path.name} (PowerPoint, {len(prs.slides)} slides, {self._format_size(size)})")
+                for i, slide in enumerate(prs.slides):
+                    title = ""
+                    if slide.shapes.title and slide.shapes.title.text:
+                        title = slide.shapes.title.text.strip()
+                    parts.append(f"\n--- Slide {i + 1}{': ' + title if title else ''} ---")
+                    for shape in slide.shapes:
+                        if shape.has_text_frame:
+                            text = shape.text_frame.text.strip()
+                            if text and text != title:
+                                parts.append(text)
+                    if slide.has_notes_slide:
+                        notes = slide.notes_slide.notes_text_frame.text.strip()
+                        if notes:
+                            parts.append(f"[notes] {notes}")
+
+            elif suffix in (".odt", ".ods", ".odp"):
+                from odf.opendocument import load as _odf_load
+                from odf.text import P as _OdfP
+                from odf import teletype as _teletype
+                doc = _odf_load(str(path))
+                fmt = {"odt": "Writer", "ods": "Calc", "odp": "Impress"}.get(suffix[1:], "ODF")
+                parts.append(f"# {path.name} (LibreOffice {fmt}, {self._format_size(size)})")
+                for el in doc.getElementsByType(_OdfP):
+                    text = _teletype.extractText(el).strip()
+                    if text:
+                        parts.append(text)
+
+            else:
+                return f"(unsupported format: {suffix} — supported: docx, xlsx, pptx, odt, ods, odp)"
+
+        except ImportError as e:
+            return f"(missing library for {suffix}: {e})"
+        except Exception as e:
+            return f"(doc_read error: {e})"
+
+        full_text = "\n".join(parts)
+        if do_ingest and full_text.strip():
+            n = chitta_ingest(f"Document: {path.name}\n{full_text}")
+            full_text += f"\n\n(ingested {n} memories into chitta)"
         return full_text
 
     def _tool_write_file(self, args: dict, participant_name: str = "") -> str:
@@ -6825,6 +6932,9 @@ HIDDEN_TOOLS = {
     "room_create", "room_run", "room_synthesize", "room_read",
     # Status/health
     "soul_status",
+    # File tools exposed at top-level for direct use
+    "pdf_read",
+    "doc_read",
 }
 
 
@@ -7896,6 +8006,40 @@ async def list_tools():
                 "required": ["text"]
             }
         ),
+        Tool(
+            name="pdf_read",
+            description=(
+                "Read a PDF file with high-fidelity text and table extraction (pdfplumber + pypdf). "
+                "Supports page ranges, metadata inspection, and optional chitta ingestion."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Absolute path to the PDF file"},
+                    "pages": {"type": "string", "description": "'info' for metadata, '1-5' for range, '3' for single page, 'all' for full doc"},
+                    "max_pages": {"type": "integer", "description": "Max pages when pages='all' (default 30)"},
+                    "ingest": {"type": "boolean", "description": "Auto-ingest extracted text into chitta memory"}
+                },
+                "required": ["path"]
+            }
+        ),
+        Tool(
+            name="doc_read",
+            description=(
+                "Read Office/LibreOffice documents: .docx (Word), .xlsx (Excel), .pptx (PowerPoint), "
+                ".odt/.ods/.odp (LibreOffice). Extracts text, tables, slide notes, sheet data. "
+                "Optional chitta ingestion."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Absolute path to the document"},
+                    "sheets": {"type": "string", "description": "xlsx/ods only: sheet name or index (default: all)"},
+                    "ingest": {"type": "boolean", "description": "Auto-ingest extracted text into chitta memory"}
+                },
+                "required": ["path"]
+            }
+        ),
     ]
     if not _HAS_CODEX:
         _tools = [t for t in _tools if not t.name.startswith("codex_")]
@@ -8454,6 +8598,10 @@ async def call_tool(name: str, arguments: dict):
                     arguments["position"], arguments["new_body"],
                 ),
             )
+        elif name == "pdf_read":
+            result = rooms._tool_pdf_read(arguments)
+        elif name == "doc_read":
+            result = rooms._tool_doc_read(arguments)
         elif name == "chitta_ingest":
             n = chitta_ingest(arguments["text"])
             result = f"chitta_ingest: wrote {n} memories"
