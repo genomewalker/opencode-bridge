@@ -711,7 +711,7 @@ def _apply_symbol_patch(filepath: str, symbol: str, new_body: str) -> str:
             while start > 0:
                 prev_nl = content.rfind('\n', 0, start - 1)
                 prev_line = content[prev_nl + 1 if prev_nl >= 0 else 0:start].strip()
-                if prev_line.startswith('#[') or prev_line.startswith('///'):
+                if prev_line.startswith('#[') or prev_line.startswith('///') or prev_line.startswith('/**') or prev_line.startswith('*'):
                     start = prev_nl + 1 if prev_nl >= 0 else 0
                 else:
                     break
@@ -721,6 +721,17 @@ def _apply_symbol_patch(filepath: str, symbol: str, new_body: str) -> str:
             if result is None:
                 return f"Error: symbol '{symbol}' not found in {p.name}"
             start, end = result
+            # Snap to line beginning — regex finds 'fn sym', leaving 'pub ' in content[:start]
+            line_begin = content.rfind('\n', 0, start)
+            start = line_begin + 1 if line_begin >= 0 else 0
+            # Walk back to include attribute/doc lines
+            while start > 0:
+                prev_nl = content.rfind('\n', 0, start - 1)
+                prev_line = content[prev_nl + 1 if prev_nl >= 0 else 0:start].strip()
+                if prev_line.startswith('#[') or prev_line.startswith('///') or prev_line.startswith('/**') or prev_line.startswith('*'):
+                    start = prev_nl + 1 if prev_nl >= 0 else 0
+                else:
+                    break
             line_num = content[:start].count('\n') + 1
         old_lines = content[start:end].count('\n') + 1
 
