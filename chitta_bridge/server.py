@@ -4635,24 +4635,66 @@ class WebSearch:
                     os.path.join(home, "scratch"),
                     os.path.join("/maps/projects/caeg/people", os.environ.get("USER", ""), "scratch"),
                 ]
+            import glob as _glob
             for sdir in search_dirs:
                 if not sdir or not os.path.isdir(sdir):
                     continue
+                # depth-limited: check top dir + one level deep (avoids slow NFS walks)
                 try:
-                    for root, _, files in os.walk(sdir):
-                        for f in files:
-                            if f.endswith(".pdf") and doi_stem in f:
-                                pdf_path = os.path.join(root, f)
-                                break
-                        if pdf_path:
+                    for pattern in (
+                        os.path.join(sdir, f"*{doi_stem}*.pdf"),
+                        os.path.join(sdir, "*", f"*{doi_stem}*.pdf"),
+                    ):
+                        matches = _glob.glob(pattern)
+                        if matches:
+                            pdf_path = matches[0]
                             break
                 except Exception:
                     pass
                 if pdf_path:
                     break
 
+        if full_text and not pdf_path and doi:
+            # Try to download the PDF programmatically before giving up
+            _tmp_dir = "/projects/caeg/scratch/kbd606/tmp"
+            if not os.path.isdir(_tmp_dir):
+                _tmp_dir = os.environ.get("TMPDIR", "/tmp")
+            _tmp_pdf = os.path.join(_tmp_dir, doi.split("/")[-1] + ".pdf")
+
+            # Only try Unpaywall OA link — bioRxiv/medRxiv direct PDFs stall on Cloudflare
+            _pdf_candidates: list[str] = []
+            try:
+                _uw_api = f"https://api.unpaywall.org/v2/{doi}?email=chitta@bridge.local"
+                _req = urllib.request.Request(_uw_api, headers=cls._HEADERS)
+                with urllib.request.urlopen(_req, timeout=8) as _r:
+                    _uw = _json.loads(_r.read())
+                _best = _uw.get("best_oa_location") or {}
+                _oa_url = _best.get("url_for_pdf") or _best.get("url")
+                if _oa_url:
+                    _pdf_candidates.append(_oa_url)
+            except Exception:
+                pass
+
+            for _purl in _pdf_candidates:
+                try:
+                    _req2 = urllib.request.Request(_purl, headers={
+                        **cls._HEADERS,
+                        "Accept": "application/pdf,*/*",
+                    })
+                    with urllib.request.urlopen(_req2, timeout=8) as _r2:
+                        _content_type = _r2.headers.get("Content-Type", "")
+                        _data = _r2.read()
+                    if b"%PDF" in _data[:10] or "pdf" in _content_type.lower():
+                        with open(_tmp_pdf, "wb") as _fh:
+                            _fh.write(_data)
+                        pdf_path = _tmp_pdf
+                        supplement_lines.append(f"\n(PDF downloaded from {_purl})")
+                        break
+                except Exception:
+                    pass
+
         if full_text and not pdf_path:
-            # PDF not found locally — give actionable download instructions
+            # PDF not found locally and could not be downloaded
             pdf_url = f"https://www.biorxiv.org/content/{doi}.full.pdf" if doi else "(unknown)"
             supplement_lines.append(
                 f"\n## Full text\n"
