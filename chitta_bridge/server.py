@@ -4398,7 +4398,7 @@ class WebSearch:
         # ── GitHub ────────────────────────────────────────────────────────
         m = re.match(r"https?://github\.com/([^/]+/[^/]+)(?:/tree/([^/]+)(/.*)?)?$", url)
         if m:
-            repo, branch, path_in_repo = m.group(1), m.group(2) or "HEAD", m.group(3) or ""
+            repo, branch = m.group(1), m.group(2) or "HEAD"
             try:
                 # Repo metadata
                 api = f"https://api.github.com/repos/{repo}"
@@ -4958,7 +4958,7 @@ class SoulClient:
 # on the next read_symbol for the same (file, symbol) within the same session.
 # Key: (session_id, file_resolved, symbol_name). Invalidated on mtime_ns change.
 # Size-bounded LRU (~64 entries) to avoid unbounded growth in long sessions.
-_symbol_body_cache: "collections.OrderedDict[tuple, dict]" = None  # type: ignore
+_symbol_body_cache: dict = None  # type: ignore
 _SYMBOL_CACHE_MAX = 64
 
 
