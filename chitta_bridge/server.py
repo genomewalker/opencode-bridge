@@ -1090,11 +1090,11 @@ def _apply_symbol_insert_child(
         # Reindent new_body to parent's body indent
         body_lines = new_body.splitlines()
         # Strip common leading indent so we can re-apply
-        nonempty = [l for l in body_lines if l.strip()]
-        common = min((len(l) - len(l.lstrip()) for l in nonempty), default=0)
+        nonempty = [ln for ln in body_lines if ln.strip()]
+        common = min((len(ln) - len(ln.lstrip()) for ln in nonempty), default=0)
         reindented = "\n".join(
-            (body_indent + l[common:]) if l.strip() else ""
-            for l in body_lines
+            (body_indent + ln[common:]) if ln.strip() else ""
+            for ln in body_lines
         )
         if not reindented.endswith("\n"):
             reindented += "\n"
@@ -4257,8 +4257,8 @@ class WebSearch:
         except urllib.error.HTTPError as e:
             if e.code == 403:
                 return (
-                    f"(403 Forbidden — site uses bot protection. "
-                    f"Try web_search to find an open-access version, or use pdf_read if you have the file.)"
+                    "(403 Forbidden — site uses bot protection. "
+                    "Try web_search to find an open-access version, or use pdf_read if you have the file.)"
                 )
             raise
         text = re.sub(r"<script[^>]*>.*?</script>", "", body, flags=re.DOTALL)
