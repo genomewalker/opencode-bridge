@@ -8010,12 +8010,21 @@ async def list_tools():
                 "properties": {
                     "question": {
                         "type": "string",
-                        "description": "The question/task to send to all backends"
+                        "description": "The question/task to send to all backends (alias: prompt)"
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "Alias for question"
                     },
                     "backends": {
                         "type": "array",
                         "items": {"type": "string", "enum": ["opencode", "codex"]},
-                        "description": "Backends to consult (default: both)"
+                        "description": "Backends to consult (default: both). Alias: participants (accepts 'claude:model' or 'codex:model' shorthands)"
+                    },
+                    "participants": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Alias for backends — accepts room-style shorthands like 'claude:claude-opus-4-7' or 'codex:gpt-5.5'"
                     },
                     "files": {
                         "type": "array",
@@ -8024,10 +8033,14 @@ async def list_tools():
                     },
                     "synthesize": {
                         "type": "boolean",
-                        "description": "Whether to synthesize results into unified response (default: true)"
+                        "description": "Whether to synthesize results into unified response (default: true). Alias: synthesis"
+                    },
+                    "synthesis": {
+                        "type": "boolean",
+                        "description": "Alias for synthesize"
                     }
                 },
-                "required": ["question"]
+                "required": []
             }
         ),
         Tool(
@@ -8818,11 +8831,20 @@ async def call_tool(name: str, arguments: dict):
             result = f"Status: {health['status']}\nCodex installed: {health['codex_installed']}\nSessions: {health['sessions']}\nUptime: {health['uptime']}s"
         # Orchestration tools
         elif name == "multi_consult":
+            _mc_q = arguments.get("question") or arguments.get("prompt", "")
+            _mc_syn = arguments.get("synthesize", arguments.get("synthesis", True))
+            _mc_backends = arguments.get("backends")
+            if not _mc_backends and "participants" in arguments:
+                _pmap = {"claude": "opencode", "opencode": "opencode", "codex": "codex"}
+                _mc_backends = list(dict.fromkeys(
+                    _pmap.get(p.split(":")[0].lower(), "opencode")
+                    for p in arguments["participants"]
+                ))
             result = await orchestrator.multi_consult(
-                question=arguments["question"],
-                backends=arguments.get("backends"),
+                question=_mc_q,
+                backends=_mc_backends,
                 files=arguments.get("files"),
-                synthesize=arguments.get("synthesize", True)
+                synthesize=_mc_syn,
             )
         elif name == "agent_chain":
             result = await orchestrator.chain(steps=arguments["steps"])
