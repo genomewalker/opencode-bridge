@@ -5909,20 +5909,27 @@ class RoomManager:
             challenge_bias=raw.get("challenge_bias", 0.5),
         )
 
-    def _build_thread_context(self, room: DiscussionRoom, participant: dict) -> tuple[str, str]:
+    def _build_thread_context(self, room: DiscussionRoom, participant: dict, blind: bool = False) -> tuple[str, str]:
         """Build (system_prompt, user_message) for a participant.
 
         If the participant has a soul, the system prompt contains their identity,
         loaded memories, and tool instructions. Otherwise falls back to the
         generic prompt used before.
+
+        blind=True: omit other participants' messages from the transcript so this
+        participant forms their view independently (prevents first-round anchoring).
         """
         name = participant["name"]
         soul = self._parse_soul(participant)
 
         # -- Build discussion transcript --
+        # SYSTEM_NAMES: messages that are always visible regardless of blind mode
+        _system_names = {"TOPIC", "CONTEXT", "MODERATOR"}
         transcript_parts = []
         for msg in room.messages:
             if msg["name"] == "TOPIC":
+                continue
+            if blind and msg["name"] not in _system_names:
                 continue
             transcript_parts.append(f"**{msg['name']}:** {msg['content']}")
             transcript_parts.append("")
@@ -5990,11 +5997,16 @@ class RoomManager:
             )
 
         # -- User message --
+        blind_note = (
+            "\n**Note:** Peer responses are hidden for this round. "
+            "Form your independent view from the topic and context only."
+            if blind else ""
+        )
         user_parts = [
             f"**Topic:** {room.topic}",
             "",
             "## Discussion so far",
-            transcript if transcript else "(No messages yet — you are first to respond.)",
+            (transcript + blind_note) if transcript else f"(No messages yet — you are first to respond.{blind_note})",
             "",
             "## Your turn",
             f"You are {name}. Read the full discussion above and contribute your perspective.",
@@ -7289,11 +7301,13 @@ class RoomManager:
                 except Exception:
                     pass
 
-    async def _participant_respond(self, room: DiscussionRoom, participant: dict) -> dict:
+    async def _participant_respond(self, room: DiscussionRoom, participant: dict,
+                                    round_num: int = 1, blind: bool = False) -> dict:
         """Get one participant's response with optional tool-use loop."""
         name = participant["name"]
         soul = self._parse_soul(participant)
         participant["_room_id"] = room.id
+        turn_key = f"r{round_num}:{name}"
 
         # Seed realm on first turn if empty
         if soul and soul.realm and SoulClient.is_available():
@@ -7323,7 +7337,7 @@ class RoomManager:
                 return {"name": name, "content": "(max rounds reached — sitting out)",
                         "ts": datetime.now().isoformat(), "dispatch_id": str(uuid.uuid4())}
 
-        system_prompt, user_msg = self._build_thread_context(room, participant)
+        system_prompt, user_msg = self._build_thread_context(room, participant, blind=blind)
         max_tool_turns = soul.max_tool_turns if soul and soul.tools else 0
         realm = soul.realm if soul else None
         allowed_tools = set(soul.tools) if soul else set()
@@ -7378,7 +7392,8 @@ class RoomManager:
         # Track round count
         room.turn_counts[name] = room.turn_counts.get(name, 0) + 1
 
-        return {"name": name, "content": final, "ts": datetime.now().isoformat(), "dispatch_id": str(uuid.uuid4())}
+        return {"name": name, "content": final, "ts": datetime.now().isoformat(),
+                "dispatch_id": str(uuid.uuid4()), "turn_key": turn_key}
 
     # ------------------------------------------------------------------
     # Challenge round support
@@ -7414,8 +7429,13 @@ class RoomManager:
         return claims[:5]
 
     async def run_rounds(self, room_id: str, rounds: int = 2,
-                          challenge: bool = False) -> str:
-        """Run N rounds of async discussion — all participants respond in parallel each round."""
+                          challenge: bool = False, blind_first_round: bool = False) -> str:
+        """Run N rounds of async discussion — all participants respond in parallel each round.
+
+        blind_first_round: if True, participants in round 1 see only the topic/context/moderator
+        messages and not each other's prior outputs. Prevents first-round anchoring where a
+        strong early claim pulls all subsequent responses toward it.
+        """
         if room_id not in self.rooms:
             self._try_load_room(room_id)
         if room_id not in self.rooms:
@@ -7455,11 +7475,16 @@ class RoomManager:
             if not active:
                 break
 
-            coros = [self._participant_respond(room, p) for p in active]
+            is_blind = blind_first_round and round_num == 1
+            coros = [self._participant_respond(room, p, round_num=round_num, blind=is_blind)
+                     for p in active]
             responses = await asyncio.gather(*coros)
 
+            # Idempotent append: skip any turn already committed (retry-safe)
+            existing_turn_keys = {m.get("turn_key") for m in room.messages}
             for resp in responses:
-                room.messages.append(resp)
+                if resp.get("turn_key") not in existing_turn_keys:
+                    room.messages.append(resp)
             self._save_room(room_id)
 
         return self.read(room_id)
@@ -8139,13 +8164,14 @@ async def list_tools():
         ),
         Tool(
             name="room_run",
-            description="Run N rounds in a room. Participants respond in parallel. challenge=true injects adversarial claims between rounds.",
+            description="Run N rounds in a room. Participants respond in parallel. challenge=true injects adversarial claims between rounds. blind_first_round=true hides peer responses in round 1 to prevent anchoring.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "room_id": {"type": "string", "description": "Room ID to run"},
                     "rounds": {"type": "integer", "description": "Number of discussion rounds (default: 2)"},
                     "challenge": {"type": "boolean", "description": "Enable challenge rounds — auto-extract claims and ask participants to verify/challenge them (default: false)"},
+                    "blind_first_round": {"type": "boolean", "description": "If true, participants in round 1 see only the topic/context/moderator messages, not each other's prior outputs. Prevents first-round anchoring where an early strong claim pulls all subsequent responses toward it. Recommended when you want independent initial positions. (default: false)"},
                     "prompt": {"type": "string", "description": "Discussion prompt to inject as a MODERATOR message before running rounds"},
                     "files": {"type": "array", "items": {"type": "string"}, "description": "File paths to attach to the room for this run"}
                 },
@@ -8982,6 +9008,7 @@ async def call_tool(name: str, arguments: dict):
                 room_id=rid,
                 rounds=arguments.get("rounds", 2),
                 challenge=arguments.get("challenge", False),
+                blind_first_round=arguments.get("blind_first_round", False),
             )
         elif name == "room_read":
             result = rooms.read(room_id=arguments.get("room_id", ""))
