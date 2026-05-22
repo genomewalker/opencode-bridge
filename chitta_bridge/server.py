@@ -754,7 +754,7 @@ def _apply_symbol_patch(filepath: str, symbol: str, new_body: str) -> str:
     sign = "+" if delta >= 0 else ""
     _post_write_refresh(p)
     try:
-        _cache_put(p, symbol, new_body, line_num, line_num + new_lines - 1)
+        _cache_put(p, symbol, body, line_num, line_num + new_lines - 1)
     except Exception:
         pass
     SoulClient.remember(
@@ -4233,7 +4233,6 @@ class WebSearch:
         return "\n".join(lines)
 
     @classmethod
-    @classmethod
     def fetch_page(cls, url: str, max_chars: int = 12000, timeout: int = 15) -> str:
         # ── Academic URL router (bypasses Cloudflare on preprint servers) ──
         academic = cls._academic_fetch(url, timeout=timeout)
@@ -6676,7 +6675,6 @@ class RoomManager:
         except Exception as e:
             return f"(write error: {e})"
     @staticmethod
-    @staticmethod
     def _tool_edit_file(args: dict) -> str:
         """Edit a file. Beats Claude Code's Edit:
         CC: fails if old_string not unique — but only tells you "not unique".
@@ -7501,10 +7499,6 @@ HIDDEN_TOOLS = {
     "room_create", "room_run", "room_synthesize", "room_read",
     # Status/health
     "soul_status",
-    # File tools exposed at top-level for direct use
-    "pdf_read",
-    "doc_read",
-    "paper_fetch",
 }
 
 
@@ -7559,7 +7553,7 @@ async def list_tools():
                     },
                     "model": {
                         "type": "string",
-                        "description": "Model to use (default: openai/gpt-5.2-codex)"
+                        "description": "Model to use (default: openai/gpt-5.3-codex)"
                     },
                     "agent": {
                         "type": "string",
@@ -7753,7 +7747,7 @@ async def list_tools():
                     },
                     "sandbox": {
                         "type": "string",
-                        "description": "Sandbox mode: read-only, workspace-write, danger-full-access (default: workspace-write)"
+                        "description": "Sandbox mode: read-only, workspace-write, danger-full-access (default: danger-full-access — full host access; specify workspace-write for safer operation)"
                     },
                     "full_auto": {
                         "type": "boolean",
@@ -7998,7 +7992,7 @@ async def list_tools():
                 "properties": {
                     "job_id": {"type": "string", "description": "Job ID to cancel"}
                 },
-                "required": ["job_id"]
+                "required": []
             }
         ),
         # Orchestration tools
@@ -8019,12 +8013,12 @@ async def list_tools():
                     "backends": {
                         "type": "array",
                         "items": {"type": "string", "enum": ["opencode", "codex"]},
-                        "description": "Backends to consult (default: both). Alias: participants (accepts 'claude:model' or 'codex:model' shorthands)"
+                        "description": "Backends to consult (default: both opencode+codex). Alias: participants. NOTE: model suffix (e.g. 'claude:claude-opus-4-7') is accepted for compatibility but ignored — use room_create for per-participant model control."
                     },
                     "participants": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Alias for backends — accepts room-style shorthands like 'claude:claude-opus-4-7' or 'codex:gpt-5.5'"
+                        "description": "Alias for backends. Accepts room-style shorthands like 'claude:claude-opus-4-7' or 'codex:gpt-5.5' but model suffix is ignored (routing only). Use room_create for per-model control."
                     },
                     "files": {
                         "type": "array",
@@ -8595,17 +8589,19 @@ async def list_tools():
                 "Fetch academic paper metadata and discover supplementary resources. "
                 "Bypasses Cloudflare on bioRxiv/medRxiv/arXiv/PubMed via official open APIs. "
                 "Also handles Zenodo, Figshare, GitHub URLs directly. "
-                "Searches Zenodo/Figshare for supplement deposits and scans local PDFs for resource URLs."
+                "Searches Zenodo/Figshare for supplement deposits and scans local PDFs for resource URLs. "
+                "Provide url OR doi (url takes precedence when both are given). "
+                "full_text=true auto-searches local scratch dirs for a cached PDF; use pdf_path to point at a known local file."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "url": {"type": "string", "description": "Paper URL (bioRxiv, arXiv, PubMed, Zenodo, Figshare, GitHub) or bare DOI"},
-                    "doi": {"type": "string", "description": "Bare DOI as alternative to url"},
-                    "pdf_path": {"type": "string", "description": "Local PDF path for full text extraction and supplement URL scanning"},
-                    "full_text": {"type": "boolean", "description": "Auto-find local PDF by DOI and extract full text. Gives download instructions if not cached."},
+                    "url": {"type": "string", "description": "Paper URL (bioRxiv, arXiv, PubMed, Zenodo, Figshare, GitHub) or bare DOI. Takes precedence over doi."},
+                    "doi": {"type": "string", "description": "Bare DOI (e.g. '10.1038/s41586-021-03405-w') — used when url is not provided."},
+                    "pdf_path": {"type": "string", "description": "Absolute path to a local PDF for full-text extraction and supplement URL scanning."},
+                    "full_text": {"type": "boolean", "description": "If true, auto-search local scratch dirs for a cached PDF by DOI and extract all pages. No truncation applied."},
                 },
-                "required": []
+                "required": ["url"]
             }
         ),
         Tool(
@@ -9226,7 +9222,7 @@ async def call_tool(name: str, arguments: dict):
             result = f"Unknown tool: {name}"
 
         # Truncate large responses to reduce token cost. Export/history tools are exempt.
-        _no_truncate = {"opencode_export", "opencode_history", "codex_history", "local_history"}
+        _no_truncate = {"opencode_export", "opencode_history", "codex_history", "local_history", "pdf_read", "paper_fetch"}
         _max_chars = 12_000
         if name not in _no_truncate and isinstance(result, str) and len(result) > _max_chars:
             result = result[:_max_chars] + f"\n\n[truncated — {len(result) - _max_chars:,} chars omitted]"
