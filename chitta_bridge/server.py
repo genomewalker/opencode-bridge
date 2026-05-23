@@ -5673,6 +5673,7 @@ class DiscussionRoom:
     files: list = field(default_factory=list)
     claim_ledger: list = field(default_factory=list)  # [{text, type, confidence, introduced_by, rests_on_citations, resolution_tier}]
     open_questions: list = field(default_factory=list)  # [{question, introduced_by, resolution_tier, closed_by, close_mechanism}]
+    roles: dict = field(default_factory=dict)  # {participant_name: role_key}
     schema_version: int = PERSISTED_SCHEMA_VERSION
 
     def save(self, path: Path):
@@ -5684,6 +5685,31 @@ class DiscussionRoom:
         data = _migrate_persisted(json.loads(path.read_text()), "room")
         valid = {f.name for f in dc_fields(cls)}
         return cls(**{k: v for k, v in data.items() if k in valid})
+
+
+ROLE_PROMPTS: dict[str, str] = {
+    "skeptic": (
+        "Your epistemic role is **skeptic**. "
+        "Challenge every claim that lacks cited evidence. Ask 'how do you know?' "
+        "and 'what is the alternative explanation?'. Do not accept consensus as a substitute for evidence."
+    ),
+    "empiricist": (
+        "Your epistemic role is **empiricist**. "
+        "Ground every claim in data, measurement, or citable evidence. "
+        "Flag assertions made without empirical support. Quantify uncertainty where possible."
+    ),
+    "advocate": (
+        "Your epistemic role is **advocate**. "
+        "Argue forcefully for the most defensible position given the evidence. "
+        "Synthesize the strongest case. Do not hedge unnecessarily."
+    ),
+    "devils_advocate": (
+        "Your epistemic role is **devil's advocate**. "
+        "Steel-man the least popular or most uncomfortable position. "
+        "Your goal is to surface blind spots in the emerging consensus, not to win the argument. "
+        "If everyone agrees, find the best reason they might all be wrong."
+    ),
+}
 
 
 class RoomManager:
@@ -5735,12 +5761,19 @@ class RoomManager:
             print(f"Warning: failed to persist room {room_id}: {e}", file=sys.stderr)
 
     async def create(self, room_id: str, topic: str, participants: list[dict],
-                     files: Optional[list[str]] = None) -> str:
+                     files: Optional[list[str]] = None,
+                     roles: Optional[dict] = None) -> str:
         _sanitize_session_id(room_id)
         if room_id in self.rooms:
             return f"Room '{room_id}' already exists."
+        if roles:
+            valid = set(ROLE_PROMPTS)
+            for pname, role in roles.items():
+                if role not in valid:
+                    return f"Invalid role '{role}' for '{pname}'. Valid: {sorted(valid)}"
         expanded = _expand_paths(files or [])
-        room = DiscussionRoom(id=room_id, topic=topic, participants=participants, files=expanded)
+        room = DiscussionRoom(id=room_id, topic=topic, participants=participants, files=expanded,
+                              roles=roles or {})
         room.messages.append({"name": "TOPIC", "content": topic, "ts": datetime.now().isoformat()})
         # Inject soul context if chittad is running (filter code symbols)
         if SoulClient.is_available():
@@ -5759,7 +5792,18 @@ class RoomManager:
         self._save_room(room_id)
         names = ", ".join(p["name"] for p in participants)
         soul_tag = " (with soul context)" if len(room.messages) > 1 else ""
-        return f"Room '{room_id}' created with {len(participants)} participants: {names}{soul_tag}"
+        role_tag = f" Roles: {roles}." if roles else ""
+        # Structural diversity warning at create time
+        bkeys: dict[tuple, list[str]] = {}
+        for p in participants:
+            bk = (p.get("backend", "claude"), p.get("model") or "")
+            bkeys.setdefault(bk, []).append(p["name"])
+        collision_strs = [" + ".join(ns) for ns in bkeys.values() if len(ns) > 1]
+        diversity_warn = (
+            f" ⚠️ Same-model participants: {', '.join(collision_strs)} — convergence may reflect shared priors."
+            if collision_strs else ""
+        )
+        return f"Room '{room_id}' created with {len(participants)} participants: {names}{soul_tag}{role_tag}{diversity_warn}"
 
     async def add_participant(self, room_id: str, participant: dict) -> str:
         if room_id not in self.rooms:
@@ -5813,6 +5857,73 @@ class RoomManager:
             lines.append(msg["content"])
             lines.append("")
         return "\n".join(lines)
+
+    async def challenge(self, room_id: str, minority_reading: str, decision_bet: str,
+                        blind: bool = True) -> str:
+        """Fork a completed room into a challenge round.
+
+        Participants respond only to the minority reading + decision bet from an adversarial
+        synthesis. Forks the parent room (does not mutate it). Uses blind=True by default
+        so participants can't anchor on each other's challenge responses.
+        """
+        if room_id not in self.rooms:
+            self._try_load_room(room_id)
+        if room_id not in self.rooms:
+            return f"Room '{room_id}' not found."
+        if not minority_reading or not minority_reading.strip():
+            return (
+                "room_challenge requires a non-empty minority_reading. "
+                "Run room_synthesize with adversarial=true first, then pass the minority reading here."
+            )
+
+        parent = self.rooms[room_id]
+        child_id = f"{room_id}-challenge"
+
+        # Check diversity of parent
+        div = self._compute_diversity(parent)
+        div_note = f"\n\n_Diversity note: {div['warning']}_" if div["warning"] else ""
+
+        # Fork: new room inheriting participants, roles, files — but NOT the parent transcript
+        child = DiscussionRoom(
+            id=child_id,
+            topic=f"[Challenge] {parent.topic}",
+            participants=list(parent.participants),
+            files=list(parent.files),
+            roles=dict(parent.roles),
+        )
+        # Seed with the minority reading and decision bet as a MODERATOR message
+        child.messages.append({"name": "TOPIC", "content": child.topic, "ts": datetime.now().isoformat()})
+        child.messages.append({
+            "name": "MODERATOR",
+            "content": (
+                f"## Challenge Round\n\n"
+                f"The following is a **contrarian reading** of the prior discussion — not a peer's view, "
+                f"but the strongest alternative interpretation a reasonable reader could construct from the same evidence.\n\n"
+                f"### Minority Reading\n{minority_reading}\n\n"
+                f"### Decision Bet\n{decision_bet}\n\n"
+                f"**Your task:** Steelman or refute the minority reading specifically. "
+                f"Do NOT re-litigate the majority position. "
+                f"Address the decision bet directly — is the critical assumption valid or not, and why?\n"
+                f"Cite evidence where possible. Unsupported assertions will be flagged."
+                f"{div_note}"
+            ),
+            "ts": datetime.now().isoformat(),
+        })
+        self.rooms[child_id] = child
+        self._save_room(child_id)
+
+        # Run one blind round (participants respond to dissent independently)
+        result = await self.run_rounds(child_id, rounds=1, blind_first_round=blind)
+
+        # Compute post-challenge diversity
+        div_after = self._compute_diversity(self.rooms[child_id])
+        div_suffix = (
+            f"\n\n---\n**Post-challenge N_eff:** {div_after['N_eff']} "
+            f"(overlap={div_after['claim_overlap']}){' ⚠️ ' + div_after['warning'] if div_after['warning'] else ''}"
+            if div_after["N_eff"] is not None else ""
+        )
+
+        return result + div_suffix
 
     async def synthesize(self, room_id: str, synthesizer: Optional[dict] = None,
                          adversarial: bool = False, verify_citations: bool = False) -> str:
@@ -6057,6 +6168,11 @@ class RoomManager:
                 f"and direct. React to other participants' arguments — challenge, extend, or "
                 f"correct them as warranted."
             )
+
+        # Inject epistemic role text (re-prepended every turn so it doesn't decay)
+        role_key = room.roles.get(name)
+        if role_key and role_key in ROLE_PROMPTS:
+            system_prompt = system_prompt + f"\n\n## Your Epistemic Role\n{ROLE_PROMPTS[role_key]}"
 
         # -- User message --
         blind_note = (
@@ -7543,6 +7659,69 @@ class RoomManager:
                     })
         return questions
 
+    def _compute_diversity(self, room: "DiscussionRoom") -> dict:
+        """Compute two diversity signals for a room.
+
+        Signal 1 (structural): same (backend, model) participant pairs — deterministic.
+        Signal 2 (behavioral): mean pairwise Jaccard over per-participant sentence sets,
+          then N_eff = (Σwᵢ)²/Σwᵢ² with wᵢ = 1 - mean_overlap. Requires N ≥ 3.
+        Returns dict with backend_collisions, claim_overlap, N_eff, warning.
+        """
+        participants = room.participants
+        n = len(participants)
+
+        # Signal 1
+        bkeys: dict[tuple, list[str]] = {}
+        for p in participants:
+            bk = (p.get("backend", "claude"), p.get("model") or "")
+            bkeys.setdefault(bk, []).append(p["name"])
+        collisions = [ns for ns in bkeys.values() if len(ns) > 1]
+
+        # Signal 2 — sentence overlap per participant
+        claim_overlap: Optional[float] = None
+        N_eff: Optional[float] = None
+        if n >= 3:
+            pnames = {p["name"] for p in participants}
+            _sys = {"TOPIC", "CONTEXT", "MODERATOR"}
+            per_p: dict[str, set[str]] = {pn: set() for pn in pnames}
+            for msg in room.messages:
+                mn = msg["name"]
+                if mn in _sys or mn not in per_p:
+                    continue
+                for sent in msg.get("content", "").lower().split("."):
+                    sent = sent.strip()
+                    if len(sent) > 15:
+                        per_p[mn].add(sent[:40])
+            sets = [s for s in per_p.values() if s]
+            if len(sets) >= 2:
+                jaccards: list[float] = []
+                for i in range(len(sets)):
+                    for j in range(i + 1, len(sets)):
+                        u = len(sets[i] | sets[j])
+                        jaccards.append(len(sets[i] & sets[j]) / u if u else 0.0)
+                if jaccards:
+                    claim_overlap = sum(jaccards) / len(jaccards)
+                    w = 1.0 - claim_overlap
+                    weights = [w] * n
+                    sw = sum(weights)
+                    sw2 = sum(x * x for x in weights)
+                    N_eff = (sw ** 2) / sw2 if sw2 > 0 else float(n)
+
+        warning_parts: list[str] = []
+        if collisions:
+            cs = [" + ".join(ns) for ns in collisions]
+            warning_parts.append(f"Same-model participants: {', '.join(cs)} — convergence may reflect shared priors")
+        if N_eff is not None and N_eff < 1.5:
+            warning_parts.append(f"N_eff ≈ {N_eff:.1f} — effective independent participants is very low")
+        warning = ". ".join(warning_parts) + "." if warning_parts else None
+
+        return {
+            "backend_collisions": [list(ns) for ns in collisions],
+            "claim_overlap": round(claim_overlap, 3) if claim_overlap is not None else None,
+            "N_eff": round(N_eff, 2) if N_eff is not None else None,
+            "warning": warning,
+        }
+
     def _round_converged(self, round_contents: list[str],
                           prior_claim_keys: set[str]) -> tuple[bool, list[str]]:
         """Ledger-delta convergence: converged when no disagreement AND no new claims.
@@ -7650,6 +7829,19 @@ class RoomManager:
                         seen_q_keys.add(key)
                         room.open_questions.append(oq)
 
+            # Diversity report after round 1 (injected as MODERATOR so synthesizer sees it)
+            if round_num == 1:
+                div = self._compute_diversity(room)
+                if div["warning"]:
+                    room.messages.append({
+                        "name": "MODERATOR",
+                        "content": (
+                            f"[Diversity] ⚠️ {div['warning']} "
+                            f"(N_eff={div['N_eff']}, claim_overlap={div['claim_overlap']})"
+                        ),
+                        "ts": datetime.now().isoformat(),
+                    })
+
             self._save_room(room_id)
 
             # Stop-early: halt when ledger stops moving and no disagreement
@@ -7701,7 +7893,7 @@ HIDDEN_TOOLS = {
     # Orchestration (complex, rarely needed)
     "multi_consult", "agent_chain", "delegate_codex", "parallel_agents",
     # Rooms (multi-agent discussion)
-    "room_create", "room_run", "room_synthesize", "room_read",
+    "room_create", "room_run", "room_synthesize", "room_read", "room_challenge",
     # Status/health
     "soul_status",
 }
@@ -8337,6 +8529,10 @@ async def list_tools():
                     "files": {
                         "type": "string",
                         "description": 'JSON array of file or directory paths to attach to all participants: ["/path/to/file.py", "/path/to/dir"]. Directories are expanded recursively. Files are passed via --file to opencode/claude, embedded inline for codex/local.'
+                    },
+                    "roles": {
+                        "type": "string",
+                        "description": 'JSON object mapping participant name → epistemic role. Valid roles: "skeptic", "empiricist", "advocate", "devils_advocate". E.g. {"Claude-A": "skeptic", "Claude-B": "devils_advocate"}. Role text is injected into every turn prompt so it persists across rounds.'
                     }
                 },
                 "required": ["room_id", "topic", "participants"]
@@ -8375,6 +8571,20 @@ async def list_tools():
                     }
                 },
                 "required": ["room_id"]
+            }
+        ),
+        Tool(
+            name="room_challenge",
+            description="Fork a completed room into a challenge round. Participants respond blind to the minority reading + decision bet from an adversarial synthesis — without seeing each other or re-litigating the majority. Run room_synthesize with adversarial=true first.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "room_id": {"type": "string", "description": "ID of the completed room to challenge"},
+                    "minority_reading": {"type": "string", "description": "The strongest-minority reading from adversarial synthesis. Must be non-empty — room_challenge refuses to fabricate dissent."},
+                    "decision_bet": {"type": "string", "description": "The critical unverified assumption from the adversarial synthesis decision bet field."},
+                    "blind": {"type": "boolean", "description": "If true (default), participants form their challenge responses independently without seeing each other."}
+                },
+                "required": ["room_id", "minority_reading", "decision_bet"]
             }
         ),
         Tool(
@@ -9153,11 +9363,15 @@ async def call_tool(name: str, arguments: dict):
                 if isinstance(files_arg, str):
                     files_arg = json.loads(files_arg)
                 room_id = arguments.get("room_id") or f"room-{uuid.uuid4().hex[:8]}"
+                roles_arg = arguments.get("roles")
+                if isinstance(roles_arg, str):
+                    roles_arg = json.loads(roles_arg)
                 result = await rooms.create(
                     room_id=room_id,
                     topic=arguments.get("topic", ""),
                     participants=participants,
                     files=files_arg,
+                    roles=roles_arg,
                 )
         elif name == "room_add_participant":
             p = arguments.get("participant")
@@ -9206,6 +9420,13 @@ async def call_tool(name: str, arguments: dict):
                                             adversarial=arguments.get("adversarial", False),
                                             verify_citations=arguments.get("verify_citations", False))
             _threading.Thread(target=distill_event, args=("room_synth", result, {}), daemon=True).start()
+        elif name == "room_challenge":
+            result = await rooms.challenge(
+                room_id=arguments.get("room_id", ""),
+                minority_reading=arguments.get("minority_reading", ""),
+                decision_bet=arguments.get("decision_bet", ""),
+                blind=arguments.get("blind", True),
+            )
         # Local model tools
         elif name == "local_discover":
             nodes = await asyncio.get_event_loop().run_in_executor(None, GpuNodeDiscovery.discover)
