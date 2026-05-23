@@ -3062,7 +3062,7 @@ class CodexBridge:
         stdin_data: str,
         cwd: str,
         timeout: int = 300,
-        stall_timeout: int = 90,
+        stall_timeout: int = 180,
     ) -> tuple[str, int]:
         """Run a codex exec command with stdin data; returns (raw_output, returncode)."""
         if not CODEX_BIN:
@@ -3324,7 +3324,7 @@ Set via:
 
             stdout_parts: list[str] = []
             deadline = asyncio.get_event_loop().time() + 300
-            stall_timeout = 90
+            stall_timeout = 180
             first_line = True
 
             while True:
@@ -5671,6 +5671,8 @@ class DiscussionRoom:
     turn_counts: dict = field(default_factory=dict)  # {name: int} per-participant round count
     challenge_mode: bool = False
     files: list = field(default_factory=list)
+    claim_ledger: list = field(default_factory=list)  # [{text, type, confidence, introduced_by, rests_on_citations, resolution_tier}]
+    open_questions: list = field(default_factory=list)  # [{question, introduced_by, resolution_tier, closed_by, close_mechanism}]
     schema_version: int = PERSISTED_SCHEMA_VERSION
 
     def save(self, path: Path):
@@ -5795,25 +5797,84 @@ class RoomManager:
             lines.append("")
         return "\n".join(lines)
 
-    async def synthesize(self, room_id: str, synthesizer: Optional[dict] = None) -> str:
-        """Run a final synthesis pass over the full transcript — distills all responses into one answer."""
+    def _build_annotated_transcript(self, room: "DiscussionRoom") -> str:
+        """Transcript with per-message grounding tags (grounded:N citations / asserted)."""
+        _system = {"TOPIC", "CONTEXT", "MODERATOR"}
+        lines = [f"# Discussion Room: {room.id}", f"**Topic:** {room.topic}", ""]
+        for msg in room.messages:
+            ts = msg["ts"][11:19]
+            name = msg["name"]
+            if name not in _system:
+                score = msg.get("citation_score", 0)
+                tag = f" [grounded:{score} citations]" if score > 0 else " [asserted: no citations]"
+            else:
+                tag = ""
+            lines.append(f"**[{ts}] {name}:**{tag}")
+            lines.append(msg["content"])
+            lines.append("")
+        return "\n".join(lines)
+
+    async def synthesize(self, room_id: str, synthesizer: Optional[dict] = None,
+                         adversarial: bool = False, verify_citations: bool = False) -> str:
+        """Run a final synthesis pass over the full transcript — distills all responses into one answer.
+
+        adversarial=True: produces both a majority reading and a strongest-minority reading,
+        plus a mandatory 'decision bet' field naming the critical unverified assumption.
+        If a coherent minority reading cannot be constructed, the discussion is genuinely converged.
+        verify_citations=True: instructs the synthesizer to fetch and verify each cited source before
+        including it in the synthesis — flags unverifiable or misquoted references.
+        """
         if room_id not in self.rooms:
             self._try_load_room(room_id)
         if room_id not in self.rooms:
             return f"Room '{room_id}' not found."
         room = self.rooms[room_id]
 
-        transcript = self.read(room_id)
-        prompt = (
-            f"You are a neutral synthesizer reviewing a multi-agent discussion.\n\n"
-            f"{transcript}\n\n"
-            f"## Synthesis Task\n"
-            f"Resolve any contradictions between participants, then distill the discussion into a single, coherent answer:\n"
-            f"1. **Core consensus** — what all participants agreed on\n"
-            f"2. **Key disagreements** — where they diverged and why\n"
-            f"3. **Best answer** — your integrated recommendation, drawing on the strongest points\n"
-            f"4. **Open questions** — what remains unresolved\n"
-        )
+        transcript = self._build_annotated_transcript(room)
+        verify_block = (
+            "\n\n**Citation verification required**: Before finalizing your synthesis, "
+            "fetch and verify each URL, arXiv ID, or DOI cited in the transcript. "
+            "For each: confirm the source exists and supports the claimed point. "
+            "Flag any citation that is unverifiable, misquoted, or does not support the claim."
+        ) if verify_citations else ""
+        if adversarial:
+            prompt = (
+                f"You are a neutral synthesizer reviewing a multi-agent discussion.\n"
+                f"Messages tagged [grounded:N citations] cite verifiable sources; "
+                f"[asserted: no citations] are claims without external evidence — weight accordingly.\n\n"
+                f"{transcript}\n\n"
+                f"## Adversarial Dual Synthesis Task\n"
+                f"Produce TWO competing readings of this discussion, then a decision bet:\n\n"
+                f"### 1. Majority Reading\n"
+                f"The strongest integrated answer drawing on the best-supported claims. "
+                f"Distinguish grounded consensus from asserted consensus.\n\n"
+                f"### 2. Strongest Minority Reading\n"
+                f"Steelman the dissenting or under-weighted positions into the most coherent "
+                f"alternative conclusion a reasonable reader could reach from the same transcript. "
+                f"If NO coherent minority reading can be constructed (genuine convergence), "
+                f"state that explicitly — this is a strong convergence signal.\n\n"
+                f"### 3. Decision Bet\n"
+                f"Name the single most critical **unverified assumption** the majority reading "
+                f"depends on. One sentence. If both readings share the same assumption, name it "
+                f"and flag this as a panel blind spot.\n\n"
+                f"### 4. Open Questions\n"
+                f"What remains empirically unresolved after this discussion?\n"
+                f"{verify_block}"
+            )
+        else:
+            prompt = (
+                f"You are a neutral synthesizer reviewing a multi-agent discussion.\n"
+                f"Messages tagged [grounded:N citations] cite verifiable sources; "
+                f"[asserted: no citations] are claims without external evidence — weight accordingly.\n\n"
+                f"{transcript}\n\n"
+                f"## Synthesis Task\n"
+                f"Resolve any contradictions between participants, then distill the discussion into a single, coherent answer:\n"
+                f"1. **Core consensus** — what all participants agreed on\n"
+                f"2. **Key disagreements** — where they diverged and why\n"
+                f"3. **Best answer** — your integrated recommendation, drawing on the strongest points\n"
+                f"4. **Open questions** — what remains unresolved\n"
+                f"{verify_block}"
+            )
 
         # Use synthesizer config or infer backend from room participants
         if synthesizer:
@@ -5827,14 +5888,15 @@ class RoomManager:
                 inferred = "local"
             else:
                 inferred = "claude"
-            synth = {"name": "Synthesizer", "backend": inferred}
+            synth = {"name": "Synthesizer", "backend": inferred,
+                     "model": "claude-opus-4-7" if inferred == "claude" else None}
         synth_name = synth.get("name", "Synthesizer")
         backend = synth.get("backend", "claude")
         sid = synth.get("session_id")
 
         try:
             if backend == "claude":
-                reply = await self._run_claude_p(prompt)
+                reply = await self._run_claude_p(prompt, model=synth.get("model"))
             elif backend == "local":
                 base_url = synth.get("base_url") or synth.get("endpoint")
                 model = synth.get("model", "")
@@ -7428,13 +7490,103 @@ class RoomManager:
         claims.sort(key=lambda c: len(c), reverse=True)
         return claims[:5]
 
+    _CITATION_RE = re.compile(
+        r'https?://\S+|arxiv\.org/\S+|doi\.org/\S+|\[\d+\]|\([\w\s]+et al\.?,?\s*\d{4}\)',
+        re.IGNORECASE,
+    )
+    _DISAGREE_RE = re.compile(
+        r'\b(disagree|challenge|push.?back|however|but\b|incorrect|wrong|counter|refute|'
+        r'not convinced|push back|I\'d argue|I would argue|on the contrary|actually,)\b',
+        re.IGNORECASE,
+    )
+
+    _OPEN_Q_RE = re.compile(
+        r'(?:^|\. )([A-Z][^.!?\n]{15,}(?:\?|remains? (?:open|unresolved|unclear)|'
+        r'unclear whether|open question|yet to be|no (?:data|evidence|paper)|unrun|'
+        r'unanswered|unaddressed)[^.!?\n]*[.!?])',
+        re.MULTILINE,
+    )
+    _CLAIM_TYPE_RE = re.compile(
+        r'\b(therefore|thus|implies?|suggests?|must be|is likely|conclude|demonstrates?|'
+        r'shows? that|we can infer|it follows)\b',
+        re.IGNORECASE,
+    )
+
+    def _score_citations(self, text: str) -> int:
+        """Count verifiable artifacts (URLs, arXiv refs, DOIs, inline citations) in text."""
+        return len(self._CITATION_RE.findall(text))
+
+    def _classify_claim(self, text: str) -> str:
+        """Minimal two-type tag: 'inference' if inferential language present, else 'observation'."""
+        return "inference" if self._CLAIM_TYPE_RE.search(text) else "observation"
+
+    def _extract_open_questions(self, messages: list[dict]) -> list[dict]:
+        """Extract open questions / unresolved confounds from messages."""
+        questions = []
+        seen: set[str] = set()
+        for msg in messages:
+            if msg["name"] in ("TOPIC", "CONTEXT", "MODERATOR"):
+                continue
+            citations = self._CITATION_RE.findall(msg.get("content", ""))
+            tier = "external" if citations else "unresolvable"
+            for m in self._OPEN_Q_RE.finditer(msg.get("content", "")):
+                q = m.group(1).strip()
+                key = q[:60].lower()
+                if key not in seen and len(q) > 20:
+                    seen.add(key)
+                    questions.append({
+                        "question": q,
+                        "introduced_by": msg["name"],
+                        "resolution_tier": tier,
+                        "closed_by": None,
+                        "close_mechanism": None,
+                    })
+        return questions
+
+    def _round_converged(self, round_contents: list[str],
+                          prior_claim_keys: set[str]) -> tuple[bool, list[str]]:
+        """Ledger-delta convergence: converged when no disagreement AND no new claims.
+
+        Returns (converged, new_claims_extracted).
+        Premature-convergence guard: requires citations if ledger was previously empty
+        (a round that produces zero cited claims with no disagreement is suspect, not done).
+        """
+        has_disagreement = any(self._DISAGREE_RE.search(c) for c in round_contents)
+        if has_disagreement:
+            return False, []
+
+        # Extract new claims not already in the ledger
+        new_claims: list[str] = []
+        seen = set(prior_claim_keys)
+        for content in round_contents:
+            msgs = [{"name": "participant", "content": content}]
+            for tagged in self._extract_claims(msgs):
+                claim_text = tagged.split("]: ", 1)[-1] if "]: " in tagged else tagged
+                key = claim_text[:50].lower()
+                if key not in seen:
+                    seen.add(key)
+                    new_claims.append(claim_text)
+
+        if new_claims:
+            return False, new_claims  # Ledger still moving — not converged
+
+        # Ledger stable + no disagreement — converged, but require at least some citations
+        # (guards against empty/no-op responses being mistaken for consensus)
+        has_citations = any(self._score_citations(c) > 0 for c in round_contents)
+        converged = has_citations or bool(prior_claim_keys)  # ok if ledger was already populated
+        return converged, []
+
     async def run_rounds(self, room_id: str, rounds: int = 2,
-                          challenge: bool = False, blind_first_round: bool = False) -> str:
+                          challenge: bool = False, blind_first_round: bool = False,
+                          sparse_topology: bool = False, stop_early: bool = False) -> str:
         """Run N rounds of async discussion — all participants respond in parallel each round.
 
-        blind_first_round: if True, participants in round 1 see only the topic/context/moderator
-        messages and not each other's prior outputs. Prevents first-round anchoring where a
-        strong early claim pulls all subsequent responses toward it.
+        blind_first_round: round 1 is blind (participants don't see each other's prior outputs).
+        sparse_topology: ALL rounds are blind — participants never see each other, only the
+            topic/context/moderator. Preserves statistical independence across all rounds;
+            the synthesizer is the only node that sees the full transcript.
+        stop_early: after each round, check if disagreement has resolved (no challenge language
+            + citations present). If so, stop before exhausting all rounds.
         """
         if room_id not in self.rooms:
             self._try_load_room(room_id)
@@ -7475,17 +7627,45 @@ class RoomManager:
             if not active:
                 break
 
-            is_blind = blind_first_round and round_num == 1
+            is_blind = sparse_topology or (blind_first_round and round_num == 1)
             coros = [self._participant_respond(room, p, round_num=round_num, blind=is_blind)
                      for p in active]
             responses = await asyncio.gather(*coros)
 
             # Idempotent append: skip any turn already committed (retry-safe)
             existing_turn_keys = {m.get("turn_key") for m in room.messages}
+            new_responses = []
             for resp in responses:
                 if resp.get("turn_key") not in existing_turn_keys:
+                    resp["citation_score"] = self._score_citations(resp.get("content", ""))
                     room.messages.append(resp)
+                    new_responses.append(resp)
+
+            # Update open questions from new responses
+            if new_responses:
+                seen_q_keys = {q["question"][:60].lower() for q in room.open_questions}
+                for oq in self._extract_open_questions(new_responses):
+                    key = oq["question"][:60].lower()
+                    if key not in seen_q_keys:
+                        seen_q_keys.add(key)
+                        room.open_questions.append(oq)
+
             self._save_room(room_id)
+
+            # Stop-early: halt when ledger stops moving and no disagreement
+            if stop_early and round_num < rounds:
+                round_contents = [r.get("content", "") for r in responses]
+                prior_keys = {c[:50].lower() for c in room.claim_ledger}
+                converged, new_claims = self._round_converged(round_contents, prior_keys)
+                room.claim_ledger.extend(new_claims)
+                if converged:
+                    break
+            else:
+                # Always update ledger even when not checking stop_early
+                round_contents = [r.get("content", "") for r in responses]
+                prior_keys = {c[:50].lower() for c in room.claim_ledger}
+                _, new_claims = self._round_converged(round_contents, prior_keys)
+                room.claim_ledger.extend(new_claims)
 
         return self.read(room_id)
 
@@ -8164,14 +8344,16 @@ async def list_tools():
         ),
         Tool(
             name="room_run",
-            description="Run N rounds in a room. Participants respond in parallel. challenge=true injects adversarial claims between rounds. blind_first_round=true hides peer responses in round 1 to prevent anchoring.",
+            description="Run N rounds in a room. Participants respond in parallel. challenge=true injects adversarial claims between rounds. blind_first_round=true hides peer responses in round 1. sparse_topology=true keeps all rounds blind (synthesizer is only node seeing full transcript). stop_early=true halts when disagreement resolves.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "room_id": {"type": "string", "description": "Room ID to run"},
                     "rounds": {"type": "integer", "description": "Number of discussion rounds (default: 2)"},
                     "challenge": {"type": "boolean", "description": "Enable challenge rounds — auto-extract claims and ask participants to verify/challenge them (default: false)"},
-                    "blind_first_round": {"type": "boolean", "description": "If true, participants in round 1 see only the topic/context/moderator messages, not each other's prior outputs. Prevents first-round anchoring where an early strong claim pulls all subsequent responses toward it. Recommended when you want independent initial positions. (default: false)"},
+                    "blind_first_round": {"type": "boolean", "description": "If true, participants in round 1 see only the topic/context/moderator messages, not each other's prior outputs. Prevents first-round anchoring. (default: false)"},
+                    "sparse_topology": {"type": "boolean", "description": "If true, ALL rounds are blind — participants never see each other's responses, only topic/context/moderator. Preserves statistical independence across all rounds; the synthesizer is the only node that sees the full transcript. Stronger than blind_first_round. (default: false)"},
+                    "stop_early": {"type": "boolean", "description": "If true, stop before exhausting all rounds when the latest round shows no disagreement language and at least one cited response — i.e. the discussion has converged on evidence. (default: false)"},
                     "prompt": {"type": "string", "description": "Discussion prompt to inject as a MODERATOR message before running rounds"},
                     "files": {"type": "array", "items": {"type": "string"}, "description": "File paths to attach to the room for this run"}
                 },
@@ -8180,11 +8362,13 @@ async def list_tools():
         ),
         Tool(
             name="room_synthesize",
-            description="Synthesize a room's transcript into consensus, disagreements, and best answer.",
+            description="Synthesize a room's transcript into consensus, disagreements, and best answer. adversarial=true produces a majority reading + strongest-minority reading + decision bet field.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "room_id": {"type": "string", "description": "Room ID to synthesize"},
+                    "adversarial": {"type": "boolean", "description": "If true, produce two competing readings (majority + strongest-minority) plus a 'decision bet' naming the critical unverified assumption. If no coherent minority can be constructed, the discussion is genuinely converged. (default: false)"},
+                    "verify_citations": {"type": "boolean", "description": "If true, the synthesizer fetches and verifies each cited URL/arXiv/DOI before finalizing the synthesis. Flags unverifiable or misquoted references. (default: false)"},
                     "synthesizer": {
                         "type": "string",
                         "description": 'Optional JSON: {"name":"...","backend":"claude|opencode|codex|local","model":"..."}. Defaults to the backend used by room participants (inferred); falls back to claude if mixed.'
@@ -9009,6 +9193,8 @@ async def call_tool(name: str, arguments: dict):
                 rounds=arguments.get("rounds", 2),
                 challenge=arguments.get("challenge", False),
                 blind_first_round=arguments.get("blind_first_round", False),
+                sparse_topology=arguments.get("sparse_topology", False),
+                stop_early=arguments.get("stop_early", False),
             )
         elif name == "room_read":
             result = rooms.read(room_id=arguments.get("room_id", ""))
@@ -9016,7 +9202,9 @@ async def call_tool(name: str, arguments: dict):
             synth = arguments.get("synthesizer")
             if isinstance(synth, str):
                 synth = json.loads(synth)
-            result = await rooms.synthesize(room_id=arguments.get("room_id", ""), synthesizer=synth)
+            result = await rooms.synthesize(room_id=arguments.get("room_id", ""), synthesizer=synth,
+                                            adversarial=arguments.get("adversarial", False),
+                                            verify_citations=arguments.get("verify_citations", False))
             _threading.Thread(target=distill_event, args=("room_synth", result, {}), daemon=True).start()
         # Local model tools
         elif name == "local_discover":
