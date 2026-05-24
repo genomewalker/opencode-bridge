@@ -8881,12 +8881,23 @@ async def list_tools():
         ),
         Tool(
             name="room_run",
-            description="Run N rounds in a room. Participants respond in parallel. challenge=true injects adversarial claims between rounds. blind_first_round=true hides peer responses in round 1. sparse_topology=true keeps all rounds blind (synthesizer is only node seeing full transcript). stop_early=true halts when disagreement resolves.",
+            description=(
+                "Run discussion rounds in a room. Participants respond in parallel each round.\n\n"
+                "**Follow-up messages**: pass `prompt='...'` to inject a MODERATOR message before "
+                "inference runs — this is the ONLY correct way to send follow-up questions. "
+                "Never call room_run without prompt and expect a queued message to appear. "
+                "When prompt is given, rounds defaults to 1 (each participant answers once); "
+                "for a fresh start, omit prompt and rounds defaults to 2.\n\n"
+                "Other options: challenge=true injects adversarial claims between rounds; "
+                "blind_first_round=true hides peer responses in round 1; "
+                "sparse_topology=true keeps ALL rounds blind; "
+                "stop_early=true halts when disagreement resolves."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "room_id": {"type": "string", "description": "Room ID to run"},
-                    "rounds": {"type": "integer", "description": "Number of discussion rounds (default: 2)"},
+                    "rounds": {"type": "integer", "description": "Number of discussion rounds (default: 1 when prompt given, 2 otherwise)"},
                     "challenge": {"type": "boolean", "description": "Enable challenge rounds — auto-extract claims and ask participants to verify/challenge them (default: false)"},
                     "blind_first_round": {"type": "boolean", "description": "If true, participants in round 1 see only the topic/context/moderator messages, not each other's prior outputs. Prevents first-round anchoring. (default: false)"},
                     "sparse_topology": {"type": "boolean", "description": "If true, ALL rounds are blind — participants never see each other's responses, only topic/context/moderator. Preserves statistical independence across all rounds; the synthesizer is the only node that sees the full transcript. Stronger than blind_first_round. (default: false)"},
@@ -9778,10 +9789,12 @@ async def call_tool(name: str, arguments: dict):
                 result = await rooms.add_participant(room_id=rid, participant=p) if rid else "Error: 'room_id' is required"
         elif name == "room_run":
             rid = arguments["room_id"]
+            # Ensure room is loaded from disk (survives process restart)
+            if rid not in rooms.rooms:
+                rooms._try_load_room(rid)
             prompt = arguments.get("prompt")
             if prompt and rid in rooms.rooms:
-                room = rooms.rooms[rid]
-                room.messages.append({
+                rooms.rooms[rid].messages.append({
                     "name": "MODERATOR",
                     "content": prompt,
                     "ts": datetime.now().isoformat(),
@@ -9796,9 +9809,11 @@ async def call_tool(name: str, arguments: dict):
                     existing = set(rooms.rooms[rid].files or [])
                     rooms.rooms[rid].files = list(existing | set(expanded))
                     rooms._save_room(rid)
+            # Default to 1 round for follow-ups (prompt given), 2 for initial runs
+            default_rounds = 1 if prompt else 2
             result = await rooms.run_rounds(
                 room_id=rid,
-                rounds=arguments.get("rounds", 2),
+                rounds=int(arguments.get("rounds", default_rounds)),
                 challenge=arguments.get("challenge", False),
                 blind_first_round=arguments.get("blind_first_round", False),
                 sparse_topology=arguments.get("sparse_topology", False),
@@ -10192,6 +10207,12 @@ def main():
                 "  codex:gpt-5.4          — Codex backend, fresh session\n"
                 "  claude:claude-opus-4-7 — Claude API directly (reliable, no stale sessions)\n"
                 "Then run with room_run. Never route multi-model discussions through opencode.\n\n"
+                "## Room follow-ups — CRITICAL\n"
+                "To send a follow-up question to a live room, use room_run with prompt=:\n"
+                "  room_run(room_id='room-xxx', prompt='Your follow-up question here')\n"
+                "This is the ONLY correct pattern — it injects the message AND triggers inference "
+                "atomically. DO NOT call room_run without prompt hoping a prior message was queued; "
+                "that will produce 0 responses. rounds defaults to 1 for follow-ups.\n\n"
                 "## Codex session reuse\n"
                 "Prefer codex_discuss over codex_start when a session already exists. "
                 "Never call codex_start unless the user asks for a new session or specific model.\n\n"
