@@ -5159,14 +5159,10 @@ def _read_range(filepath: str, start_line: int, end_line: int) -> str:
 
 
 def _read_outline(filepath: str) -> str:
-    """List top-level symbols with line ranges. Uses chitta tree-sitter when available."""
+    """List symbols with line numbers via regex scan (Python/Rust/Go/JS/C)."""
     p = Path(filepath).expanduser().resolve()
     if not p.is_file():
         return f"Error: file not found: {filepath}"
-    ctx = SoulClient._call("code_context", {"path": str(p)})
-    if ctx:
-        return f"# Outline: {p.name}\n{ctx}"
-    # Regex fallback for Python / common brace languages
     try:
         lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError as e:
@@ -5174,9 +5170,17 @@ def _read_outline(filepath: str) -> str:
     ext = p.suffix.lower()
     if ext in (".py", ".pyx"):
         pat = re.compile(r'^(\s*)(class|async def|def)\s+(\w+)')
+    elif ext in (".rs",):
+        pat = re.compile(r'^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(fn|struct|enum|impl|trait|mod)\s+(\w+)')
+    elif ext in (".go",):
+        pat = re.compile(r'^(?:func\s+(?:\([^)]+\)\s+)?(\w+)|type\s+(\w+)\s+(?:struct|interface))')
+    elif ext in (".js", ".ts", ".jsx", ".tsx"):
+        pat = re.compile(r'^(?:export\s+)?(?:async\s+)?(?:function\s+(\w+)|class\s+(\w+)|(const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?\()')
+    elif ext in (".c", ".cpp", ".cc", ".h", ".hpp"):
+        pat = re.compile(r'^(?:[\w:*&<>\s]+\s+)?(\w+)\s*\([^;]*$')
     else:
-        pat = re.compile(r'^(?:pub\s+)?(?:async\s+)?(fn|class|struct|enum|impl)\s+(\w+)')
-    out = [f"# Outline: {p.name} ({len(lines)} lines — chitta unavailable, regex fallback)"]
+        pat = re.compile(r'^(?:pub\s+)?(?:async\s+)?(fn|class|struct|enum|def|function)\s+(\w+)')
+    out = [f"# Outline: {p.name} ({len(lines)} lines)"]
     for i, ln in enumerate(lines, 1):
         m = pat.match(ln)
         if not m:
@@ -5185,7 +5189,11 @@ def _read_outline(filepath: str) -> str:
             indent_depth = len(m.group(1)) // 4
             out.append(f"  L{i:5d}  {'  ' * indent_depth}{m.group(2)} {m.group(3)}")
         else:
-            out.append(f"  L{i:5d}  {m.group(1)} {m.group(2)}")
+            name = next((g for g in m.groups() if g), "?")
+            kind = m.group(1) if m.lastindex and m.lastindex >= 1 else ""
+            out.append(f"  L{i:5d}  {kind} {name}".rstrip())
+    if len(out) == 1:
+        out.append("  (no symbols found — unsupported file type or empty file)")
     return "\n".join(out)
 
 
