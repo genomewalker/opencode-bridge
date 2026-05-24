@@ -5827,15 +5827,23 @@ class RoomManager:
                 print(f"Warning: failed to load room {room_id}: {e}", file=sys.stderr)
         return False
 
-    def read(self, room_id: str) -> str:
+    def read(self, room_id: str, last_n: Optional[int] = None) -> str:
         if room_id not in self.rooms:
             self._try_load_room(room_id)
         if room_id not in self.rooms:
             return f"Room '{room_id}' not found."
         room = self.rooms[room_id]
+        msgs = room.messages
+        skipped = 0
+        if last_n is not None and last_n < len(msgs):
+            skipped = len(msgs) - last_n
+            msgs = msgs[-last_n:]
         lines = [f"# Discussion Room: {room_id}", f"**Topic:** {room.topic}", ""]
-        for msg in room.messages:
-            ts = msg["ts"][11:19]  # HH:MM:SS
+        if skipped:
+            lines.append(f"_({skipped} earlier messages omitted — use room_read without last_n for full transcript)_")
+            lines.append("")
+        for msg in msgs:
+            ts = msg["ts"][11:19]
             lines.append(f"**[{ts}] {msg['name']}:**")
             lines.append(msg["content"])
             lines.append("")
@@ -8600,11 +8608,12 @@ async def list_tools():
         ),
         Tool(
             name="room_read",
-            description="Read the full transcript of a discussion room.",
+            description="Read a discussion room transcript. Use last_n to get only the most recent N messages (avoids hitting length caps in long rooms).",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "room_id": {"type": "string", "description": "Room ID to read"}
+                    "room_id": {"type": "string", "description": "Room ID to read"},
+                    "last_n": {"type": "integer", "description": "Return only the last N messages. Omit for full transcript."}
                 },
                 "required": ["room_id"]
             }
@@ -9422,7 +9431,7 @@ async def call_tool(name: str, arguments: dict):
                 stop_early=arguments.get("stop_early", False),
             )
         elif name == "room_read":
-            result = rooms.read(room_id=arguments.get("room_id", ""))
+            result = rooms.read(room_id=arguments.get("room_id", ""), last_n=arguments.get("last_n"))
         elif name == "room_synthesize":
             synth = arguments.get("synthesizer")
             if isinstance(synth, str):
