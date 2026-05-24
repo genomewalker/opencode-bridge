@@ -7773,6 +7773,7 @@ class RoomManager:
             return f"Room '{room_id}' not found."
         room = self.rooms[room_id]
         room.challenge_mode = challenge
+        start_msg_count = len(room.messages)
 
         for round_num in range(1, rounds + 1):
             # Inject challenge prompt between rounds if enabled
@@ -7859,7 +7860,17 @@ class RoomManager:
                 _, new_claims = self._round_converged(round_contents, prior_keys)
                 room.claim_ledger.extend(new_claims)
 
-        return self.read(room_id)
+        # Return only the new messages from this run (not the full transcript)
+        room = self.rooms[room_id]
+        new_msgs = room.messages[start_msg_count:]
+        lines = [f"# Room: {room_id} — new messages ({len(new_msgs)} total)", ""]
+        for msg in new_msgs:
+            ts = msg["ts"][11:19]
+            lines.append(f"**[{ts}] {msg['name']}:**")
+            lines.append(msg["content"])
+            lines.append("")
+        lines.append(f"_(Use room_read to see the full transcript)_")
+        return "\n".join(lines)
 
 
 # MCP Server setup
