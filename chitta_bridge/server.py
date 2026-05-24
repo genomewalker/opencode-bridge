@@ -21,6 +21,7 @@ import os
 import re
 import sys
 import json
+import hashlib
 import stat as _stat_mod
 import signal as _signal
 import asyncio
@@ -259,6 +260,11 @@ def _atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> Non
         os.close(dirfd)
 
 
+def _content_hash(text: str) -> str:
+    """SHA-256 prefix of UTF-8 content — used for write-concurrency guards."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
 def _atomic_write_text_legacy(path: Path, content: str, encoding: str = "utf-8") -> None:
     """Fallback for platforms without dir_fd / O_NOFOLLOW support."""
     parent = path.parent
@@ -489,17 +495,35 @@ def _apply_file_patch(filepath: str, old_str: str, new_str: str) -> str:
 
     with _path_write_lock(p):
         try:
-            pre_mtime = p.stat().st_mtime_ns
             content = p.read_text(encoding="utf-8")
+            pre_hash = _content_hash(content)
         except OSError as e:
             return f"Error reading {p.name}: {e}"
 
         count = content.count(old_str)
         if count == 0:
             preview = old_str[:80].replace('\n', '↵')
-            return f"Error: old_str not found in {p.name}\nSearched for: {preview!r}"
+            # Find nearest lines containing the first fragment of old_str
+            first_frag = old_str.split('\n')[0].strip()[:40]
+            candidates = []
+            if first_frag:
+                for i, ln in enumerate(content.splitlines(), 1):
+                    if first_frag[:20] in ln:
+                        candidates.append(f"  L{i}: {ln[:100]}")
+                        if len(candidates) >= 3:
+                            break
+            hint = ("\nNearest lines containing first fragment:\n" + "\n".join(candidates)) if candidates else ""
+            return f"Error: old_str not found in {p.name}\nSearched for: {preview!r}{hint}"
         if count > 1:
-            return f"Error: old_str matches {count} locations in {p.name} — make it more specific"
+            match_lines = []
+            pos = 0
+            while True:
+                idx = content.find(old_str, pos)
+                if idx == -1:
+                    break
+                match_lines.append(f"L{content[:idx].count(chr(10)) + 1}")
+                pos = idx + 1
+            return f"Error: old_str matches {count} locations in {p.name} at {', '.join(match_lines)} — make it more specific"
 
         line_num = content[:content.index(old_str)].count('\n') + 1
         old_lines = old_str.count('\n') + 1
@@ -507,72 +531,60 @@ def _apply_file_patch(filepath: str, old_str: str, new_str: str) -> str:
         delta = new_lines - old_lines
 
         try:
-            cur_mtime = p.stat().st_mtime_ns
-            if cur_mtime != pre_mtime:
+            if _content_hash(p.read_text(encoding="utf-8")) != pre_hash:
                 return f"Error: {p.name} changed on disk since read — retry"
             _atomic_write_text(p, content.replace(old_str, new_str, 1))
         except OSError as e:
             return f"Error writing {p.name}: {e}"
 
     _post_write_refresh(p)
+    _cache_pop_file(p)
     sign = "+" if delta >= 0 else ""
     return f"✓ {p.name} patched @ L{line_num} (+{new_lines}/-{old_lines} lines, net {sign}{delta})"
 def _find_symbol_range(content: str, symbol: str, ext: str):
-    """Return (start, end) byte range of a named symbol. Returns None if not found."""
-    import re
-    if ext in (".py", ".pyx"):
-        # Python: indent-based (def/async def/class)
-        patterns = [
-            rf"^(\s*)(async\s+def\s+{re.escape(symbol)}\s*[\(:])",
-            rf"^(\s*)(def\s+{re.escape(symbol)}\s*[\(:])",
-            rf"^(\s*)(class\s+{re.escape(symbol)}\s*[\(:])",
-        ]
-        for pat in patterns:
-            for m in re.finditer(pat, content, re.MULTILINE):
-                indent = len(m.group(1))
-                start = m.start()
-                # Find end: next non-blank line at same or lower indent after body
-                rest = content[m.end():]
-                end = len(content)
-                seen_body = False
-                pos = m.end()
-                for line in rest.split('\n'):
-                    if line.strip():
-                        line_indent = len(line) - len(line.lstrip())
-                        if seen_body and line_indent <= indent:
-                            end = pos
-                            break
-                        seen_body = True
-                    pos += len(line) + 1
-                return start, end
-    else:
-        # Brace-based: Rust, C, C++, JS, Go, Java…
-        kws = ["fn ", "function ", "async function ", "def ", "class ", "impl ", "struct ", "enum "]
-        for kw in kws:
-            needle = kw + symbol
-            idx = content.find(needle)
-            while idx != -1:
-                before = content[:idx]
-                after = content[idx + len(needle):]
-                # Word boundary check
-                prev_char = before[-1] if before else ' '
-                next_char = after[0] if after else ' '
-                if not prev_char.isalnum() and prev_char != '_' and next_char in ('(', '<', '{', ' ', '\n', ':'):
-                    brace_pos = content.find('{', idx)
-                    if brace_pos == -1:
+    """Return (start, end) byte range of a named symbol for .py/.pyx files only.
+
+    The brace-language fallback is intentionally absent — it silently corrupts
+    ranges when braces appear inside strings or comments. Callers must hard-fail
+    for non-Python files when tree-sitter is unavailable.
+
+    Includes preceding @decorator lines in the returned range.
+    """
+    if ext not in (".py", ".pyx"):
+        return None
+    patterns = [
+        rf"^(\s*)(async\s+def\s+{re.escape(symbol)}\s*[\(:])",
+        rf"^(\s*)(def\s+{re.escape(symbol)}\s*[\(:])",
+        rf"^(\s*)(class\s+{re.escape(symbol)}\s*[\(:])",
+    ]
+    for pat in patterns:
+        for m in re.finditer(pat, content, re.MULTILINE):
+            indent = len(m.group(1))
+            start = m.start()
+            # Walk backward to include @decorator lines at the same indent
+            while start > 0:
+                prev_nl = content.rfind('\n', 0, start - 1)
+                prev_start = prev_nl + 1 if prev_nl >= 0 else 0
+                prev_line = content[prev_start:start]
+                stripped = prev_line.lstrip()
+                if len(prev_line) - len(stripped) == indent and stripped.startswith('@'):
+                    start = prev_start
+                else:
+                    break
+            # Find end: next non-blank line at same or lower indent after body
+            rest = content[m.end():]
+            end = len(content)
+            seen_body = False
+            pos = m.end()
+            for line in rest.split('\n'):
+                if line.strip():
+                    line_indent = len(line) - len(line.lstrip())
+                    if seen_body and line_indent <= indent:
+                        end = pos
                         break
-                    depth = 0
-                    for i, c in enumerate(content[brace_pos:]):
-                        if c == '{':
-                            depth += 1
-                        elif c == '}':
-                            depth -= 1
-                            if depth == 0:
-                                end = brace_pos + i + 1
-                                if end < len(content) and content[end] == '\n':
-                                    end += 1
-                                return idx, end
-                idx = content.find(needle, idx + 1)
+                    seen_body = True
+                pos += len(line) + 1
+            return start, end
     return None
 _DELTA_MARKERS = frozenset({
     '# ... existing code ...',
@@ -689,8 +701,8 @@ def _apply_symbol_patch(filepath: str, symbol: str, new_body: str) -> str:
 
     with _path_write_lock(p):
         try:
-            pre_mtime = p.stat().st_mtime_ns
             content = p.read_text(encoding="utf-8")
+            pre_hash = _content_hash(content)
         except OSError as e:
             return f"Error reading {p.name}: {e}"
 
@@ -707,31 +719,28 @@ def _apply_symbol_patch(filepath: str, symbol: str, new_body: str) -> str:
             # the `fn` keyword, leaving `pub ` / `pub(crate) ` in content[:start].
             line_begin = content.rfind('\n', 0, start)
             start = line_begin + 1 if line_begin >= 0 else 0
-            # Walk back further to include attribute lines (#[...]) above the symbol.
+            # Walk back to include attribute (#[...], @decorator) and doc lines above symbol.
             while start > 0:
                 prev_nl = content.rfind('\n', 0, start - 1)
                 prev_line = content[prev_nl + 1 if prev_nl >= 0 else 0:start].strip()
-                if prev_line.startswith('#[') or prev_line.startswith('///') or prev_line.startswith('/**') or prev_line.startswith('*'):
+                if (prev_line.startswith('#[') or prev_line.startswith('@')
+                        or prev_line.startswith('///') or prev_line.startswith('/**')
+                        or prev_line.startswith('*')):
                     start = prev_nl + 1 if prev_nl >= 0 else 0
                 else:
                     break
             line_num = content[:start].count('\n') + 1
         else:
+            if ext not in (".py", ".pyx"):
+                return (
+                    f"Error: symbol '{symbol}' not found via tree-sitter in {p.name} — "
+                    f"chitta daemon unavailable for {ext or 'unknown'} files. "
+                    f"Start chittad or use file_patch for exact-string replacement."
+                )
             result = _find_symbol_range(content, symbol, ext)
             if result is None:
                 return f"Error: symbol '{symbol}' not found in {p.name}"
             start, end = result
-            # Snap to line beginning — regex finds 'fn sym', leaving 'pub ' in content[:start]
-            line_begin = content.rfind('\n', 0, start)
-            start = line_begin + 1 if line_begin >= 0 else 0
-            # Walk back to include attribute/doc lines
-            while start > 0:
-                prev_nl = content.rfind('\n', 0, start - 1)
-                prev_line = content[prev_nl + 1 if prev_nl >= 0 else 0:start].strip()
-                if prev_line.startswith('#[') or prev_line.startswith('///') or prev_line.startswith('/**') or prev_line.startswith('*'):
-                    start = prev_nl + 1 if prev_nl >= 0 else 0
-                else:
-                    break
             line_num = content[:start].count('\n') + 1
         old_lines = content[start:end].count('\n') + 1
 
@@ -742,8 +751,7 @@ def _apply_symbol_patch(filepath: str, symbol: str, new_body: str) -> str:
         delta = new_lines - old_lines
 
         try:
-            cur_mtime = p.stat().st_mtime_ns
-            if cur_mtime != pre_mtime:
+            if _content_hash(p.read_text(encoding="utf-8")) != pre_hash:
                 return f"Error: {p.name} changed on disk since read — retry"
             _atomic_write_text(p, content[:start] + body + content[end:])
         except OSError as e:
@@ -783,14 +791,16 @@ def _apply_symbol_edit(filepath: str, symbol: str, old_str: str, new_str: str) -
 
     with _path_write_lock(p):
         try:
-            pre_mtime = p.stat().st_mtime_ns
             content = p.read_text(encoding="utf-8")
+            pre_hash = _content_hash(content)
         except OSError as e:
             return f"Error reading {p.name}: {e}"
 
         loc = _locate_symbol(p, symbol, content)
         if loc is None:
             return f"Error: symbol '{symbol}' not found in {p.name}"
+        if isinstance(loc, str):
+            return loc
         sym_start, sym_end, sym_line = loc
         body = content[sym_start:sym_end]
         count = body.count(old_str)
@@ -810,7 +820,7 @@ def _apply_symbol_edit(filepath: str, symbol: str, old_str: str, new_str: str) -
         new_content = content[:sym_start] + new_body_content + content[sym_end:]
 
         try:
-            if p.stat().st_mtime_ns != pre_mtime:
+            if _content_hash(p.read_text(encoding="utf-8")) != pre_hash:
                 return f"Error: {p.name} changed on disk since read — retry"
             _atomic_write_text(p, new_content)
         except OSError as e:
@@ -831,8 +841,12 @@ def _apply_symbol_edit(filepath: str, symbol: str, old_str: str, new_str: str) -
 
 
 def _locate_symbol(p: Path, symbol: str, content: str):
-    """Shared symbol lookup: tree-sitter first, regex fallback.
-    Returns (start, end, line_num) byte range + 1-indexed start line."""
+    """Shared symbol lookup: tree-sitter first, Python-indent fallback for .py/.pyx only.
+
+    Returns (start, end, line_num) on success, None on Python miss, or an error
+    string when tree-sitter is unavailable for a non-Python file. Callers must
+    check isinstance(result, str) before unpacking.
+    """
     ts_loc = SoulClient.find_symbol_location(str(p), symbol)
     if ts_loc is not None:
         ls, le = ts_loc
@@ -840,7 +854,14 @@ def _locate_symbol(p: Path, symbol: str, content: str):
         start = sum(len(lines[i]) for i in range(ls - 1))
         end = min(sum(len(lines[i]) for i in range(le)), len(content))
         return start, end, ls
-    r = _find_symbol_range(content, symbol, p.suffix.lower())
+    ext = p.suffix.lower()
+    if ext not in (".py", ".pyx"):
+        return (
+            f"Error: symbol '{symbol}' not found via tree-sitter in {p.name} — "
+            f"chitta daemon unavailable for {ext or 'unknown'} files. "
+            f"Start chittad or use file_patch for exact-string replacement."
+        )
+    r = _find_symbol_range(content, symbol, ext)
     if r is None:
         return None
     s, e = r
@@ -862,14 +883,16 @@ def _apply_symbol_delete(filepath: str, symbol: str) -> str:
 
     with _path_write_lock(p):
         try:
-            pre_mtime = p.stat().st_mtime_ns
             content = p.read_text(encoding="utf-8")
+            pre_hash = _content_hash(content)
         except OSError as e:
             return f"Error reading {p.name}: {e}"
 
         loc = _locate_symbol(p, symbol, content)
         if loc is None:
             return f"Error: symbol '{symbol}' not found in {p.name}"
+        if isinstance(loc, str):
+            return loc
         start, end, line_num = loc
 
         # Swallow one trailing blank line so the file doesn't grow orphan gaps
@@ -883,7 +906,7 @@ def _apply_symbol_delete(filepath: str, symbol: str) -> str:
         removed = content[start:tail_end].count("\n")
 
         try:
-            if p.stat().st_mtime_ns != pre_mtime:
+            if _content_hash(p.read_text(encoding="utf-8")) != pre_hash:
                 return f"Error: {p.name} changed on disk since read — retry"
             _atomic_write_text(p, content[:start] + content[tail_end:])
         except OSError as e:
@@ -929,8 +952,8 @@ def _apply_symbol_rename(filepath: str, old_name: str, new_name: str) -> str:
 
     with _path_write_lock(p):
         try:
-            pre_mtime = p.stat().st_mtime_ns
             content = p.read_text(encoding="utf-8")
+            pre_hash = _content_hash(content)
         except OSError as e:
             return f"Error reading {p.name}: {e}"
 
@@ -940,7 +963,7 @@ def _apply_symbol_rename(filepath: str, old_name: str, new_name: str) -> str:
             return f"Error: identifier '{old_name}' not found in {p.name}"
 
         try:
-            if p.stat().st_mtime_ns != pre_mtime:
+            if _content_hash(p.read_text(encoding="utf-8")) != pre_hash:
                 return f"Error: {p.name} changed on disk since read — retry"
             _atomic_write_text(p, new_content)
         except OSError as e:
@@ -978,14 +1001,16 @@ def _apply_symbol_move(filepath: str, symbol: str, dest_filepath: str) -> str:
 
     with _path_write_lock(src):
         try:
-            src_pre = src.stat().st_mtime_ns
             src_content = src.read_text(encoding="utf-8")
+            src_pre_hash = _content_hash(src_content)
         except OSError as e:
             return f"Error reading {src.name}: {e}"
 
         loc = _locate_symbol(src, symbol, src_content)
         if loc is None:
             return f"Error: symbol '{symbol}' not found in {src.name}"
+        if isinstance(loc, str):
+            return loc
         start, end, line_num = loc
         block = src_content[start:end]
         if not block.endswith("\n"):
@@ -1000,9 +1025,9 @@ def _apply_symbol_move(filepath: str, symbol: str, dest_filepath: str) -> str:
                 cut_end = (nxt + 1) if nxt >= 0 else len(src_content)
 
         with _path_write_lock(dst):
-            dst_pre = dst.stat().st_mtime_ns if dst.exists() else 0
             try:
                 dst_content = dst.read_text(encoding="utf-8") if dst.exists() else ""
+                dst_pre_hash = _content_hash(dst_content)
             except OSError as e:
                 return f"Error reading {dst.name}: {e}"
 
@@ -1012,9 +1037,9 @@ def _apply_symbol_move(filepath: str, symbol: str, dest_filepath: str) -> str:
             new_dst = dst_content + separator + block
 
             try:
-                if src.stat().st_mtime_ns != src_pre:
+                if _content_hash(src.read_text(encoding="utf-8")) != src_pre_hash:
                     return f"Error: {src.name} changed on disk since read — retry"
-                if dst.exists() and dst.stat().st_mtime_ns != dst_pre:
+                if dst.exists() and _content_hash(dst.read_text(encoding="utf-8")) != dst_pre_hash:
                     return f"Error: {dst.name} changed on disk since read — retry"
                 _atomic_write_text(dst, new_dst)
                 _atomic_write_text(src, src_content[:start] + src_content[cut_end:])
@@ -1064,8 +1089,8 @@ def _apply_symbol_insert_child(
 
     with _path_write_lock(p):
         try:
-            pre_mtime = p.stat().st_mtime_ns
             content = p.read_text(encoding="utf-8")
+            pre_hash = _content_hash(content)
         except OSError as e:
             return f"Error reading {p.name}: {e}"
 
@@ -1164,7 +1189,7 @@ def _apply_symbol_insert_child(
         line_num = content[:insert_at].count("\n") + 1
 
         try:
-            if p.stat().st_mtime_ns != pre_mtime:
+            if _content_hash(p.read_text(encoding="utf-8")) != pre_hash:
                 return f"Error: {p.name} changed on disk since read — retry"
             _atomic_write_text(p, new_content)
         except OSError as e:
@@ -5027,6 +5052,18 @@ def _cache_pop(file: Path, symbol: str) -> None:
             cache.pop(key, None)
 
 
+def _cache_pop_file(file: Path) -> None:
+    """Invalidate ALL cached symbol entries for a file (e.g. after file_patch)."""
+    cache = _cache_get()
+    try:
+        resolved = str(file.resolve())
+    except OSError:
+        resolved = str(file)
+    for key in list(cache.keys()):
+        if key[1] == resolved:
+            cache.pop(key, None)
+
+
 def _post_write_refresh(paths) -> None:
     """Fast-path reindex after a bridge-owned write. Bypasses the
     5-min rate limiter in file-changed-hook.sh because these writes
@@ -5100,6 +5137,56 @@ def _code_intel(symbol: str = "", path: str = "", realm: Optional[str] = None) -
     if not parts:
         return "(no symbol or path provided)"
     return "\n\n".join(parts)
+
+
+def _read_range(filepath: str, start_line: int, end_line: int) -> str:
+    """Read a line range (1-based, inclusive) from any file."""
+    p = Path(filepath).expanduser().resolve()
+    if not p.is_file():
+        return f"Error: file not found: {filepath}"
+    try:
+        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as e:
+        return f"Error reading {p.name}: {e}"
+    total = len(lines)
+    start_line = max(1, start_line)
+    end_line = min(total, end_line)
+    if start_line > end_line:
+        return f"Error: start_line ({start_line}) > end_line ({end_line}) for {p.name} ({total} lines)"
+    snippet = lines[start_line - 1:end_line]
+    header = f"# {p.name}  L{start_line}–{end_line} / {total}\n"
+    return header + "\n".join(f"{i + start_line:6d}\t{ln}" for i, ln in enumerate(snippet))
+
+
+def _read_outline(filepath: str) -> str:
+    """List top-level symbols with line ranges. Uses chitta tree-sitter when available."""
+    p = Path(filepath).expanduser().resolve()
+    if not p.is_file():
+        return f"Error: file not found: {filepath}"
+    ctx = SoulClient._call("code_context", {"path": str(p)})
+    if ctx:
+        return f"# Outline: {p.name}\n{ctx}"
+    # Regex fallback for Python / common brace languages
+    try:
+        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as e:
+        return f"Error reading {p.name}: {e}"
+    ext = p.suffix.lower()
+    if ext in (".py", ".pyx"):
+        pat = re.compile(r'^(\s*)(class|async def|def)\s+(\w+)')
+    else:
+        pat = re.compile(r'^(?:pub\s+)?(?:async\s+)?(fn|class|struct|enum|impl)\s+(\w+)')
+    out = [f"# Outline: {p.name} ({len(lines)} lines — chitta unavailable, regex fallback)"]
+    for i, ln in enumerate(lines, 1):
+        m = pat.match(ln)
+        if not m:
+            continue
+        if ext in (".py", ".pyx"):
+            indent_depth = len(m.group(1)) // 4
+            out.append(f"  L{i:5d}  {'  ' * indent_depth}{m.group(2)} {m.group(3)}")
+        else:
+            out.append(f"  L{i:5d}  {m.group(1)} {m.group(2)}")
+    return "\n".join(out)
 
 
 def chitta_ingest(text: str) -> int:
@@ -6895,8 +6982,8 @@ class RoomManager:
             return blocked
         try:
             with _path_write_lock(path):
-                pre_mtime = path.stat().st_mtime_ns
                 text = path.read_text(errors="replace")
+                pre_hash = _content_hash(text)
                 count = text.count(old)
                 if count == 0:
                     # Help the model: show similar lines
@@ -6936,7 +7023,7 @@ class RoomManager:
                     updated = text.replace(old, new, 1)
                     replaced = 1
 
-                if path.stat().st_mtime_ns != pre_mtime:
+                if _content_hash(path.read_text(errors="replace")) != pre_hash:
                     return f"({path} changed on disk since read — retry)"
                 _atomic_write_text(path, updated)
 
@@ -8973,15 +9060,49 @@ async def list_tools():
                 "Read a function/class/method body by name. Checks a sticky "
                 "session cache first (hot after symbol_patch/edit/insert_child) "
                 "before falling back to the chitta daemon. Optional `file` narrows "
-                "the lookup and enables the cache fast-path."
+                "the lookup and enables the cache fast-path. "
+                "Use `offset` + `max_chars` to paginate oversized symbols."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "name": {"type": "string", "description": "Symbol name"},
                     "file": {"type": "string", "description": "Optional absolute path; enables sticky-cache hit"},
+                    "offset": {"type": "integer", "description": "Byte offset into the body (for pagination; default 0)"},
+                    "max_chars": {"type": "integer", "description": "Max chars to return (default 8000); increase for large symbols"},
                 },
                 "required": ["name"],
+            },
+        ),
+        Tool(
+            name="read_range",
+            description=(
+                "Read a contiguous line range from any file. "
+                "Use when you know the target line numbers (e.g. from read_outline or a grep hit). "
+                "More efficient than reading the whole file for large files."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file":       {"type": "string",  "description": "Absolute path to the file"},
+                    "start_line": {"type": "integer", "description": "First line to read (1-based, inclusive)"},
+                    "end_line":   {"type": "integer", "description": "Last line to read (1-based, inclusive)"},
+                },
+                "required": ["file", "start_line", "end_line"],
+            },
+        ),
+        Tool(
+            name="read_outline",
+            description=(
+                "List the top-level symbols (functions, classes, structs) of a file with their line numbers. "
+                "Use this before read_range or read_symbol to locate what you want without reading the whole file."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file": {"type": "string", "description": "Absolute path to the file"},
+                },
+                "required": ["file"],
             },
         ),
         Tool(
@@ -9648,11 +9769,27 @@ async def call_tool(name: str, arguments: dict):
         elif name == "read_symbol":
             sym = arguments.get("name", "")
             file_hint = arguments.get("file")
+            offset = int(arguments.get("offset", 0))
+            max_chars = int(arguments.get("max_chars", 8000))
             cached = _cache_get_fresh(file_hint, sym) if sym else None
             if cached:
-                result = f"[cache] {cached['file']}:{cached['line_start']}\n{cached['body']}"
+                body = f"[cache] {cached['file']}:{cached['line_start']}\n{cached['body']}"
             else:
-                result = SoulClient._call("read_symbol", {"name": sym}) or "(not found)"
+                body = SoulClient._call("read_symbol", {"name": sym}) or "(not found)"
+            body = body[offset:] if offset > 0 else body
+            if len(body) > max_chars:
+                remaining = len(body) - max_chars
+                result = body[:max_chars] + f"\n\n[…{remaining:,} chars remaining — call again with offset={offset + max_chars}]"
+            else:
+                result = body
+        elif name == "read_range":
+            result = _read_range(
+                arguments.get("file", ""),
+                int(arguments.get("start_line", 1)),
+                int(arguments.get("end_line", 50)),
+            )
+        elif name == "read_outline":
+            result = _read_outline(arguments.get("file", ""))
         elif name == "symbol_insert_child":
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
