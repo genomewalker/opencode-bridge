@@ -7964,7 +7964,7 @@ class RoomManager:
             lines.append(f"**[{ts}] {msg['name']}:**")
             lines.append(msg["content"])
             lines.append("")
-        lines.append(f"_(Use room_read to see the full transcript)_")
+        lines.append("_(Use room_read to see the full transcript)_")
         return "\n".join(lines)
 
 
