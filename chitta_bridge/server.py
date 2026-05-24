@@ -3284,11 +3284,17 @@ class CodexBridge:
 
     @staticmethod
     def _parse_codex_jsonl(output: str) -> tuple[str, Optional[str]]:
-        """Extract reply text and thread_id from Codex JSONL output."""
+        """Extract reply text and thread_id from Codex JSONL output.
+
+        Handles both plain JSONL and JSON Text Sequences (RFC 7464) where each
+        record is prefixed by the RS byte (\\x1e). The \\x1e is stripped before
+        JSON parsing — silently swallowing it was causing empty replies.
+        """
         reply_parts = []
         thread_id = None
         for line in output.split("\n"):
-            if not line or line.startswith("WARNING:"):
+            line = line.lstrip("\x1e").strip()
+            if not line or line.startswith("WARNING:") or line.startswith("ERROR:"):
                 continue
             try:
                 event = json.loads(line)
@@ -7724,6 +7730,13 @@ class RoomManager:
         elif backend == "codex":
             full_prompt = f"{system_prompt}\n\n{message}" if system_prompt else message
             full_prompt = _embed_files_in_prompt(full_prompt, files or [])
+            # Codex CLI errors with "Separator is not found, chunk exceed the limit" above ~100KB.
+            # Preserve head (system prompt + topic) and tail (recent messages + instructions).
+            _CODEX_LIMIT = 90_000
+            if len(full_prompt) > _CODEX_LIMIT:
+                head = full_prompt[:20_000]
+                tail = full_prompt[-(70_000):]
+                full_prompt = head + "\n\n[...earlier transcript truncated for length...]\n\n" + tail
             if sid and sid in self.codex.sessions:
                 return await self.codex.send_message(full_prompt, sid)
             return await self.codex.run_task(
