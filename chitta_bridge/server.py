@@ -7693,7 +7693,7 @@ class RoomManager:
             return await self._run_claude_p(
                 full_prompt, files=files,
                 model=participant.get("model"),
-                # effort not passed — --effort on claude -p is unreliable with Opus 4.7
+                effort=participant.get("effort"),
             )
 
         elif backend == "local":
@@ -8880,8 +8880,9 @@ async def list_tools():
                             '"soul":{"system_prompt":"...","realm":"...","tools":["recall","web_search"],'
                             '"max_tool_turns":3,"challenge_bias":0.5,"max_rounds":0}}]. '
                             'backend defaults to "claude" if omitted. '
-                            'effort: codex only — low/medium/high/xhigh. Claude ignores effort (use without suffix). '
-                            'Shorthand strings: "codex:gpt-5.5:high", "claude:claude-opus-4-7".'
+                            'effort: codex=low/medium/high/xhigh; claude=low/medium/xhigh/max '
+                            '(NOTE: high is NOT valid for claude-opus-4-7 — use xhigh instead). '
+                            'Shorthand strings: "codex:gpt-5.5:high", "claude:claude-opus-4-7:xhigh".'
                         )
                     },
                     "files": {
@@ -10235,8 +10236,10 @@ def main():
                 "  codex:gpt-5.5                  — Codex backend, default effort (high)\n"
                 "  codex:gpt-5.5:medium           — Codex backend, medium reasoning effort\n"
                 "  codex:gpt-5.5:xhigh            — Codex backend, extended reasoning\n"
-                "  claude:claude-opus-4-7         — Claude API directly (no effort suffix — unsupported)\n"
-                "Effort (codex only): low/medium/high/xhigh. Claude ignores effort flag.\n"
+                "  claude:claude-opus-4-7         — Claude API, default effort\n"
+                "  claude:claude-opus-4-7:xhigh   — Claude Opus 4.7 with extended thinking (xhigh/max only)\n"
+                "Effort: codex=low/medium/high/xhigh; claude=low/medium/xhigh/max. "
+                "NOTE: 'high' is NOT valid for claude-opus-4-7 — use xhigh.\n"
                 "Then run with room_run. Never route multi-model discussions through opencode.\n\n"
                 "## Room follow-ups — CRITICAL\n"
                 "To send a follow-up question to a live room, use room_run with prompt=:\n"
