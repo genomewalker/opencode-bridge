@@ -7690,7 +7690,11 @@ class RoomManager:
 
         if backend == "claude":
             full_prompt = f"{system_prompt}\n\n{message}" if system_prompt else message
-            return await self._run_claude_p(full_prompt, files=files, model=participant.get("model"))
+            return await self._run_claude_p(
+                full_prompt, files=files,
+                model=participant.get("model"),
+                effort=participant.get("effort"),
+            )
 
         elif backend == "local":
             base_url = participant.get("base_url") or participant.get("endpoint")
@@ -7722,7 +7726,11 @@ class RoomManager:
             full_prompt = _embed_files_in_prompt(full_prompt, files or [])
             if sid and sid in self.codex.sessions:
                 return await self.codex.send_message(full_prompt, sid)
-            return await self.codex.run_task(full_prompt)
+            return await self.codex.run_task(
+                full_prompt,
+                model=participant.get("model"),
+                effort=participant.get("effort"),
+            )
 
         else:  # opencode
             full_prompt = f"{system_prompt}\n\n{message}" if system_prompt else message
@@ -7737,7 +7745,8 @@ class RoomManager:
 
     async def _run_claude_p(self, prompt: str, timeout: int = 300,
                              files: Optional[list[str]] = None,
-                             model: Optional[str] = None) -> str:
+                             model: Optional[str] = None,
+                             effort: Optional[str] = None) -> str:
         """Run `claude -p --output-format json` and return the response text.
 
         The native claude binary hangs after outputting its result (never closes
@@ -7755,6 +7764,8 @@ class RoomManager:
             cmd = [CLAUDE_BIN, "-p", "--output-format", "json"]
             if model:
                 cmd.extend(["--model", model])
+            if effort:
+                cmd.extend(["--effort", effort])
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdin=asyncio.subprocess.PIPE,
@@ -8863,9 +8874,15 @@ async def list_tools():
                     "topic": {"type": "string", "description": "The discussion topic or opening question"},
                     "participants": {
                         "type": "string",
-                        "description": 'JSON array: [{"name":"...","backend":"claude|opencode|codex|local","session_id":"...","model":"...",'
-                                       '"soul":{"system_prompt":"...","realm":"...","tools":["recall","web_search"],'
-                                       '"max_tool_turns":3,"challenge_bias":0.5,"max_rounds":0}}]. backend defaults to "claude" if omitted — set explicitly to avoid unexpected API spend.'
+                        "description": (
+                            'JSON array: [{"name":"...","backend":"claude|opencode|codex|local",'
+                            '"session_id":"...","model":"...","effort":"low|medium|high|xhigh|max",'
+                            '"soul":{"system_prompt":"...","realm":"...","tools":["recall","web_search"],'
+                            '"max_tool_turns":3,"challenge_bias":0.5,"max_rounds":0}}]. '
+                            'backend defaults to "claude" if omitted. '
+                            'effort: claude=low/medium/high/xhigh/max, codex=low/medium/high/xhigh. '
+                            'Shorthand strings: "codex:gpt-5.5:medium", "claude:claude-opus-4-7:high".'
+                        )
                     },
                     "files": {
                         "type": "string",
@@ -9694,18 +9711,24 @@ async def call_tool(name: str, arguments: dict):
                     normalized.append(p)
                 else:
                     s = str(p)
-                    # Parse "backend:session_id" shorthand
+                    # Parse "backend:model[:effort]" shorthand
+                    _EFFORT_VALUES = {"low", "medium", "high", "xhigh", "max"}
+                    _CLAUDE_SHORTHANDS = {
+                        "opus": "claude-opus-4-7",
+                        "sonnet": "claude-sonnet-4-6",
+                        "haiku": "claude-haiku-4-5-20251001",
+                    }
                     if ":" in s and s.split(":", 1)[0] in ("opencode", "codex", "claude", "local"):
-                        backend_hint, sid_or_model = s.split(":", 1)
+                        parts = s.split(":")
+                        backend_hint = parts[0]
+                        sid_or_model = parts[1] if len(parts) > 1 else ""
+                        effort_hint = parts[2].lower() if len(parts) > 2 and parts[2].lower() in _EFFORT_VALUES else None
                         if backend_hint == "claude":
                             d = {"name": s, "backend": "claude"}
                             if sid_or_model:
-                                _CLAUDE_SHORTHANDS = {
-                                    "opus": "claude-opus-4-7",
-                                    "sonnet": "claude-sonnet-4-6",
-                                    "haiku": "claude-haiku-4-5-20251001",
-                                }
                                 d["model"] = _CLAUDE_SHORTHANDS.get(sid_or_model.lower(), sid_or_model)
+                            if effort_hint:
+                                d["effort"] = effort_hint
                             normalized.append(d)
                         elif backend_hint == "local":
                             if sid_or_model in local_bridge.sessions:
@@ -9714,11 +9737,16 @@ async def call_tool(name: str, arguments: dict):
                             else:
                                 normalized.append({"name": s, "backend": "local", "model": sid_or_model})
                         elif backend_hint == "codex":
+                            d: dict = {"name": s, "backend": "codex"}
                             if sid_or_model in codex_bridge.sessions:
                                 sess = codex_bridge.sessions[sid_or_model]
-                                normalized.append({"name": s, "backend": "codex", "session_id": sid_or_model, "model": sess.model})
+                                d["session_id"] = sid_or_model
+                                d["model"] = sess.model
                             else:
-                                normalized.append({"name": s, "backend": "codex", "model": sid_or_model})
+                                d["model"] = sid_or_model
+                            if effort_hint:
+                                d["effort"] = effort_hint
+                            normalized.append(d)
                         elif backend_hint == "opencode":
                             if sid_or_model in bridge.sessions:
                                 normalized.append({"name": s, "backend": "opencode", "session_id": sid_or_model})
@@ -10204,8 +10232,11 @@ def main():
                 "## Multi-model discussions — use rooms\n"
                 "For any discussion involving multiple models (e.g. GPT + Claude), always use "
                 "room_create (via advanced gateway) with participant shorthands:\n"
-                "  codex:gpt-5.4          — Codex backend, fresh session\n"
-                "  claude:claude-opus-4-7 — Claude API directly (reliable, no stale sessions)\n"
+                "  codex:gpt-5.4                  — Codex backend, default effort (high)\n"
+                "  codex:gpt-5.4:medium           — Codex backend, medium reasoning effort\n"
+                "  claude:claude-opus-4-7         — Claude API directly\n"
+                "  claude:claude-opus-4-7:high    — Claude with high effort (extended thinking)\n"
+                "Effort levels: claude=low/medium/high/xhigh/max  codex=low/medium/high/xhigh\n"
                 "Then run with room_run. Never route multi-model discussions through opencode.\n\n"
                 "## Room follow-ups — CRITICAL\n"
                 "To send a follow-up question to a live room, use room_run with prompt=:\n"
