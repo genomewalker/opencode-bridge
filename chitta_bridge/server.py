@@ -493,6 +493,8 @@ def _apply_file_patch(filepath: str, old_str: str, new_str: str) -> str:
     if blocked:
         return f"Error: {blocked}"
 
+    outline_before = _read_outline(str(p))
+
     with _path_write_lock(p):
         try:
             content = p.read_text(encoding="utf-8")
@@ -540,7 +542,12 @@ def _apply_file_patch(filepath: str, old_str: str, new_str: str) -> str:
     _post_write_refresh(p)
     _cache_pop_file(p)
     sign = "+" if delta >= 0 else ""
-    return f"✓ {p.name} patched @ L{line_num} (+{new_lines}/-{old_lines} lines, net {sign}{delta})"
+    msg = f"✓ {p.name} patched @ L{line_num} (+{new_lines}/-{old_lines} lines, net {sign}{delta})"
+    msg += _outline_diff(outline_before, _read_outline(str(p)))
+    msg += _run_lint(str(p))
+    return msg
+
+
 def _find_symbol_range(content: str, symbol: str, ext: str):
     """Return (start, end) byte range of a named symbol for .py/.pyx files only.
 
@@ -699,6 +706,8 @@ def _apply_symbol_patch(filepath: str, symbol: str, new_body: str) -> str:
     if blocked:
         return f"Error: {blocked}"
 
+    outline_before = _read_outline(str(p))
+
     with _path_write_lock(p):
         try:
             content = p.read_text(encoding="utf-8")
@@ -769,7 +778,10 @@ def _apply_symbol_patch(filepath: str, symbol: str, new_body: str) -> str:
         f"[edit] {p.name}::{symbol} patched{mode} @ L{line_num} (+{new_lines}/-{old_lines})",
         kind="episode", tags="file-edit,symbol-patch", confidence=0.7,
     )
-    return f"✓ {p.name}::{symbol} patched{mode} @ L{line_num} (+{new_lines}/-{old_lines} lines, net {sign}{delta})"
+    msg = f"✓ {p.name}::{symbol} patched{mode} @ L{line_num} (+{new_lines}/-{old_lines} lines, net {sign}{delta})"
+    msg += _outline_diff(outline_before, _read_outline(str(p)))
+    msg += _run_lint(str(p))
+    return msg
 
 
 def _apply_symbol_edit(filepath: str, symbol: str, old_str: str, new_str: str) -> str:
@@ -788,6 +800,8 @@ def _apply_symbol_edit(filepath: str, symbol: str, old_str: str, new_str: str) -
         return f"Error: {blocked}"
     if not old_str:
         return "Error: old_str is empty"
+
+    outline_before = _read_outline(str(p))
 
     with _path_write_lock(p):
         try:
@@ -837,7 +851,10 @@ def _apply_symbol_edit(filepath: str, symbol: str, old_str: str, new_str: str) -
         kind="episode", tags="file-edit,symbol-edit", confidence=0.7,
     )
     sign = "+" if delta >= 0 else ""
-    return f"✓ {p.name}::{symbol} edited @ L{line_num} (+{new_lines}/-{old_lines} lines, net {sign}{delta})"
+    msg = f"✓ {p.name}::{symbol} edited @ L{line_num} (+{new_lines}/-{old_lines} lines, net {sign}{delta})"
+    msg += _outline_diff(outline_before, _read_outline(str(p)))
+    msg += _run_lint(str(p))
+    return msg
 
 
 def _locate_symbol(p: Path, symbol: str, content: str):
@@ -881,6 +898,8 @@ def _apply_symbol_delete(filepath: str, symbol: str) -> str:
     if blocked:
         return f"Error: {blocked}"
 
+    outline_before = _read_outline(str(p))
+
     with _path_write_lock(p):
         try:
             content = p.read_text(encoding="utf-8")
@@ -921,7 +940,10 @@ def _apply_symbol_delete(filepath: str, symbol: str) -> str:
         f"[edit] {p.name}::{symbol} deleted @ L{line_num} (-{removed} lines)",
         kind="episode", tags="file-edit,symbol-delete", confidence=0.7,
     )
-    return f"✓ {p.name}::{symbol} deleted @ L{line_num} (-{removed} lines)"
+    msg = f"✓ {p.name}::{symbol} deleted @ L{line_num} (-{removed} lines)"
+    msg += _outline_diff(outline_before, _read_outline(str(p)))
+    msg += _run_lint(str(p))
+    return msg
 
 
 _IDENT_RE_TMPL = r"(?<![A-Za-z0-9_])%s(?![A-Za-z0-9_])"
@@ -980,6 +1002,107 @@ def _apply_symbol_rename(filepath: str, old_name: str, new_name: str) -> str:
         kind="episode", tags="file-edit,symbol-rename", confidence=0.7,
     )
     return f"✓ {p.name}: renamed {old_name} → {new_name} at {n} site(s)"
+
+
+def _apply_symbol_rename_project(filepath: str, old_name: str, new_name: str) -> str:
+    """Rename an identifier across all project files (git-repo-aware).
+
+    Discovers all files containing old_name via grep, snapshots content hashes,
+    validates no concurrent edits, then writes atomically per file.
+    """
+    import re as _re
+    import subprocess as _sp
+    import shutil as _sh
+    if not old_name or not new_name or old_name == new_name:
+        return f"Error: invalid rename {old_name!r} → {new_name!r}"
+    if not _re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", new_name):
+        return f"Error: {new_name!r} is not a valid identifier"
+
+    p = Path(filepath).expanduser().resolve()
+    if not p.is_file():
+        return f"Error: file not found: {filepath}"
+
+    try:
+        root_bytes = _sp.check_output(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=str(p.parent), stderr=_sp.DEVNULL,
+        )
+        root = Path(root_bytes.decode().strip())
+    except Exception:
+        root = p.parent
+
+    grep = _sh.which("grep") or "grep"
+    try:
+        raw = _sp.check_output(
+            [grep, "-rl",
+             "--include=*.py", "--include=*.pyx",
+             "--include=*.ts", "--include=*.js",
+             "--include=*.go", "--include=*.rs",
+             "--include=*.c", "--include=*.cpp",
+             "--include=*.h", "--include=*.hpp",
+             old_name, str(root)],
+            stderr=_sp.DEVNULL, timeout=15,
+        ).decode(errors="replace")
+        candidate_files = [Path(ln.strip()) for ln in raw.splitlines() if ln.strip()]
+    except _sp.CalledProcessError:
+        candidate_files = []
+    except Exception as exc:
+        return f"Error scanning repo: {exc}"
+
+    if p not in candidate_files:
+        candidate_files.insert(0, p)
+
+    pattern = _re.compile(_IDENT_RE_TMPL % _re.escape(old_name))
+
+    snapshots: list[tuple[Path, str, str]] = []
+    for fp in candidate_files:
+        try:
+            content = fp.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if not pattern.search(content):
+            continue
+        snapshots.append((fp, content, _content_hash(content)))
+
+    if not snapshots:
+        return f"Error: identifier '{old_name}' not found in any project file"
+
+    for fp, content, pre_hash in snapshots:
+        blocked = _reject_sensitive_path(fp)
+        if blocked:
+            return f"Error: {blocked}"
+        try:
+            if _content_hash(fp.read_text(encoding="utf-8")) != pre_hash:
+                return f"Error: {fp.name} changed on disk during scan — retry"
+        except OSError as e:
+            return f"Error re-reading {fp.name}: {e}"
+
+    results = []
+    for fp, content, pre_hash in snapshots:
+        new_content, n = pattern.subn(new_name, content)
+        with _path_write_lock(fp):
+            try:
+                if _content_hash(fp.read_text(encoding="utf-8")) != pre_hash:
+                    return (
+                        f"Error: {fp.name} changed on disk — partial rename applied "
+                        f"to {len(results)} file(s)"
+                    )
+                _atomic_write_text(fp, new_content)
+            except OSError as e:
+                return f"Error writing {fp.name}: {e}"
+        _post_write_refresh(fp)
+        _cache_pop_file(fp)
+        results.append(f"{fp.name} ({n} site{'s' if n != 1 else ''})")
+
+    SoulClient.remember(
+        f"[edit] project rename {old_name}→{new_name} in {len(results)} file(s): "
+        + ", ".join(r.split()[0] for r in results[:5]),
+        kind="episode", tags="file-edit,symbol-rename,project-rename", confidence=0.7,
+    )
+    return (
+        f"✓ Renamed {old_name} → {new_name} in {len(results)} file(s):\n"
+        + "\n".join(f"  {r}" for r in results)
+    )
 
 
 def _apply_symbol_move(filepath: str, symbol: str, dest_filepath: str) -> str:
@@ -5064,6 +5187,110 @@ def _cache_pop_file(file: Path) -> None:
             cache.pop(key, None)
 
 
+# ── Handle-based addressing ──────────────────────────────────────────────────
+
+_handle_store: dict[str, dict] = {}
+_HANDLE_STORE_MAX = 256
+
+
+def _make_handle(file_resolved: str, symbol: str, body_hash: str) -> str:
+    sid = _current_session_id()
+    hid = hashlib.sha256((sid + file_resolved + symbol + body_hash).encode()).hexdigest()[:12]
+    _handle_store[hid] = {"file": file_resolved, "symbol": symbol, "body_hash": body_hash}
+    if len(_handle_store) > _HANDLE_STORE_MAX:
+        for k in list(_handle_store.keys())[:len(_handle_store) - _HANDLE_STORE_MAX]:
+            _handle_store.pop(k, None)
+    return hid
+
+
+def _resolve_handle(handle: str):
+    """Return (file_str, symbol) or an error string."""
+    rec = _handle_store.get(handle)
+    if not rec:
+        return "Error: unknown handle — re-read symbol first"
+    p = Path(rec["file"])
+    if not p.is_file():
+        return "Error: stale handle — file gone, re-read symbol first"
+    content = p.read_text(encoding="utf-8", errors="replace")
+    loc = _locate_symbol(p, rec["symbol"], content)
+    if loc is None or isinstance(loc, str):
+        return "Error: stale handle — symbol not found, re-read symbol first"
+    s, e, _ = loc
+    if _content_hash(content[s:e]) != rec["body_hash"]:
+        return "Error: stale handle — body changed, re-read symbol first"
+    return rec["file"], rec["symbol"]
+
+
+# ── Outline diff helpers ─────────────────────────────────────────────────────
+
+_OUTLINE_LINE_RE = re.compile(r'^\s*L\s*(\d+)\s+(.*\S)\s*$')
+
+
+def _parse_outline_symbols(outline: str) -> dict:
+    out: dict[str, int] = {}
+    for ln in outline.splitlines():
+        m = _OUTLINE_LINE_RE.match(ln)
+        if m:
+            out[m.group(2).strip()] = int(m.group(1))
+    return out
+
+
+def _outline_diff(before: str, after: str) -> str:
+    b, a = _parse_outline_symbols(before), _parse_outline_symbols(after)
+    added   = [f"+ {n} (L{a[n]})" for n in a if n not in b]
+    removed = [f"- {n}" for n in b if n not in a]
+    moved   = [f"~ {n} (L{b[n]}→L{a[n]})" for n in a if n in b and a[n] != b[n]]
+    parts   = added + moved + removed
+    return "\n\n**Symbol changes:** " + "  ".join(parts) if parts else ""
+
+
+# ── Linter-to-symbol mapping ─────────────────────────────────────────────────
+
+def _run_lint(filepath: str) -> str:
+    import shutil as _shutil
+    import subprocess as _sp
+    import json as _json
+    p = Path(filepath)
+    if p.suffix.lower() not in (".py", ".pyx"):
+        return ""
+    ruff = _shutil.which("ruff")
+    if not ruff:
+        return ""
+    try:
+        proc = _sp.run(
+            [ruff, "check", "--output-format=json", str(p)],
+            capture_output=True, text=True, timeout=5,
+        )
+        data = _json.loads(proc.stdout or "[]")
+    except Exception:
+        return ""
+    if not data:
+        return ""
+    pairs: list[tuple[int, str]] = []
+    for ln in _read_outline(str(p)).splitlines():
+        m = _OUTLINE_LINE_RE.match(ln)
+        if m:
+            pairs.append((int(m.group(1)), m.group(2).strip().split()[-1]))
+    pairs.sort()
+
+    def sym_for(row: int) -> str:
+        name = "?"
+        for lno, nm in pairs:
+            if lno <= row:
+                name = nm
+            else:
+                break
+        return name
+
+    out = []
+    for e in data[:5]:
+        code = e.get("code", "?")
+        row  = (e.get("location") or {}).get("row", 0)
+        msg  = e.get("message", "")
+        out.append(f"{code} in `{sym_for(row)}` L{row}: {msg}")
+    return "\n\n**Lint:** " + "  ".join(out) if out else ""
+
+
 def _post_write_refresh(paths) -> None:
     """Fast-path reindex after a bridge-owned write. Bypasses the
     5-min rate limiter in file-changed-hook.sh because these writes
@@ -9014,12 +9241,30 @@ async def list_tools():
             description=(
                 "Rename every occurrence of an identifier in a single file using "
                 "word-boundary matching. Won't touch substrings of larger names. "
-                "For cross-file rename, combine with symbol_callers."
+                "For cross-file rename use symbol_rename_project."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "file":     {"type": "string", "description": "Absolute path to the file"},
+                    "old_name": {"type": "string", "description": "Current identifier"},
+                    "new_name": {"type": "string", "description": "New identifier (must be valid)"},
+                },
+                "required": ["file", "old_name", "new_name"],
+            },
+        ),
+        Tool(
+            name="symbol_rename_project",
+            description=(
+                "Rename an identifier across ALL files in the project. "
+                "Discovers candidate files via grep from the git repo root, "
+                "snapshots content hashes, validates no concurrent edits, "
+                "then writes atomically per file. Covers .py .ts .js .go .rs .c .cpp .h files."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file":     {"type": "string", "description": "Any file in the target git repo (used to find repo root)"},
                     "old_name": {"type": "string", "description": "Current identifier"},
                     "new_name": {"type": "string", "description": "New identifier (must be valid)"},
                 },
@@ -9759,6 +10004,13 @@ async def call_tool(name: str, arguments: dict):
                     arguments["file"], arguments["old_name"], arguments["new_name"],
                 ),
             )
+        elif name == "symbol_rename_project":
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: _apply_symbol_rename_project(
+                    arguments["file"], arguments["old_name"], arguments["new_name"],
+                ),
+            )
         elif name == "symbol_move":
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
@@ -9782,8 +10034,28 @@ async def call_tool(name: str, arguments: dict):
             cached = _cache_get_fresh(file_hint, sym) if sym else None
             if cached:
                 body = f"[cache] {cached['file']}:{cached['line_start']}\n{cached['body']}"
+                # Emit a fresh handle for cache hits too
+                try:
+                    fp = Path(cached["file"])
+                    raw_body = cached["body"]
+                    hid = _make_handle(str(fp.resolve()), sym, _content_hash(raw_body))
+                    body += f"\n\n[handle: cbh:{hid}]"
+                except Exception:
+                    pass
             else:
                 body = SoulClient._call("read_symbol", {"name": sym}) or "(not found)"
+                # Attempt to emit a handle by re-locating the symbol on disk
+                if file_hint and body != "(not found)":
+                    try:
+                        fp = Path(file_hint).expanduser().resolve()
+                        content = fp.read_text(encoding="utf-8", errors="replace")
+                        loc = _locate_symbol(fp, sym, content)
+                        if loc and not isinstance(loc, str):
+                            s, e, _ = loc
+                            hid = _make_handle(str(fp), sym, _content_hash(content[s:e]))
+                            body += f"\n\n[handle: cbh:{hid}]"
+                    except Exception:
+                        pass
             body = body[offset:] if offset > 0 else body
             if len(body) > max_chars:
                 remaining = len(body) - max_chars
