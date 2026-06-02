@@ -8,8 +8,8 @@
   "keywords": ["chitta", "opencode", "codex", "local-llm", "discussion", "mcp"],
   "mcpServers": {
     "chitta-bridge": {
-      "command": "chitta-bridge",
-      "description": "Multi-agent discussion sessions — OpenCode, Codex, local GPU models"
+      "url": "http://localhost:7681/sse",
+      "description": "Multi-agent discussion sessions — OpenCode, Codex, local GPU models. Start server: chitta-bridge --http"
     }
   },
   "skills": [

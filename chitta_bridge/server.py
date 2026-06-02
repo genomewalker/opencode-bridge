@@ -2001,6 +2001,21 @@ def _migrate_persisted(data: dict, kind: str) -> dict:
         return data  # forward-compat: don't downgrade, doctor will warn
     # v0 → v1: no field shape changes, just stamp.
     data["schema_version"] = PERSISTED_SCHEMA_VERSION
+    # Room migration: retry_counts was keyed by turn_key ("r{N}:{name}"); normalize to name.
+    if kind == "room" and "retry_counts" in data:
+        old = data["retry_counts"]
+        migrated: dict = {}
+        for k, v in old.items():
+            if k.startswith("r") and ":" in k:
+                try:
+                    int(k[1:k.index(":")])  # verify numeric round prefix
+                    name = k[k.index(":") + 1:]
+                    migrated[name] = max(migrated.get(name, 0), v)
+                    continue
+                except ValueError:
+                    pass
+            migrated[k] = max(migrated.get(k, 0), v)
+        data["retry_counts"] = migrated
     return data
 
 
@@ -3225,6 +3240,7 @@ class CodexBridge:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
                 start_new_session=True,
+                limit=2**20,  # 1MB per line — prevents LimitOverrunError on long JSONL events
             )
             proc.stdin.write(stdin_data.encode())
             await proc.stdin.drain()
@@ -4054,21 +4070,70 @@ _OLLAMA_URL_GLOB = os.environ.get(
 class GpuNodeDiscovery:
     """Discover GPU nodes reachable via Slurm or direct hostname and probe for Ollama/vLLM."""
 
-    # Well-known node hostnames to probe (can be extended via environment variable
-    # CHITTA_BRIDGE_GPU_NODES=node1,node2,...)
     _ENV_NODES_VAR = "CHITTA_BRIDGE_GPU_NODES"
+
+    # Dead-host cooldown — class-level state shared across all callers
+    _dead_hosts: dict = {}     # url → expiry monotonic time
+    _host_failures: dict = {}  # url → consecutive failure count
+    _FAIL_THRESHOLD = 2
+    _COOLDOWN_SECS = 20
+
+    @classmethod
+    def _is_cooled_down(cls, url: str) -> bool:
+        import time
+        return time.monotonic() < cls._dead_hosts.get(url, 0)
+
+    @classmethod
+    def _record_failure(cls, url: str) -> None:
+        import time
+        cls._host_failures[url] = cls._host_failures.get(url, 0) + 1
+        if cls._host_failures[url] >= cls._FAIL_THRESHOLD:
+            cls._dead_hosts[url] = time.monotonic() + cls._COOLDOWN_SECS
+            cls._host_failures[url] = 0
+
+    @classmethod
+    def _record_success(cls, url: str) -> None:
+        cls._dead_hosts.pop(url, None)
+        cls._host_failures.pop(url, None)
 
     @staticmethod
     def _probe_ollama(base_url: str, timeout: int = 4) -> Optional[list[str]]:
         """Return list of available model names at base_url, or None if unreachable."""
-        # base_url ends with /v1; Ollama's tag endpoint is at the parent /api/tags
         tags_url = base_url.rstrip("/v1").rstrip("/") + "/api/tags"
         try:
             req = urllib.request.urlopen(tags_url, timeout=timeout)
             data = json.loads(req.read().decode())
-            return [m.get("name", "") for m in data.get("models", [])]
+            models = [m.get("name", "") for m in data.get("models", [])]
+            GpuNodeDiscovery._record_success(base_url)
+            return models
         except Exception:
+            GpuNodeDiscovery._record_failure(base_url)
             return None
+
+    @classmethod
+    def _tailscale_peers(cls) -> list[str]:
+        """Return Ollama/vLLM base_urls from Tailscale peers. Silent on any error."""
+        if not shutil.which("tailscale"):
+            return []
+        try:
+            import subprocess
+            import json as _json
+            out = subprocess.check_output(
+                ["tailscale", "status", "--json"],
+                timeout=6, stderr=subprocess.DEVNULL, text=True,
+            )
+            data = _json.loads(out)
+            urls = []
+            for peer in data.get("Peer", {}).values():
+                ips = peer.get("TailscaleIPs") or []
+                if not ips:
+                    continue
+                ip = ips[0]
+                for port in (11434, 8000):  # Ollama, vLLM
+                    urls.append(f"http://{ip}:{port}/v1")
+            return urls
+        except Exception:
+            return []
 
     @classmethod
     def _cached_urls(cls) -> list[tuple[str, str]]:
@@ -4144,7 +4209,15 @@ class GpuNodeDiscovery:
                 if models is not None:
                     seen[base_url] = {"base_url": base_url, "node": node, "models": models, "source": "env"}
 
-        # 4. Localhost fallback
+        # 4. Tailscale peers
+        for ts_url in cls._tailscale_peers():
+            if ts_url not in seen and not cls._is_cooled_down(ts_url):
+                models = cls._probe_ollama(ts_url)
+                if models is not None:
+                    node = ts_url.split("//")[-1].split(":")[0]
+                    seen[ts_url] = {"base_url": ts_url, "node": node, "models": models, "source": "tailscale"}
+
+        # 5. Localhost fallback
         local_url = f"http://localhost:{_LOCAL_LLM_PORT}/v1"
         if local_url not in seen:
             models = cls._probe_ollama(local_url)
@@ -4314,6 +4387,7 @@ class LocalModelBridge:
             except (http.client.RemoteDisconnected, ConnectionResetError, urllib.error.URLError) as e:
                 last_exc = e
                 continue
+        GpuNodeDiscovery._record_failure(endpoint)
         raise last_exc
 
     # ------------------------------------------------------------------
@@ -4410,11 +4484,98 @@ class WebSearch:
                 body = raw.decode(enc, errors="replace")
         except urllib.error.HTTPError as e:
             if e.code == 403:
-                return (
-                    "(403 Forbidden — site uses bot protection. "
-                    "Try web_search to find an open-access version, or use pdf_read if you have the file.)"
-                )
+                return cls._curl_fetch(url, max_chars=max_chars, timeout=timeout)
             raise
+        return cls._parse_body(raw, body, url, max_chars)
+
+    @classmethod
+    def _curl_fetch(cls, url: str, max_chars: int = 12000, timeout: int = 30) -> str:
+        """curl -sL fallback for Cloudflare-protected pages and direct PDF URLs."""
+        import subprocess
+        import hashlib
+        import os
+
+        tmp_dir = "/projects/caeg/scratch/kbd606/tmp"
+        os.makedirs(tmp_dir, exist_ok=True)
+        url_hash = hashlib.md5(url.encode()).hexdigest()[:12]
+        tmp_path = os.path.join(tmp_dir, f"curl_fetch_{url_hash}")
+
+        try:
+            result = subprocess.run(
+                ["curl", "-sL", "-A", "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0",
+                 "-o", tmp_path, "-w", "%{content_type}\n%{http_code}", url],
+                capture_output=True, text=True, timeout=timeout,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return "(curl fallback failed — binary not found or timed out)"
+
+        parts = result.stdout.strip().rsplit("\n", 1)
+        content_type = parts[0] if len(parts) == 2 else ""
+        http_code = parts[-1]
+
+        if http_code not in ("200", ""):
+            return f"(curl fallback: HTTP {http_code})"
+
+        if not os.path.exists(tmp_path):
+            return "(curl fallback: no output file)"
+
+        # PDF: extract text via pdf_read tool path
+        is_pdf = "pdf" in content_type.lower() or tmp_path.endswith(".pdf")
+        with open(tmp_path, "rb") as f:
+            header = f.read(5)
+        if not is_pdf and header == b"%PDF-":
+            is_pdf = True
+
+        if is_pdf:
+            pdf_path = tmp_path + ".pdf"
+            os.rename(tmp_path, pdf_path)
+            try:
+                import pdfplumber
+                parts: list[str] = []
+                with pdfplumber.open(pdf_path) as pdf:
+                    for pg in pdf.pages[:50]:
+                        t = pg.extract_text(x_tolerance=2, y_tolerance=2) or ""
+                        if t.strip():
+                            parts.append(t.strip())
+                text = "\n\n".join(parts)
+            except Exception:
+                try:
+                    from pypdf import PdfReader
+                    reader = PdfReader(pdf_path)
+                    text = "\n\n".join(
+                        (p.extract_text() or "").strip()
+                        for p in reader.pages[:50]
+                    )
+                except Exception as exc:
+                    return f"(curl fetched PDF at {pdf_path} but extraction failed: {exc})"
+            if len(text) > max_chars:
+                text = text[:max_chars] + "\n\n[truncated]"
+            return text
+
+        # HTML / plain text
+        try:
+            with open(tmp_path, "r", encoding="utf-8", errors="replace") as f:
+                body = f.read()
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+        text = re.sub(r"<script[^>]*>.*?</script>", "", body, flags=re.DOTALL)
+        text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        text = _html.unescape(text)
+        if len(text) > max_chars:
+            text = text[:max_chars] + "\n\n[truncated]"
+        return text
+
+    @classmethod
+    def _parse_body(cls, raw: bytes, body: str, url: str, max_chars: int) -> str:
+        # If server returned binary (e.g. PDF without Content-Type header), fall back to curl
+        if raw[:5] == b"%PDF-":
+            return cls._curl_fetch(url, max_chars=max_chars)
         text = re.sub(r"<script[^>]*>.*?</script>", "", body, flags=re.DOTALL)
         text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL)
         text = re.sub(r"<[^>]+>", " ", text)
@@ -4944,6 +5105,166 @@ class WebSearch:
 
 
 # ---------------------------------------------------------------------------
+# Literature Search (arXiv · bioRxiv/medRxiv · Europe PMC · OpenAlex)
+# ---------------------------------------------------------------------------
+
+class LitSearch:
+    """Thin wrappers around public literature APIs — no auth required except OpenAlex."""
+
+    _RATE = 1.0  # seconds between requests (conservative)
+
+    @staticmethod
+    def _get(url: str, params: dict | None = None, timeout: int = 15) -> dict | str:
+        import urllib.request
+        import urllib.parse
+        import json as _json
+        if params:
+            url = url + "?" + urllib.parse.urlencode(params)
+        req = urllib.request.Request(url, headers={"User-Agent": "chitta-bridge/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = r.read().decode()
+        try:
+            return _json.loads(body)
+        except Exception:
+            return body
+
+    @classmethod
+    def arxiv(cls, query: str, max_results: int = 10,
+               sort_by: str = "relevance") -> str:
+        import urllib.parse
+        import xml.etree.ElementTree as ET
+        ns = {"atom": "http://www.w3.org/2005/Atom",
+              "arxiv": "http://arxiv.org/schemas/atom"}
+        params = {"search_query": query, "max_results": max_results,
+                  "sortBy": sort_by, "sortOrder": "descending"}
+        url = "http://export.arxiv.org/api/query?" + urllib.parse.urlencode(params)
+        import urllib.request
+        req = urllib.request.Request(url, headers={"User-Agent": "chitta-bridge/1.0"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            body = r.read().decode()
+        root = ET.fromstring(body)
+        entries = root.findall("atom:entry", ns)
+        if not entries:
+            return f"No arXiv results for: {query}"
+        lines = [f"arXiv search: {query!r} — {len(entries)} results\n"]
+        for e in entries:
+            title = (e.findtext("atom:title", "", ns) or "").strip().replace("\n", " ")
+            arxiv_id = (e.findtext("atom:id", "", ns) or "").split("/abs/")[-1]
+            published = (e.findtext("atom:published", "", ns) or "")[:10]
+            summary = (e.findtext("atom:summary", "", ns) or "").strip().replace("\n", " ")[:300]
+            authors = [a.findtext("atom:name", "", ns) for a in e.findall("atom:author", ns)][:4]
+            lines.append(
+                f"[{arxiv_id}] {title}\n"
+                f"  Authors: {', '.join(authors)}\n"
+                f"  Published: {published}\n"
+                f"  Abstract: {summary}...\n"
+                f"  URL: https://arxiv.org/abs/{arxiv_id}\n"
+            )
+        return "\n".join(lines)
+
+    @classmethod
+    def biorxiv(cls, query: str, start_date: str, end_date: str,
+                server: str = "biorxiv", max_results: int = 20) -> str:
+        import time
+        results = []
+        cursor = 0
+        while len(results) < max_results:
+            url = f"https://api.biorxiv.org/details/{server}/{start_date}/{end_date}/{cursor}"
+            data = cls._get(url)
+            if not isinstance(data, dict):
+                return f"bioRxiv API error: {str(data)[:200]}"
+            collection = data.get("collection", [])
+            if not collection:
+                break
+            kw = query.lower().split()
+            for item in collection:
+                text = f"{item.get('title','')} {item.get('abstract','')}".lower()
+                if all(k in text for k in kw):
+                    results.append(item)
+                if len(results) >= max_results:
+                    break
+            if len(collection) < 100:
+                break
+            cursor += 100
+            time.sleep(cls._RATE)
+        if not results:
+            return f"No {server} results for {query!r} between {start_date} and {end_date}"
+        lines = [f"{server} search: {query!r} ({start_date}→{end_date}) — {len(results)} results\n"]
+        for r in results:
+            doi = r.get("doi", "")
+            lines.append(
+                f"[{doi}] {r.get('title','').strip()}\n"
+                f"  Authors: {r.get('authors','')[:120]}\n"
+                f"  Date: {r.get('date','')}\n"
+                f"  Abstract: {r.get('abstract','').strip()[:300]}...\n"
+                f"  URL: https://doi.org/{doi}\n"
+            )
+        return "\n".join(lines)
+
+    @classmethod
+    def europepmc(cls, query: str, max_results: int = 20,
+                  open_access_only: bool = True) -> str:
+        full_query = query + (" AND OPEN_ACCESS:y" if open_access_only else "")
+        params = {"query": full_query, "resultType": "lite",
+                  "pageSize": min(max_results, 100), "format": "json"}
+        data = cls._get("https://www.ebi.ac.uk/europepmc/webservices/rest/search", params)
+        if not isinstance(data, dict):
+            return f"Europe PMC error: {str(data)[:200]}"
+        results = data.get("resultList", {}).get("result", [])
+        if not results:
+            return f"No Europe PMC results for: {query}"
+        lines = [f"Europe PMC search: {query!r} — {len(results)} results "
+                 f"({'open access only' if open_access_only else 'all'})\n"]
+        for r in results:
+            pmid = r.get("pmid", r.get("pmcid", ""))
+            lines.append(
+                f"[{pmid}] {r.get('title','').strip()}\n"
+                f"  Authors: {r.get('authorString','')[:120]}\n"
+                f"  Journal: {r.get('journalTitle','')}  {r.get('pubYear','')}\n"
+                f"  DOI: {r.get('doi','')}\n"
+                f"  URL: https://europepmc.org/article/{r.get('source','MED')}/{pmid}\n"
+            )
+        return "\n".join(lines)
+
+    @classmethod
+    def openalex(cls, query: str, entity_type: str = "works",
+                 max_results: int = 20, filters: str = "") -> str:
+        import os
+        api_key = os.environ.get("OPENALEX_API_KEY", "")
+        params: dict = {"search": query, "per-page": min(max_results, 100)}
+        if filters:
+            params["filter"] = filters
+        if api_key:
+            params["api_key"] = api_key
+        else:
+            params["mailto"] = "chitta-bridge@localhost"  # polite pool
+        data = cls._get(f"https://api.openalex.org/{entity_type}", params)
+        if not isinstance(data, dict):
+            return f"OpenAlex error: {str(data)[:200]}"
+        results = data.get("results", [])
+        meta = data.get("meta", {})
+        if not results:
+            return f"No OpenAlex results for: {query}"
+        lines = [f"OpenAlex search: {query!r} — {meta.get('count', len(results))} total, "
+                 f"showing {len(results)}\n"]
+        for r in results:
+            oa_id = r.get("id", "").replace("https://openalex.org/", "")
+            title = r.get("display_name", r.get("title", "")).strip()
+            year = r.get("publication_year", "")
+            doi = r.get("doi", "")
+            authors = [a.get("author", {}).get("display_name", "")
+                       for a in r.get("authorships", [])[:4]]
+            cited = r.get("cited_by_count", "")
+            lines.append(
+                f"[{oa_id}] {title}\n"
+                f"  Authors: {', '.join(authors)}\n"
+                f"  Year: {year}  Cited by: {cited}\n"
+                f"  DOI: {doi}\n"
+            )
+        return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Soul Integration (chittad Unix socket — bidirectional memory bridge)
 # ---------------------------------------------------------------------------
 
@@ -5030,7 +5351,7 @@ class SoulClient:
             args["tags"] = tags
         if realm:
             args["realm"] = realm
-        return cls._call("remember", args)
+        return cls._call("remember", args, timeout=60.0)
 
     @classmethod
     def hybrid_recall(cls, query: str, limit: int = 5, realm: Optional[str] = None) -> Optional[str]:
@@ -5462,6 +5783,151 @@ def chitta_ingest(text: str) -> int:
             written += 1
 
     return written
+async def _doc_ingest(
+    source: str,
+    realm: str = "research",
+    tags: list | None = None,
+    model: str = "gpt-5.5",
+    dry_run: bool = True,
+    max_memories: int = 50,
+) -> str:
+    """Extract structured memory records from a document via frontier LLM."""
+    import hashlib
+    import tempfile
+
+    tags = tags or []
+    doc_id = hashlib.sha256(source.encode()).hexdigest()[:16]
+
+    # 1. Read source
+    src_path = Path(source)
+    if source.startswith("http://") or source.startswith("https://"):
+        raw_text = WebSearch.fetch_page(source, max_chars=80_000)
+    elif src_path.exists():
+        if source.lower().endswith(".pdf"):
+            raw_text = rooms._tool_pdf_read({"path": source, "pages": "all"})
+        else:
+            raw_text = src_path.read_text(errors="replace")
+    else:
+        return f"Error: source not found: {source}"
+
+    if not raw_text or (isinstance(raw_text, str) and raw_text.startswith("Error")):
+        return f"Failed to read source: {str(raw_text)[:300]}"
+
+    # Cap input — large context causes stall in codex
+    text_sample = raw_text[:30_000]
+
+    schema_example = json.dumps({
+        "kind": "failure_mode",
+        "title": "...",
+        "claim": "...",
+        "scope": {"doc": doc_id, "assay": "", "task": ""},
+        "source": {"doc_id": doc_id, "page": 0, "section": "...", "span": "..."},
+        "evidence": "stated",
+        "tags": tags,
+        "realm": realm,
+        "type": "wisdom",
+        "visibility": 1,
+        "retrieval_text": "...",
+    })
+
+    extraction_prompt = (
+        f"Extract all significant atomic knowledge records from the document below.\n\n"
+        f"Output ONLY valid JSONL (one JSON object per line, no prose). Each record MUST follow:\n"
+        f"{schema_example}\n\n"
+        f"Rules:\n"
+        f"- kind: failure_mode | constraint | grading_rule | procedure | definition | caveat\n"
+        f"- title: 5-10 words, unique, search-optimized\n"
+        f"- claim: 1-3 sentences, standalone, self-contained\n"
+        f"- scope.assay: platform name (xenium/merfish/visium/curio/atlasxomics) or \"\"\n"
+        f"- scope.task: task type (clustering/de/qc/spatial_analysis/cell_typing) or \"\"\n"
+        f"- evidence: stated | inferred | cross_doc\n"
+        f"- type: wisdom | procedural | insight | episode\n"
+        f"- retrieval_text: 50-150 word self-contained summary, useful without surrounding doc\n"
+        f"- tags: include {json.dumps(tags)} plus relevant domain tags\n"
+        f"- Output at most {max_memories} records. Most important/actionable facts only.\n"
+        f"- Output ONLY JSON lines — no markdown, no headers, no explanations.\n\n"
+        f"DOCUMENT (id={doc_id}, source={source}):\n"
+        f"{text_sample}"
+    )
+
+    # 2. Run extraction with generous timeouts (extraction of 50 records can take >3 min)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        args = codex_bridge._build_exec_args(model, None, full_auto=False)
+        output, code = await codex_bridge._run_codex_exec_stdin(
+            args, extraction_prompt, tmpdir,
+            timeout=600, stall_timeout=300,
+        )
+        if code != 0:
+            reply = ""
+        else:
+            reply, _ = codex_bridge._parse_codex_jsonl(output)
+            reply = reply or output
+
+    if not reply:
+        return f"Extraction failed (exit {code}): {output[:500] if output else '(no output)'}"
+
+    # 3. Parse JSONL records
+    records: list[dict] = []
+    parse_errors: list[str] = []
+    for line in reply.splitlines():
+        line = line.strip()
+        if not line or not line.startswith("{"):
+            continue
+        try:
+            rec = json.loads(line)
+            if isinstance(rec, dict) and ("claim" in rec or "title" in rec):
+                rec.setdefault("scope", {})["doc"] = doc_id
+                records.append(rec)
+        except json.JSONDecodeError as e:
+            parse_errors.append(f"{e}: {line[:80]}")
+
+    if not records:
+        return json.dumps({
+            "doc_id": doc_id, "source": source, "status": "no_records",
+            "parse_errors": parse_errors[:5], "raw_sample": reply[:800],
+        }, indent=2)
+
+    records = records[:max_memories]
+
+    if dry_run:
+        return json.dumps({
+            "doc_id": doc_id, "source": source, "status": "dry_run",
+            "extracted": len(records), "records": records,
+            "parse_errors": parse_errors[:5] if parse_errors else [],
+        }, indent=2)
+
+    # 4. Write to chitta
+    written: list[str] = []
+    skipped: list[dict] = []
+    for rec in records:
+        body = rec.get("retrieval_text") or rec.get("claim", "")
+        if not body:
+            skipped.append({"title": rec.get("title", "?"), "reason": "empty body"})
+            continue
+        full_content = (
+            f"[{rec.get('kind', 'insight')}] {rec.get('title', '')}\n\n"
+            f"{rec.get('claim', '')}\n\n{body}"
+        )
+        rec_tags = list(dict.fromkeys(
+            (tags or []) + rec.get("tags", []) + [doc_id, rec.get("kind", "insight")]
+        ))
+        mem = SoulClient.remember(
+            content=full_content,
+            kind=rec.get("type", "wisdom"),
+            tags=",".join(rec_tags),
+            confidence=0.85,
+            realm=rec.get("realm", realm),
+        )
+        if mem is not None:
+            written.append(rec.get("title", "?"))
+        else:
+            skipped.append({"title": rec.get("title", "?"), "reason": "write failed"})
+
+    return json.dumps({
+        "doc_id": doc_id, "source": source, "status": "applied",
+        "written": len(written), "skipped": skipped,
+        "parse_errors": parse_errors[:5] if parse_errors else [],
+    }, indent=2)
 
 
 def distill_event(event_type: str, content: str, context: dict) -> None:
@@ -5996,12 +6462,13 @@ class DiscussionRoom:
     participants: list  # [{name, backend, session_id, soul?}]
     messages: list = field(default_factory=list)  # [{name, content, ts}]
     created: str = field(default_factory=lambda: datetime.now().isoformat())
-    turn_counts: dict = field(default_factory=dict)  # {name: int} per-participant round count
+    turn_counts: dict = field(default_factory=dict)  # {name: int} derived from committed turn_keys
     challenge_mode: bool = False
     files: list = field(default_factory=list)
-    claim_ledger: list = field(default_factory=list)  # [{text, type, confidence, introduced_by, rests_on_citations, resolution_tier}]
-    open_questions: list = field(default_factory=list)  # [{question, introduced_by, resolution_tier, closed_by, close_mechanism}]
+    claim_ledger: list = field(default_factory=list)
+    open_questions: list = field(default_factory=list)
     roles: dict = field(default_factory=dict)  # {participant_name: role_key}
+    retry_counts: dict = field(default_factory=dict)  # {participant_name: int} cumulative failures across all rounds
     schema_version: int = PERSISTED_SCHEMA_VERSION
 
     def save(self, path: Path):
@@ -6466,6 +6933,13 @@ class RoomManager:
             if soul.tools:
                 available = [t for t in AGENT_TOOL_DEFINITIONS
                              if t["function"]["name"] in soul.tools]
+                _MAX_TOOLS = 16
+                if len(available) > _MAX_TOOLS and room.topic:
+                    topic_words = set(room.topic.lower().split())
+                    def _score(t: dict) -> int:
+                        text = f"{t['function']['name']} {t['function']['description']}".lower()
+                        return sum(1 for w in topic_words if w in text)
+                    available = sorted(available, key=_score, reverse=True)[:_MAX_TOOLS]
                 if available:
                     tool_lines = []
                     for t in available:
@@ -7703,33 +8177,52 @@ class RoomManager:
             )
 
         elif backend == "local":
-            base_url = participant.get("base_url") or participant.get("endpoint")
-            model = participant.get("model", "")
-            if not base_url:
-                nodes = await asyncio.get_event_loop().run_in_executor(None, GpuNodeDiscovery.discover)
-                if not nodes:
-                    return "[error: no local model endpoint found]"
-                node = nodes[0]
-                base_url = node["base_url"]
-                if not model and node["models"]:
-                    model = node["models"][0]
-            if base_url:
-                msg_with_files = _embed_files_in_prompt(message, files or [])
+            fixed_url = participant.get("base_url") or participant.get("endpoint")
+            base_model = participant.get("model", "")
+            msg_with_files = _embed_files_in_prompt(message, files or [])
+            safe_name = re.sub(r"[^a-zA-Z0-9_-]", "-", name.lower())
+
+            async def _try_node(base_url: str, model: str) -> str:
                 async with self._endpoint_lock(base_url):
                     if sid and sid in self.local.sessions:
                         return await self.local.send_message(msg_with_files, sid, system_prompt=system_prompt)
-                    else:
-                        safe_name = re.sub(r"[^a-zA-Z0-9_-]", "-", name.lower())
-                        tmp = f"room-{participant.get('_room_id', 'r')}-{safe_name}"
-                        if tmp not in self.local.sessions:
-                            self.local.start_session(tmp, model=model or "default", endpoint=base_url)
-                        participant["session_id"] = tmp
-                        return await self.local.send_message(msg_with_files, tmp, system_prompt=system_prompt)
-            return "[error: no endpoint]"
+                    tmp = f"room-{participant.get('_room_id', 'r')}-{safe_name}"
+                    if tmp not in self.local.sessions:
+                        self.local.start_session(tmp, model=model or "default", endpoint=base_url)
+                    participant["session_id"] = tmp
+                    return await self.local.send_message(msg_with_files, tmp, system_prompt=system_prompt)
+
+            if fixed_url:
+                return await _try_node(fixed_url, base_model)
+
+            nodes = await asyncio.get_event_loop().run_in_executor(None, GpuNodeDiscovery.discover)
+            live = [n for n in nodes if not GpuNodeDiscovery._is_cooled_down(n["base_url"])]
+            if not live:
+                return "[error: no local model endpoint found]"
+
+            last_err = "[error: all local nodes failed]"
+            for node in live:
+                base_url = node["base_url"]
+                model = base_model or (node["models"][0] if node["models"] else "")
+                try:
+                    result = await _try_node(base_url, model)
+                    if result and not result.startswith("[error:"):
+                        GpuNodeDiscovery._record_success(base_url)
+                        return result
+                    GpuNodeDiscovery._record_failure(base_url)
+                    last_err = result
+                except Exception as e:
+                    GpuNodeDiscovery._record_failure(base_url)
+                    last_err = f"[error: {e}]"
+            return last_err
 
         elif backend == "codex":
             full_prompt = f"{system_prompt}\n\n{message}" if system_prompt else message
             full_prompt = _embed_files_in_prompt(full_prompt, files or [])
+            # Strip RS bytes (\x1e) — Codex's --json stdin parser treats them as JSONL
+            # separators; any \x1e in the prompt causes "Separator is found, but chunk
+            # is longer than limit" if the surrounding chunk still exceeds the limit.
+            full_prompt = full_prompt.replace("\x1e", "")
             # Codex CLI errors with "Separator is not found, chunk exceed the limit" above ~100KB.
             # Preserve head (system prompt + topic) and tail (recent messages + instructions).
             _CODEX_LIMIT = 90_000
@@ -7832,7 +8325,6 @@ class RoomManager:
                     await asyncio.wait_for(proc.wait(), timeout=2)
                 except Exception:
                     pass
-
     async def _participant_respond(self, room: DiscussionRoom, participant: dict,
                                     round_num: int = 1, blind: bool = False) -> dict:
         """Get one participant's response with optional tool-use loop."""
@@ -7841,10 +8333,15 @@ class RoomManager:
         participant["_room_id"] = room.id
         turn_key = f"r{round_num}:{name}"
 
-        # Seed realm on first turn if empty
+        # Skip already-poisoned participants — terminal state, no backend call needed.
+        if any(m.get("poison") and m.get("turn_key", "").endswith(f":{name}") for m in room.messages):
+            return {"name": name, "content": "(sitting out — terminal poison)",
+                    "ts": datetime.now().isoformat(), "dispatch_id": str(uuid.uuid4())}
+
+        # Seed realm on first committed turn
         if soul and soul.realm and SoulClient.is_available():
-            count = room.turn_counts.get(name, 0)
-            if count == 0:
+            committed = sum(1 for m in room.messages if m.get("turn_key", "").endswith(f":{name}"))
+            if committed == 0:
                 existing = SoulClient.recall("identity role expertise", limit=1, realm=soul.realm)
                 if not existing or len(existing.strip()) < 20:
                     SoulClient.remember(
@@ -7862,12 +8359,13 @@ class RoomManager:
                         realm=soul.realm,
                     )
 
-        # Check per-participant round limits
+        # Check per-participant round limits (derived from committed messages)
         if soul and soul.max_rounds > 0:
-            count = room.turn_counts.get(name, 0)
-            if count >= soul.max_rounds:
+            committed = sum(1 for m in room.messages if m.get("turn_key", "").endswith(f":{name}"))
+            if committed >= soul.max_rounds:
                 return {"name": name, "content": "(max rounds reached — sitting out)",
-                        "ts": datetime.now().isoformat(), "dispatch_id": str(uuid.uuid4())}
+                        "ts": datetime.now().isoformat(), "dispatch_id": str(uuid.uuid4()),
+                        "turn_key": turn_key}
 
         system_prompt, user_msg = self._build_thread_context(room, participant, blind=blind)
         max_tool_turns = soul.max_tool_turns if soul and soul.tools else 0
@@ -7911,6 +8409,29 @@ class RoomManager:
         # Extract final response if wrapped in tags, otherwise use raw reply
         final = self._extract_final_response(reply) or reply
 
+        # Three-state turn model:
+        #   success       → committed with turn_key (normal path below)
+        #   retryable-absent → no turn_key; round stays open; next room_run retries
+        #   terminal-poison  → committed with turn_key + "poison":True after MAX_RETRIES;
+        #                      round_start advances past this participant but poison is
+        #                      excluded from claim_ledger / stop_early / convergence.
+        _MAX_RETRIES = 3
+        if final.startswith("[error:") or final.startswith("Error:"):
+            # Retry count is per-participant (not per round) so it accumulates
+            # across all room_run calls. After MAX_RETRIES total failures the
+            # participant is poisoned: a terminal turn_key is committed so
+            # round_start advances and the participant is excluded from future
+            # analysis, but they stop consuming backend calls.
+            retries = room.retry_counts.get(name, 0) + 1
+            room.retry_counts[name] = retries
+            if retries >= _MAX_RETRIES:
+                return {"name": name,
+                        "content": f"[poison — failed {retries}× — last error: {final}]",
+                        "ts": datetime.now().isoformat(), "dispatch_id": str(uuid.uuid4()),
+                        "turn_key": turn_key, "poison": True}
+            return {"name": name, "content": final, "ts": datetime.now().isoformat(),
+                    "dispatch_id": str(uuid.uuid4())}
+
         # Store the participant's contribution as a memory in their realm
         if soul and soul.realm and SoulClient.is_available() and len(final) > 50:
             SoulClient.remember(
@@ -7921,12 +8442,11 @@ class RoomManager:
                 realm=soul.realm,
             )
 
-        # Track round count
-        room.turn_counts[name] = room.turn_counts.get(name, 0) + 1
+        # turn_counts is NOT mutated here; run_rounds reconciles it from committed messages
+        # after the dedup append so the count is always consistent with disk state.
 
         return {"name": name, "content": final, "ts": datetime.now().isoformat(),
                 "dispatch_id": str(uuid.uuid4()), "turn_key": turn_key}
-
     # ------------------------------------------------------------------
     # Challenge round support
     # ------------------------------------------------------------------
@@ -8108,7 +8628,6 @@ class RoomManager:
         has_citations = any(self._score_citations(c) > 0 for c in round_contents)
         converged = has_citations or bool(prior_claim_keys)  # ok if ledger was already populated
         return converged, []
-
     async def run_rounds(self, room_id: str, rounds: int = 2,
                           challenge: bool = False, blind_first_round: bool = False,
                           sparse_topology: bool = False, stop_early: bool = False) -> str:
@@ -8125,94 +8644,122 @@ class RoomManager:
             self._try_load_room(room_id)
         if room_id not in self.rooms:
             return f"Room '{room_id}' not found."
-        room = self.rooms[room_id]
-        room.challenge_mode = challenge
-        start_msg_count = len(room.messages)
 
-        for round_num in range(1, rounds + 1):
-            # Inject challenge prompt between rounds if enabled
-            if challenge and round_num > 1:
-                prev_round_msgs = room.messages[-(len(room.participants)):]
-                claims = self._extract_claims(prev_round_msgs)
-                if claims:
-                    challenge_text = (
-                        "**[Challenge Round]** The following key claims were made in the previous round. "
-                        "Each participant MUST: (1) identify at least one claim you disagree with or find incomplete, "
-                        "(2) provide specific evidence or reasoning for your disagreement, "
-                        "(3) propose a concrete refinement. Do NOT simply agree with everything.\n\n"
-                        + "\n".join(f"- {c}" for c in claims)
-                    )
-                    room.messages.append({
-                        "name": "MODERATOR",
-                        "content": challenge_text,
-                        "ts": datetime.now().isoformat(),
-                    })
-                    self._save_room(room_id)
+        async with self._room_lock(room_id):
+            room = self.rooms[room_id]
+            room.challenge_mode = challenge
+            start_msg_count = len(room.messages)
 
-            # Filter participants who haven't hit their round limit
-            active = []
-            for p in room.participants:
-                soul = self._parse_soul(p)
-                if soul and soul.max_rounds > 0:
-                    if room.turn_counts.get(p["name"], 0) >= soul.max_rounds:
-                        continue
-                active.append(p)
+            # Start from the next uncommitted round so follow-up runs don't collide
+            # with already-committed turn_keys (r1:name, r2:name, etc.)
+            existing_round_nums: set[int] = set()
+            for m in room.messages:
+                tk = m.get("turn_key", "")
+                if tk and tk.startswith("r") and ":" in tk:
+                    try:
+                        existing_round_nums.add(int(tk[1:tk.index(":")]))
+                    except ValueError:
+                        pass
+            round_start = (max(existing_round_nums) + 1) if existing_round_nums else 1
 
-            if not active:
-                break
+            for loop_idx, round_num in enumerate(range(round_start, round_start + rounds)):
+                # Inject challenge prompt between rounds if enabled
+                if challenge and loop_idx > 0:
+                    prev_round_msgs = room.messages[-(len(room.participants)):]
+                    claims = self._extract_claims(prev_round_msgs)
+                    if claims:
+                        challenge_text = (
+                            "**[Challenge Round]** The following key claims were made in the previous round. "
+                            "Each participant MUST: (1) identify at least one claim you disagree with or find incomplete, "
+                            "(2) provide specific evidence or reasoning for your disagreement, "
+                            "(3) propose a concrete refinement. Do NOT simply agree with everything.\n\n"
+                            + "\n".join(f"- {c}" for c in claims)
+                        )
+                        room.messages.append({
+                            "name": "MODERATOR",
+                            "content": challenge_text,
+                            "ts": datetime.now().isoformat(),
+                        })
+                        self._save_room(room_id)
 
-            is_blind = sparse_topology or (blind_first_round and round_num == 1)
-            coros = [self._participant_respond(room, p, round_num=round_num, blind=is_blind)
-                     for p in active]
-            responses = await asyncio.gather(*coros)
+                # Filter participants who haven't hit their round limit (derived from committed messages)
+                active = []
+                for p in room.participants:
+                    soul = self._parse_soul(p)
+                    if soul and soul.max_rounds > 0:
+                        committed = sum(
+                            1 for m in room.messages
+                            if m.get("turn_key", "").endswith(f":{p['name']}")
+                        )
+                        if committed >= soul.max_rounds:
+                            continue
+                    active.append(p)
 
-            # Idempotent append: skip any turn already committed (retry-safe)
-            existing_turn_keys = {m.get("turn_key") for m in room.messages}
-            new_responses = []
-            for resp in responses:
-                if resp.get("turn_key") not in existing_turn_keys:
-                    resp["citation_score"] = self._score_citations(resp.get("content", ""))
-                    room.messages.append(resp)
-                    new_responses.append(resp)
-
-            # Update open questions from new responses
-            if new_responses:
-                seen_q_keys = {q["question"][:60].lower() for q in room.open_questions}
-                for oq in self._extract_open_questions(new_responses):
-                    key = oq["question"][:60].lower()
-                    if key not in seen_q_keys:
-                        seen_q_keys.add(key)
-                        room.open_questions.append(oq)
-
-            # Diversity report after round 1 (injected as MODERATOR so synthesizer sees it)
-            if round_num == 1:
-                div = self._compute_diversity(room)
-                if div["warning"]:
-                    room.messages.append({
-                        "name": "MODERATOR",
-                        "content": (
-                            f"[Diversity] ⚠️ {div['warning']} "
-                            f"(N_eff={div['N_eff']}, claim_overlap={div['claim_overlap']})"
-                        ),
-                        "ts": datetime.now().isoformat(),
-                    })
-
-            self._save_room(room_id)
-
-            # Stop-early: halt when ledger stops moving and no disagreement
-            if stop_early and round_num < rounds:
-                round_contents = [r.get("content", "") for r in responses]
-                prior_keys = {c[:50].lower() for c in room.claim_ledger}
-                converged, new_claims = self._round_converged(round_contents, prior_keys)
-                room.claim_ledger.extend(new_claims)
-                if converged:
+                if not active:
                     break
-            else:
-                # Always update ledger even when not checking stop_early
-                round_contents = [r.get("content", "") for r in responses]
-                prior_keys = {c[:50].lower() for c in room.claim_ledger}
-                _, new_claims = self._round_converged(round_contents, prior_keys)
-                room.claim_ledger.extend(new_claims)
+
+                is_blind = sparse_topology or (blind_first_round and loop_idx == 0)
+                coros = [self._participant_respond(room, p, round_num=round_num, blind=is_blind)
+                         for p in active]
+                responses = await asyncio.gather(*coros)
+
+                # Idempotent append: skip any turn already committed (retry-safe)
+                existing_turn_keys = {m.get("turn_key") for m in room.messages}
+                new_responses = []
+                for resp in responses:
+                    if resp.get("turn_key") not in existing_turn_keys:
+                        resp["citation_score"] = self._score_citations(resp.get("content", ""))
+                        room.messages.append(resp)
+                        new_responses.append(resp)
+
+                # Reconcile turn_counts from committed messages (single source of truth)
+                room.turn_counts = {}
+                for m in room.messages:
+                    tk = m.get("turn_key", "")
+                    if tk and ":" in tk:
+                        pname = tk[tk.index(":") + 1:]
+                        if any(p["name"] == pname for p in room.participants):
+                            room.turn_counts[pname] = room.turn_counts.get(pname, 0) + 1
+
+                # Substantive responses only (exclude poison turns from analysis)
+                good_responses = [r for r in new_responses if not r.get("poison")]
+
+                # Update open questions from substantive responses only
+                if good_responses:
+                    seen_q_keys = {q["question"][:60].lower() for q in room.open_questions}
+                    for oq in self._extract_open_questions(good_responses):
+                        key = oq["question"][:60].lower()
+                        if key not in seen_q_keys:
+                            seen_q_keys.add(key)
+                            room.open_questions.append(oq)
+
+                # Diversity report after first loop iteration
+                if loop_idx == 0:
+                    div = self._compute_diversity(room)
+                    if div["warning"]:
+                        room.messages.append({
+                            "name": "MODERATOR",
+                            "content": (
+                                f"[Diversity] ⚠️ {div['warning']} "
+                                f"(N_eff={div['N_eff']}, claim_overlap={div['claim_overlap']})"
+                            ),
+                            "ts": datetime.now().isoformat(),
+                        })
+
+                self._save_room(room_id)
+
+                # Stop-early: halt when ledger stops moving and no disagreement.
+                # Only substantive (non-poison) responses count toward convergence.
+                if good_responses:
+                    round_contents = [r.get("content", "") for r in good_responses]
+                    prior_keys = {c[:50].lower() for c in room.claim_ledger}
+                    converged, new_claims = self._round_converged(round_contents, prior_keys)
+                    room.claim_ledger.extend(new_claims)
+                    if stop_early and loop_idx < rounds - 1 and converged:
+                        break
+                elif stop_early and not new_responses:
+                    # No new content at all — treat as converged to avoid spinning
+                    break
 
         # Return only the new messages from this run (not the full transcript)
         room = self.rooms[room_id]
@@ -8225,8 +8772,6 @@ class RoomManager:
             lines.append("")
         lines.append("_(Use room_read to see the full transcript)_")
         return "\n".join(lines)
-
-
 # MCP Server setup
 bridge = OpenCodeBridge()
 codex_bridge = CodexBridge()
@@ -8259,6 +8804,7 @@ HIDDEN_TOOLS = {
     "multi_consult", "agent_chain", "delegate_codex", "parallel_agents",
     # Rooms (multi-agent discussion)
     "room_create", "room_run", "room_synthesize", "room_read", "room_challenge",
+    "room_status",
     # Status/health
     "soul_status",
 }
@@ -8982,6 +9528,17 @@ async def list_tools():
                 "required": ["room_id"]
             }
         ),
+        Tool(
+            name="room_status",
+            description="Show per-round per-participant turn state for a room: success, retryable-absent, terminal-poison, or pending. Also shows retry_counts.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "room_id": {"type": "string", "description": "Room ID"}
+                },
+                "required": ["room_id"]
+            }
+        ),
         # Local model tools (Ollama / vLLM on GPU nodes)
         Tool(
             name="local_discover",
@@ -9440,6 +9997,114 @@ async def list_tools():
             }
         ),
         Tool(
+            name="doc_ingest",
+            description=(
+                "Extract structured knowledge records from a document (PDF, URL, or text file) "
+                "using a frontier LLM and write them as atomic, searchable chitta memories. "
+                "dry_run=true (default) returns extracted JSON for review without writing. "
+                "dry_run=false writes each record to chitta with provenance tracking. "
+                "Use this to ingest papers, reports, or documentation into persistent memory."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "source": {
+                        "type": "string",
+                        "description": "Absolute path to a PDF/text file, or a URL"
+                    },
+                    "realm": {
+                        "type": "string",
+                        "description": "Chitta realm to write memories to (default: research)"
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Tags to attach to all extracted records"
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Extraction model (default: gpt-5.5)"
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "If true (default), return extracted JSON without writing to chitta"
+                    },
+                    "max_memories": {
+                        "type": "integer",
+                        "description": "Max records to extract (default: 50)"
+                    }
+                },
+                "required": ["source"]
+            }
+        ),
+        Tool(
+            name="lit_search_arxiv",
+            description=(
+                "Search arXiv for preprints and papers. No auth required. "
+                "Returns title, authors, date, abstract snippet, and URL for each result."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query (arXiv query syntax supported)"},
+                    "max_results": {"type": "integer", "description": "Max results to return (default 10, max 50)"},
+                    "sort_by": {"type": "string", "enum": ["relevance", "lastUpdatedDate", "submittedDate"], "description": "Sort order (default: relevance)"},
+                },
+                "required": ["query"],
+            }
+        ),
+        Tool(
+            name="lit_search_biorxiv",
+            description=(
+                "Search bioRxiv or medRxiv preprints by keyword within a date range. "
+                "Date range is required (API limitation). Client-side keyword filtering applied."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Keywords to filter results (AND logic)"},
+                    "start_date": {"type": "string", "description": "Start date YYYY-MM-DD"},
+                    "end_date": {"type": "string", "description": "End date YYYY-MM-DD"},
+                    "server": {"type": "string", "enum": ["biorxiv", "medrxiv"], "description": "Which server (default: biorxiv)"},
+                    "max_results": {"type": "integer", "description": "Max results (default 20)"},
+                },
+                "required": ["query", "start_date", "end_date"],
+            }
+        ),
+        Tool(
+            name="lit_search_europepmc",
+            description=(
+                "Search Europe PMC for peer-reviewed literature. Open access filter on by default. "
+                "Supports full PMC query syntax. Returns PMID, title, authors, journal, DOI."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query (Europe PMC syntax supported)"},
+                    "max_results": {"type": "integer", "description": "Max results (default 20, max 100)"},
+                    "open_access_only": {"type": "boolean", "description": "Restrict to open access papers (default true)"},
+                },
+                "required": ["query"],
+            }
+        ),
+        Tool(
+            name="lit_search_openalex",
+            description=(
+                "Search OpenAlex for works, authors, institutions, topics, and more. "
+                "Free API — uses polite pool without key, set OPENALEX_API_KEY env var for higher rate limits."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Full-text search query"},
+                    "entity_type": {"type": "string", "enum": ["works", "authors", "sources", "institutions", "topics"], "description": "Entity type to search (default: works)"},
+                    "max_results": {"type": "integer", "description": "Max results (default 20, max 100)"},
+                    "filters": {"type": "string", "description": "OpenAlex filter string e.g. 'publication_year:2024,open_access.is_oa:true'"},
+                },
+                "required": ["query"],
+            }
+        ),
+        Tool(
             name="paper_fetch",
             description=(
                 "Fetch academic paper metadata and discover supplementary resources. "
@@ -9836,12 +10501,15 @@ async def call_tool(name: str, arguments: dict):
                 rooms._try_load_room(rid)
             prompt = arguments.get("prompt")
             if prompt and rid in rooms.rooms:
-                rooms.rooms[rid].messages.append({
-                    "name": "MODERATOR",
-                    "content": prompt,
-                    "ts": datetime.now().isoformat(),
-                })
-                rooms._save_room(rid)
+                msgs = rooms.rooms[rid].messages
+                last = msgs[-1] if msgs else {}
+                if not (last.get("name") == "MODERATOR" and last.get("content") == prompt):
+                    msgs.append({
+                        "name": "MODERATOR",
+                        "content": prompt,
+                        "ts": datetime.now().isoformat(),
+                    })
+                    rooms._save_room(rid)
             files_arg = arguments.get("files")
             if files_arg:
                 if isinstance(files_arg, str):
@@ -9863,6 +10531,66 @@ async def call_tool(name: str, arguments: dict):
             )
         elif name == "room_read":
             result = rooms.read(room_id=arguments.get("room_id", ""), last_n=arguments.get("last_n"))
+        elif name == "room_status":
+            rid = arguments.get("room_id", "")
+            if rid not in rooms.rooms:
+                rooms._try_load_room(rid)
+            if rid not in rooms.rooms:
+                result = f"Room '{rid}' not found."
+            else:
+                room = rooms.rooms[rid]
+                participants = [p["name"] for p in room.participants]
+                # Collect all committed turn_keys and their states
+                committed: dict[str, dict] = {}  # turn_key → {name, round, poison}
+                existing_rounds: set[int] = set()
+                for m in room.messages:
+                    tk = m.get("turn_key", "")
+                    if tk and tk.startswith("r") and ":" in tk:
+                        try:
+                            rnum = int(tk[1:tk.index(":")])
+                            existing_rounds.add(rnum)
+                            committed[tk] = {
+                                "participant": tk[tk.index(":")+1:],
+                                "round": rnum,
+                                "poison": m.get("poison", False),
+                            }
+                        except ValueError:
+                            pass
+                max_round = max(existing_rounds) if existing_rounds else 0
+                lines = [f"# Room status: {rid}", f"Participants: {', '.join(participants)}", ""]
+                for rnum in range(1, max_round + 1):
+                    lines.append(f"## Round {rnum}")
+                    for pname in participants:
+                        tk = f"r{rnum}:{pname}"
+                        retries = room.retry_counts.get(pname, 0)
+                        if tk in committed:
+                            state = "poison" if committed[tk]["poison"] else "success"
+                        elif retries > 0:
+                            state = f"retryable-absent (retried {retries}×)"
+                        else:
+                            state = "pending"
+                        lines.append(f"  {pname}: **{state}**")
+                    lines.append("")
+                # Show any open retryable-absent in the next round (skip poisoned)
+                poisoned_names = {
+                    m["turn_key"][m["turn_key"].index(":") + 1:]
+                    for m in room.messages
+                    if m.get("poison") and ":" in m.get("turn_key", "")
+                }
+                next_round = max_round + 1
+                pending = []
+                for pname in participants:
+                    if pname in poisoned_names:
+                        continue
+                    tk = f"r{next_round}:{pname}"
+                    retries = room.retry_counts.get(pname, 0)
+                    if retries > 0:
+                        pending.append(f"{pname} (retried {retries}×)")
+                if pending:
+                    lines.append(f"## Round {next_round} (in progress)")
+                    for p in pending:
+                        lines.append(f"  {p}: retryable-absent")
+                result = "\n".join(lines)
         elif name == "room_synthesize":
             synth = arguments.get("synthesizer")
             if isinstance(synth, str):
@@ -10139,6 +10867,33 @@ async def call_tool(name: str, arguments: dict):
             result = rooms._tool_pdf_read(arguments)
         elif name == "doc_read":
             result = rooms._tool_doc_read(arguments)
+        elif name == "lit_search_arxiv":
+            result = LitSearch.arxiv(
+                query=arguments["query"],
+                max_results=int(arguments.get("max_results", 10)),
+                sort_by=arguments.get("sort_by", "relevance"),
+            )
+        elif name == "lit_search_biorxiv":
+            result = LitSearch.biorxiv(
+                query=arguments["query"],
+                start_date=arguments["start_date"],
+                end_date=arguments["end_date"],
+                server=arguments.get("server", "biorxiv"),
+                max_results=int(arguments.get("max_results", 20)),
+            )
+        elif name == "lit_search_europepmc":
+            result = LitSearch.europepmc(
+                query=arguments["query"],
+                max_results=int(arguments.get("max_results", 20)),
+                open_access_only=bool(arguments.get("open_access_only", True)),
+            )
+        elif name == "lit_search_openalex":
+            result = LitSearch.openalex(
+                query=arguments["query"],
+                entity_type=arguments.get("entity_type", "works"),
+                max_results=int(arguments.get("max_results", 20)),
+                filters=arguments.get("filters", ""),
+            )
         elif name == "paper_fetch":
             result = WebSearch.paper_fetch(
                 url_or_doi=arguments.get("url", arguments.get("doi", "")),
@@ -10148,11 +10903,21 @@ async def call_tool(name: str, arguments: dict):
         elif name == "chitta_ingest":
             n = chitta_ingest(arguments["text"])
             result = f"chitta_ingest: wrote {n} memories"
+        elif name == "doc_ingest":
+            result = await _doc_ingest(
+                source=arguments["source"],
+                realm=arguments.get("realm", "research"),
+                tags=arguments.get("tags") or [],
+                model=arguments.get("model", "gpt-5.5"),
+                dry_run=bool(arguments.get("dry_run", True)),
+                max_memories=int(arguments.get("max_memories", 50)),
+            )
         else:
             result = f"Unknown tool: {name}"
 
         # Truncate large responses to reduce token cost. Export/history tools are exempt.
-        _no_truncate = {"opencode_export", "opencode_history", "codex_history", "local_history", "pdf_read", "paper_fetch"}
+        _no_truncate = {"opencode_export", "opencode_history", "codex_history", "local_history", "pdf_read", "paper_fetch",
+                        "lit_search_arxiv", "lit_search_biorxiv", "lit_search_europepmc", "lit_search_openalex"}
         _max_chars = 12_000
         if name not in _no_truncate and isinstance(result, str) and len(result) > _max_chars:
             result = result[:_max_chars] + f"\n\n[truncated — {len(result) - _max_chars:,} chars omitted]"
@@ -10223,55 +10988,1245 @@ async def _run_exec_mode() -> None:
         print(json.dumps({"content": "", "error": str(e)}))
 
 
+_DASHBOARD_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>chitta-bridge · rooms</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+:root{
+  --bg:#0a0c10;--surface:#111520;--card:#161c28;--card-h:#1a2234;
+  --border:#1e2940;--border-h:#2d3f5e;
+  --accent:#4f8ef7;--accent-dim:#1a2d5a;
+  --green:#34d399;--green-dim:#0d2e20;
+  --yellow:#fbbf24;--yellow-dim:#2a1f07;
+  --red:#f87171;--red-dim:#2a0d0d;
+  --purple:#a78bfa;--purple-dim:#1e1540;
+  --muted:#4a5568;--muted2:#64748b;--text:#dde4f0;--text2:#94a3b8;
+  --rail-active:var(--green);--rail-stale:var(--yellow);
+  --rail-synth:var(--purple);--rail-empty:#2d3748;
+  --font:'Inter',system-ui,sans-serif;--mono:'JetBrains Mono',monospace;
+  --radius:10px;--radius-sm:6px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{color-scheme:dark}
+body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:14px;min-height:100vh;overflow-x:hidden}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border-h);border-radius:3px}
+
+/* ── Header ── */
+header{
+  background:var(--surface);border-bottom:1px solid var(--border);
+  padding:0 20px;height:52px;display:flex;align-items:center;gap:12px;
+  position:sticky;top:0;z-index:100;
+}
+.logo{font-weight:700;font-size:15px;letter-spacing:-.03em;white-space:nowrap}
+.logo span{color:var(--accent)}
+.logo sub{font-size:10px;font-weight:400;color:var(--muted2);vertical-align:middle;margin-left:4px}
+
+#search-wrap{flex:1;max-width:320px;position:relative}
+#search{
+  width:100%;background:var(--card);border:1px solid var(--border);
+  border-radius:var(--radius-sm);padding:6px 10px 6px 30px;
+  color:var(--text);font-size:13px;font-family:var(--font);outline:none;
+  transition:border-color .15s;
+}
+#search:focus{border-color:var(--accent)}
+#search-wrap::before{
+  content:'⌕';position:absolute;left:9px;top:50%;transform:translateY(-50%);
+  color:var(--muted2);font-size:15px;pointer-events:none;
+}
+
+.filter-chips{display:flex;gap:6px;flex-wrap:wrap}
+.chip{
+  background:var(--card);border:1px solid var(--border);border-radius:20px;
+  padding:3px 10px;font-size:11px;font-weight:500;cursor:pointer;
+  color:var(--muted2);transition:all .15s;white-space:nowrap;
+}
+.chip:hover,.chip.on{border-color:var(--accent);color:var(--text);background:var(--accent-dim)}
+.chip.s-active.on{border-color:var(--green);color:var(--green);background:var(--green-dim)}
+.chip.s-stale.on{border-color:var(--yellow);color:var(--yellow);background:var(--yellow-dim)}
+.chip.s-synth.on{border-color:var(--purple);color:var(--purple);background:var(--purple-dim)}
+.chip.s-empty.on{border-color:var(--muted2);color:var(--muted2)}
+
+.hstats{margin-left:auto;display:flex;gap:16px;font-size:12px;color:var(--muted2);white-space:nowrap}
+.hstats b{color:var(--text2)}
+
+#sse-status{
+  width:8px;height:8px;border-radius:50%;background:var(--muted);
+  flex-shrink:0;transition:background .3s;
+}
+#sse-status.live{background:var(--green);animation:pulse 2.5s infinite}
+#sse-status.error{background:var(--red)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+
+/* ── Grid ── */
+main{padding:20px;max-width:1600px;margin:0 auto}
+#rooms-grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(300px,1fr));
+  gap:12px;
+}
+
+/* ── Card ── */
+.room-card{
+  background:var(--card);border:1px solid var(--border);border-radius:var(--radius);
+  padding:0;cursor:pointer;transition:border-color .15s,transform .1s,box-shadow .15s;
+  display:flex;position:relative;overflow:hidden;outline:none;
+  border-left:none;
+}
+.room-card:hover,.room-card:focus{
+  border-color:var(--border-h);transform:translateY(-1px);
+  box-shadow:0 4px 20px #0006;
+}
+.room-card.selected{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+.card-rail{width:3px;flex-shrink:0;border-radius:var(--radius) 0 0 var(--radius)}
+.s-active  .card-rail{background:var(--rail-active)}
+.s-stale   .card-rail{background:var(--rail-stale)}
+.s-synth   .card-rail{background:var(--rail-synth)}
+.s-empty   .card-rail{background:var(--rail-empty)}
+.card-body{padding:12px 14px;flex:1;min-width:0;display:flex;flex-direction:column;gap:6px}
+
+.card-row1{display:flex;align-items:flex-start;gap:8px}
+.card-topic{font-weight:600;font-size:13px;flex:1;line-height:1.4;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.status-dot{
+  width:7px;height:7px;border-radius:50%;flex-shrink:0;margin-top:4px;
+}
+.s-active  .status-dot{background:var(--green)}
+.s-stale   .status-dot{background:var(--yellow)}
+.s-synth   .status-dot{background:var(--purple)}
+.s-empty   .status-dot{background:var(--rail-empty)}
+
+.card-chips{display:flex;flex-wrap:wrap;gap:4px}
+.p-chip{
+  border-radius:20px;padding:1px 7px;font-size:10px;font-weight:500;
+  border:1px solid transparent;
+}
+.be-codex{background:#0d1f3c;border-color:#1e3a6e;color:#60a5fa}
+.be-claude{background:#1a0b35;border-color:#3d1a7a;color:#c084fc}
+.be-local{background:#1a0e00;border-color:#5c3300;color:#fb923c}
+.be-opencode{background:#001a10;border-color:#005a30;color:#34d399}
+
+.card-preview{
+  font-size:11.5px;color:var(--muted2);line-height:1.45;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+}
+.card-verdict{
+  font-size:11px;color:var(--purple);line-height:1.4;font-style:italic;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+}
+.card-meta{display:flex;gap:10px;font-size:11px;color:var(--muted);align-items:center}
+.card-meta .dot{color:var(--border-h)}
+
+/* ── Empty / loading states ── */
+.state-msg{
+  grid-column:1/-1;text-align:center;padding:60px 20px;color:var(--muted2);
+}
+.state-msg h2{font-size:15px;margin-bottom:6px;color:var(--text2)}
+.state-msg p{font-size:13px}
+
+/* ── Detail panel ── */
+#detail{
+  position:fixed;top:0;right:0;width:min(680px,100vw);height:100vh;
+  background:var(--surface);border-left:1px solid var(--border);
+  z-index:200;display:flex;flex-direction:column;
+  transform:translateX(100%);transition:transform .2s ease;
+}
+#detail.open{transform:translateX(0)}
+#detail-header{
+  padding:14px 16px;border-bottom:1px solid var(--border);
+  display:flex;align-items:flex-start;gap:10px;
+  background:var(--surface);position:sticky;top:0;z-index:10;flex-shrink:0;
+}
+#detail-title-wrap{flex:1;min-width:0}
+#detail-title{font-weight:700;font-size:14px;line-height:1.4;word-break:break-word}
+#detail-subtitle{font-size:11px;color:var(--muted2);margin-top:2px}
+#close-btn{
+  background:none;border:1px solid var(--border);color:var(--muted2);
+  border-radius:var(--radius-sm);padding:4px 8px;cursor:pointer;font-size:12px;
+  flex-shrink:0;line-height:1.2;
+}
+#close-btn:hover{border-color:var(--text2);color:var(--text)}
+#close-btn:focus{outline:2px solid var(--accent);outline-offset:2px}
+
+#detail-body{overflow-y:auto;flex:1;padding:16px;display:flex;flex-direction:column;gap:16px}
+
+.section-label{
+  font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--muted);margin-bottom:8px;
+}
+
+/* Synthesis verdict pinned */
+.verdict-pin{
+  background:var(--purple-dim);border:1px solid var(--purple);
+  border-radius:var(--radius);padding:12px 14px;
+}
+.verdict-pin .verdict-label{
+  font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--purple);margin-bottom:6px;display:flex;align-items:center;gap:6px;
+}
+.verdict-pin .verdict-text{font-size:13px;color:#d4b8ff;line-height:1.5}
+.verdict-jump{
+  font-size:11px;color:var(--purple);cursor:pointer;text-decoration:underline;
+  background:none;border:none;padding:0;margin-top:4px;display:inline-block;
+}
+
+/* Participants */
+.p-cards{display:flex;flex-direction:column;gap:8px}
+.p-card{
+  background:var(--card);border:1px solid var(--border);border-radius:var(--radius-sm);
+  padding:10px 12px;
+}
+.p-card-top{display:flex;align-items:baseline;gap:8px}
+.p-name{font-weight:600;font-size:13px}
+.p-meta-row{font-size:11px;color:var(--muted2);display:flex;gap:6px;flex-wrap:wrap}
+.p-soul{
+  margin-top:8px;font-size:11.5px;color:var(--text2);line-height:1.55;
+  white-space:pre-wrap;border-top:1px solid var(--border);padding-top:8px;
+  max-height:100px;overflow-y:auto;font-family:var(--font);
+}
+.p-soul-toggle{
+  font-size:11px;color:var(--accent);cursor:pointer;background:none;
+  border:none;padding:0;margin-top:4px;
+}
+
+/* Transcript */
+#transcript-wrap{position:relative}
+.msg{display:flex;gap:10px;animation:fadeUp .18s ease}
+@keyframes fadeUp{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+.msg+.msg{margin-top:10px}
+.msg-av{
+  width:28px;height:28px;border-radius:50%;display:flex;align-items:center;
+  justify-content:center;font-size:9px;font-weight:700;flex-shrink:0;
+  text-transform:uppercase;margin-top:1px;
+}
+.av-codex{background:#0d1f3c;color:#93c5fd}
+.av-claude{background:#1a0b35;color:#d8b4fe}
+.av-local{background:#1a0e00;color:#fed7aa}
+.av-opencode{background:#001a10;color:#6ee7b7}
+.av-synth{background:var(--purple-dim);color:var(--purple)}
+.av-system{background:#141e30;color:var(--muted2)}
+
+.msg-right{flex:1;min-width:0}
+.msg-who{display:flex;align-items:baseline;gap:6px;margin-bottom:3px}
+.who-name{font-size:12px;font-weight:700;color:var(--text2)}
+.who-ts{font-size:10px;color:var(--muted)}
+
+.msg-content{font-size:12.5px;line-height:1.65;color:var(--text)}
+.msg-content code{
+  font-family:var(--mono);font-size:11.5px;background:#0d1829;
+  border:1px solid var(--border);border-radius:3px;padding:1px 4px;
+}
+.msg-content pre{
+  background:#0a1020;border:1px solid var(--border);border-radius:var(--radius-sm);
+  padding:10px 12px;overflow-x:auto;margin:6px 0;
+}
+.msg-content pre code{background:none;border:none;padding:0;font-size:11px;line-height:1.5}
+.msg-content strong{color:#e8edf8;font-weight:600}
+.msg-content em{color:var(--text2)}
+
+/* Special message types */
+.msg-moderator .msg-content{color:var(--yellow)}
+.msg-moderator .who-name{color:var(--yellow)}
+.msg-synth{
+  background:var(--purple-dim);border:1px solid #5b3fa0;border-radius:var(--radius);
+  padding:12px 14px;
+}
+.msg-synth .who-name{color:var(--purple)}
+.msg-synth .msg-content{color:#d4b8ff}
+
+/* New messages pill */
+#new-pill{
+  position:sticky;bottom:16px;left:50%;transform:translateX(-50%);
+  background:var(--accent);color:#fff;border-radius:20px;padding:5px 14px;
+  font-size:12px;font-weight:600;cursor:pointer;display:none;width:fit-content;
+  box-shadow:0 4px 16px #0008;z-index:20;border:none;
+}
+
+/* Typing indicator */
+.msg-typing .msg-content{display:flex;align-items:center;gap:3px;height:18px}
+.typing-dot{
+  width:5px;height:5px;border-radius:50%;background:var(--muted2);
+  animation:typing 1.2s infinite;
+}
+.typing-dot:nth-child(2){animation-delay:.2s}
+.typing-dot:nth-child(3){animation-delay:.4s}
+@keyframes typing{0%,60%,100%{transform:translateY(0)}30%{transform:translateY(-4px)}}
+
+/* Overlay */
+#overlay{
+  display:none;position:fixed;inset:0;background:#0009;z-index:190;
+}
+#overlay.show{display:block}
+</style>
+</head>
+<body>
+<header>
+  <div id="sse-status" title="SSE disconnected" aria-label="Connection status: disconnected"></div>
+  <div class="logo">chitta<span>-bridge</span> <sub>rooms</sub></div>
+  <div id="search-wrap">
+    <label for="search" class="sr-only">Search rooms</label>
+    <input id="search" type="search" placeholder="Search rooms…" autocomplete="off" aria-label="Search rooms"/>
+  </div>
+  <div class="filter-chips" role="group" aria-label="Filter by status">
+    <button class="chip s-active" data-filter="status:active">active</button>
+    <button class="chip s-stale"  data-filter="status:stale">stale</button>
+    <button class="chip s-synth"  data-filter="status:synthesized">synthesized</button>
+    <button class="chip s-empty"  data-filter="status:empty">empty</button>
+    <button class="chip" data-filter="be:codex">codex</button>
+    <button class="chip" data-filter="be:claude">claude</button>
+    <button class="chip" data-filter="be:opencode">opencode</button>
+  </div>
+  <div class="hstats" aria-live="polite">
+    <span><b id="s-total">0</b> rooms</span>
+    <span><b id="s-active">0</b> active</span>
+    <span><b id="s-synth">0</b> synth</span>
+  </div>
+</header>
+
+<main>
+  <div id="rooms-grid" role="list" aria-label="Discussion rooms">
+    <div class="state-msg"><h2>Loading rooms…</h2><p>Connecting to live stream</p></div>
+  </div>
+</main>
+
+<div id="overlay" aria-hidden="true"></div>
+<div id="detail" role="dialog" aria-modal="true" aria-labelledby="detail-title" hidden>
+  <div id="detail-header">
+    <div id="detail-title-wrap">
+      <div id="detail-title">—</div>
+      <div id="detail-subtitle"></div>
+    </div>
+    <button id="close-btn" aria-label="Close detail panel">✕</button>
+  </div>
+  <div id="detail-body">
+    <div class="state-msg"><p>Loading…</p></div>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+// ── Markdown (escape-first, transform-second — no HTML injection) ──────────
+function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;') }
+
+function md(raw){
+  if(!raw) return '';
+  const lines = String(raw).split('\n');
+  const out = [];
+  let fence = null, fenceLang = '', fenceBuf = [];
+
+  for(let i=0;i<lines.length;i++){
+    const line = lines[i];
+    if(fence){
+      if(line.trimStart().startsWith(fence)){
+        const lang = /^[a-z0-9_-]{1,24}$/i.test(fenceLang) ? ` class="language-${esc(fenceLang)}"` : '';
+        out.push(`<pre><code${lang}>${fenceBuf.map(esc).join('\n')}</code></pre>`);
+        fence=null; fenceLang=''; fenceBuf=[];
+      } else { fenceBuf.push(line) }
+      continue;
+    }
+    const fm = line.match(/^(`{3,}|~{3,})(\S*)/);
+    if(fm){ fence=fm[1]; fenceLang=fm[2]; fenceBuf=[]; continue; }
+    out.push(inlineMd(line));
+  }
+  if(fenceBuf.length){
+    out.push(`<pre><code>${fenceBuf.map(esc).join('\n')}</code></pre>`);
+  }
+  return out.join('\n');
+}
+
+function inlineMd(line){
+  // Tokenize backticks first so they are never re-processed
+  const parts = [];
+  let rest = line, m;
+  const codeRe = /`([^`]+)`/g;
+  let last = 0;
+  codeRe.lastIndex = 0;
+  while((m = codeRe.exec(line)) !== null){
+    parts.push({t:'text', v: line.slice(last, m.index)});
+    parts.push({t:'code', v: m[1]});
+    last = m.index + m[0].length;
+  }
+  parts.push({t:'text', v: line.slice(last)});
+
+  return parts.map(p => {
+    if(p.t==='code') return `<code>${esc(p.v)}</code>`;
+    // bold, italic on escaped text
+    let s = esc(p.v);
+    s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/\*(.+?)\*/g, '<em>$1</em>');
+    return s;
+  }).join('');
+}
+
+// ── Constants ─────────────────────────────────────────────────────────────
+const SYS = new Set(['TOPIC','CONTEXT','MODERATOR','⟳ Synthesizer']);
+const BE_CLS = {codex:'be-codex',claude:'be-claude',local:'be-local',opencode:'be-opencode'};
+const AV_CLS = n => {
+  const l = n.toLowerCase();
+  if(n==='⟳ Synthesizer') return 'av-synth';
+  if(l.startsWith('codex')||l.startsWith('gpt')||l.startsWith('openai')) return 'av-codex';
+  if(l.startsWith('claude')||l.startsWith('opus')) return 'av-claude';
+  if(l.startsWith('local')||l.startsWith('ollama')) return 'av-local';
+  if(l.startsWith('opencode')) return 'av-opencode';
+  return 'av-system';
+};
+
+// ── State ─────────────────────────────────────────────────────────────────
+let roomsById = {};
+let roomOrder = [];
+let hydratedTranscript = {};  // roomId → messages[]
+let openRoomId = null;
+let activeFilters = new Set();
+let searchQ = '';
+let stickyBottom = true;
+let pendingNew = 0;
+let tsInterval;
+
+// ── Relative time ──────────────────────────────────────────────────────────
+function relTime(ts){
+  if(!ts) return '';
+  const epoch = typeof ts==='number' ? ts*1000 : new Date(ts).getTime();
+  if(!epoch) return '';
+  const sec = (Date.now()-epoch)/1000;
+  if(sec<60) return 'just now';
+  if(sec<3600) return `${Math.floor(sec/60)}m ago`;
+  if(sec<86400) return `${Math.floor(sec/3600)}h ago`;
+  return `${Math.floor(sec/86400)}d ago`;
+}
+function fmtTs(ts){
+  if(!ts) return '';
+  try{ return new Date(ts).toLocaleString('en',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) }catch{ return String(ts) }
+}
+function initials(name){ const p=name.split(':'); return p[p.length-1].slice(0,2).toUpperCase() }
+
+// ── Filter/search ──────────────────────────────────────────────────────────
+function matchesFilter(r){
+  if(activeFilters.size){
+    let ok=false;
+    for(const f of activeFilters){
+      if(f.startsWith('status:') && r.status===f.slice(7)){ ok=true; break }
+      if(f.startsWith('be:') && (r.participants||[]).some(p=>p.backend===f.slice(3))){ ok=true; break }
+    }
+    if(!ok) return false;
+  }
+  if(!searchQ) return true;
+  const q=searchQ.toLowerCase();
+  if((r.topic||'').toLowerCase().includes(q)) return true;
+  if((r.id||'').toLowerCase().includes(q)) return true;
+  if((r.participants||[]).some(p=>p.name.toLowerCase().includes(q))) return true;
+  if((r.verdict||'').toLowerCase().includes(q)) return true;
+  if((r.preview||'').toLowerCase().includes(q)) return true;
+  return false;
+}
+
+function visibleRooms(){ return roomOrder.map(id=>roomsById[id]).filter(r=>r&&matchesFilter(r)) }
+
+// ── Card rendering ─────────────────────────────────────────────────────────
+function makeCardEl(r){
+  const el = document.createElement('article');
+  el.className = `room-card s-${r.status==='synthesized'?'synth':r.status}`;
+  el.setAttribute('role','button');
+  el.setAttribute('tabindex','0');
+  el.setAttribute('aria-label', r.topic||r.id);
+  el.dataset.roomId = r.id;
+
+  const chips = (r.participants||[]).map(p=>`<span class="p-chip ${BE_CLS[p.backend]||''}">${esc(p.name.split(':')[0])}</span>`).join('');
+  const preview = r.verdict
+    ? `<div class="card-verdict">⟳ ${esc(r.verdict)}</div>`
+    : r.preview ? `<div class="card-preview">${esc(r.preview)}</div>` : '';
+
+  el.innerHTML = `
+    <div class="card-rail"></div>
+    <div class="card-body">
+      <div class="card-row1">
+        <div class="card-topic">${esc(r.topic||r.id)}</div>
+        <div class="status-dot" title="${esc(r.status)}"></div>
+      </div>
+      <div class="card-chips">${chips}</div>
+      ${preview}
+      <div class="card-meta">
+        <span>${r.turns||0} turns</span>
+        <span class="dot">·</span>
+        <span class="rel-ts" data-ts="${r.last_activity||r.created||''}">${relTime(r.last_activity||0)||fmtTs(r.created)}</span>
+      </div>
+    </div>`;
+  return el;
+}
+
+function patchCard(r){
+  const old = document.querySelector(`[data-room-id="${CSS.escape(r.id)}"]`);
+  const el = makeCardEl(r);
+  if(old){ old.replaceWith(el) } else { $grid.prepend(el) }
+}
+
+// ── Grid render ────────────────────────────────────────────────────────────
+const $grid = document.getElementById('rooms-grid');
+
+function renderGrid(){
+  const rooms = visibleRooms();
+  const active = roomOrder.map(id=>roomsById[id]).filter(r=>r&&r.status==='active').length;
+  const synth  = roomOrder.map(id=>roomsById[id]).filter(r=>r&&r.status==='synthesized').length;
+  document.getElementById('s-total').textContent = roomOrder.length;
+  document.getElementById('s-active').textContent = active;
+  document.getElementById('s-synth').textContent = synth;
+
+  if(!rooms.length){
+    $grid.innerHTML = `<div class="state-msg"><h2>${searchQ||activeFilters.size?'No matching rooms':'No rooms yet'}</h2><p>${searchQ?'Try a different search.':'Create a room with room_create.'}</p></div>`;
+    return;
+  }
+  // Rebuild — needed for reorder; we do this only on filter/search changes
+  // For live updates we use patchCard() to avoid blowing away all cards
+  const frag = document.createDocumentFragment();
+  rooms.forEach(r=>frag.appendChild(makeCardEl(r)));
+  $grid.innerHTML='';
+  $grid.appendChild(frag);
+  if(openRoomId){
+    const sel = document.querySelector(`[data-room-id="${CSS.escape(openRoomId)}"]`);
+    if(sel) sel.classList.add('selected');
+  }
+}
+
+// ── Detail panel ──────────────────────────────────────────────────────────
+const $detail = document.getElementById('detail');
+const $overlay = document.getElementById('overlay');
+const $detailBody = document.getElementById('detail-body');
+
+async function openDetail(id){
+  openRoomId = id;
+  location.hash = '#room/'+encodeURIComponent(id);
+  document.querySelectorAll('.room-card').forEach(c=>c.classList.remove('selected'));
+  const card = document.querySelector(`[data-room-id="${CSS.escape(id)}"]`);
+  if(card) card.classList.add('selected');
+
+  $detail.hidden=false;
+  $detail.removeAttribute('hidden');
+  $detail.classList.add('open');
+  $overlay.classList.add('show');
+  $overlay.setAttribute('aria-hidden','false');
+
+  document.getElementById('detail-title').textContent = roomsById[id]?.topic||id;
+  document.getElementById('detail-subtitle').textContent =
+    `${id} · created ${fmtTs(roomsById[id]?.created)}`;
+  $detailBody.innerHTML = '<div class="state-msg"><p>Loading…</p></div>';
+
+  // Cold hydrate from /api/rooms/{id}
+  if(!hydratedTranscript[id]){
+    try{
+      const r = await fetch('/api/rooms/'+encodeURIComponent(id)).then(x=>x.json());
+      hydratedTranscript[id] = r.messages||[];
+      // Merge slim data in case SSE hasn't caught up
+      if(!roomsById[id]) roomsById[id] = {id};
+      Object.assign(roomsById[id], {
+        topic:r.topic, created:r.created,
+        participants:r.participants, files:r.files, file_count:(r.files||[]).length
+      });
+    }catch(e){
+      $detailBody.innerHTML=`<div class="state-msg"><h2>Failed to load</h2><p>${esc(String(e))}</p></div>`;
+      return;
+    }
+  }
+  renderDetail(id);
+  // Restore hash-based open after render
+  requestAnimationFrame(()=>scrollToBottom(true));
+}
+
+function closeDetail(){
+  openRoomId = null;
+  location.hash = '';
+  $detail.classList.remove('open');
+  $overlay.classList.remove('show');
+  $overlay.setAttribute('aria-hidden','true');
+  document.querySelectorAll('.room-card').forEach(c=>c.classList.remove('selected'));
+  setTimeout(()=>{ $detail.hidden=true }, 200);
+}
+
+function renderDetail(id){
+  const r = roomsById[id]||{};
+  const msgs = hydratedTranscript[id]||[];
+  const synth = msgs.find(m=>m.name==='⟳ Synthesizer');
+  const ps = r.participants||[];
+  const files = r.files||[];
+
+  document.getElementById('detail-title').textContent = r.topic||id;
+  document.getElementById('detail-subtitle').textContent =
+    `${id} · ${(r.turns||0)} turns · created ${fmtTs(r.created)}`;
+
+  const verdictHtml = synth ? `
+    <div class="verdict-pin">
+      <div class="verdict-label">⟳ Synthesis</div>
+      <div class="verdict-text">${md(synth.content)}</div>
+    </div>` : '';
+
+  const pHtml = ps.map(p=>{
+    const soul = p.soul||{};
+    const prompt = typeof soul==='string'?soul:(soul.system_prompt||'');
+    const bias = soul.challenge_bias!=null ? ` · challenge_bias ${soul.challenge_bias}` : '';
+    const effort = p.effort ? ` · effort:${p.effort}` : '';
+    return `<div class="p-card">
+      <div class="p-card-top">
+        <span class="p-name">${esc(p.name)}</span>
+        <span class="p-chip ${BE_CLS[p.backend]||''}">${esc(p.backend||'')}</span>
+      </div>
+      <div class="p-meta-row"><span>${esc(p.model||'')}</span>${effort?`<span>${esc(effort)}</span>`:''}</div>
+      ${prompt?`<div class="p-soul">${esc(prompt)}${bias?`\n\n${esc(bias)}`:''}</div>`:''}
+    </div>`;
+  }).join('');
+
+  const filesHtml = files.length ? `
+    <div>
+      <div class="section-label">Attached files (${files.length})</div>
+      <div style="display:flex;flex-wrap:wrap;gap:4px">
+        ${files.map(f=>`<code style="font-size:11px;padding:2px 6px;background:var(--card);border:1px solid var(--border);border-radius:4px">${esc(f.split('/').pop())}</code>`).join('')}
+      </div>
+    </div>` : '';
+
+  const nonCtx = msgs.filter(m=>m.name!=='CONTEXT'&&m.name!=='TOPIC');
+  const transcriptHtml = nonCtx.length
+    ? nonCtx.map(renderMsg).join('')
+    : '<div class="state-msg" style="padding:20px 0"><p>No messages yet.</p></div>';
+
+  $detailBody.innerHTML = `
+    ${verdictHtml}
+    <div>
+      <div class="section-label">Participants (${ps.length})</div>
+      <div class="p-cards">${pHtml}</div>
+    </div>
+    ${filesHtml}
+    <div>
+      <div class="section-label">Transcript · ${msgs.filter(m=>!SYS.has(m.name)).length} turns</div>
+      <div id="transcript-wrap">
+        ${transcriptHtml}
+        <button id="new-pill" onclick="scrollToBottom(true)">↓ new messages</button>
+      </div>
+    </div>`;
+  stickyBottom=true; pendingNew=0;
+  $detailBody.addEventListener('scroll', onDetailScroll, {passive:true});
+}
+
+function renderMsg(m){
+  const isSynth = m.name==='⟳ Synthesizer';
+  const isMod = m.name==='MODERATOR';
+  const cls = isSynth?'msg-synth':isMod?'msg-moderator':'';
+  const av = AV_CLS(m.name);
+  return `<div class="msg ${cls}">
+    <div class="msg-av ${av}" aria-hidden="true">${esc(initials(m.name))}</div>
+    <div class="msg-right">
+      <div class="msg-who">
+        <span class="who-name">${esc(m.name)}</span>
+        <span class="who-ts" title="${esc(fmtTs(m.ts))}">${relTime(m.ts||0)||fmtTs(m.ts)}</span>
+      </div>
+      <div class="msg-content">${md(m.content||'')}</div>
+    </div>
+  </div>`;
+}
+
+// ── Scroll management ──────────────────────────────────────────────────────
+function onDetailScroll(){
+  const el = $detailBody;
+  stickyBottom = (el.scrollHeight - el.scrollTop - el.clientHeight) < 60;
+  if(stickyBottom){ pendingNew=0; updatePill() }
+}
+function scrollToBottom(force=false){
+  if(force||stickyBottom){
+    $detailBody.scrollTop = $detailBody.scrollHeight;
+    pendingNew=0; stickyBottom=true; updatePill();
+  }
+}
+function updatePill(){
+  const pill = document.getElementById('new-pill');
+  if(pill){ pill.style.display = (!stickyBottom&&pendingNew>0)?'block':'none';
+    pill.textContent = `↓ ${pendingNew} new`; }
+}
+
+function appendMsgToDetail(msg){
+  const wrap = document.getElementById('transcript-wrap');
+  if(!wrap) return;
+  const div = document.createElement('div');
+  div.innerHTML = renderMsg(msg);
+  const pill = document.getElementById('new-pill');
+  wrap.insertBefore(div, pill);
+  if(stickyBottom){ scrollToBottom(true) }
+  else { pendingNew++; updatePill() }
+}
+
+// ── SSE ────────────────────────────────────────────────────────────────────
+let _es = null;
+function connect(){
+  if(_es){ _es.close() }
+  const dot = document.getElementById('sse-status');
+  dot.className='';
+  _es = new EventSource('/events');
+  _es.onopen = () => { dot.className='live'; dot.setAttribute('aria-label','Connection status: live') };
+  _es.onmessage = e => {
+    let data;
+    try{ data=JSON.parse(e.data) }catch{ return }
+    switch(data.type){
+      case 'snapshot':
+        roomsById={};roomOrder=[];
+        (data.rooms||[]).forEach(r=>{ roomsById[r.id]=r; roomOrder.push(r.id) });
+        renderGrid();
+        checkHash();
+        break;
+      case 'room_new':
+        if(!roomsById[data.room.id]) roomOrder.unshift(data.room.id);
+        roomsById[data.room.id]=data.room;
+        patchCard(data.room); updateStats();
+        break;
+      case 'room_meta':
+        if(roomsById[data.room_id])
+          Object.assign(roomsById[data.room_id], data.meta);
+        patchCard(roomsById[data.room_id]); updateStats();
+        break;
+      case 'message':
+        if(!hydratedTranscript[data.room_id]) break; // not open yet — skip
+        if(data.index >= (hydratedTranscript[data.room_id].length||0)){
+          hydratedTranscript[data.room_id].push(data.message);
+          if(openRoomId===data.room_id) appendMsgToDetail(data.message);
+        }
+        break;
+      case 'room_reset':
+        delete hydratedTranscript[data.room_id];
+        roomsById[data.room_id]=data.room;
+        patchCard(data.room);
+        if(openRoomId===data.room_id){ renderDetail(data.room_id) }
+        break;
+      case 'turn_start':
+        if(openRoomId===data.room_id) showTyping(data.name);
+        break;
+      case 'turn_end':
+        if(openRoomId===data.room_id) hideTyping();
+        break;
+      // legacy compat
+      case 'update':
+        if(!roomsById[data.room.id]) roomOrder.unshift(data.room.id);
+        roomsById[data.room.id]=data.room;
+        patchCard(data.room); updateStats();
+        break;
+    }
+  };
+  _es.onerror = () => {
+    dot.className='error'; dot.setAttribute('aria-label','Connection status: disconnected');
+    _es.close(); setTimeout(connect,3000);
+  };
+}
+
+function updateStats(){
+  document.getElementById('s-total').textContent=roomOrder.length;
+  document.getElementById('s-active').textContent=roomOrder.filter(id=>roomsById[id]?.status==='active').length;
+  document.getElementById('s-synth').textContent=roomOrder.filter(id=>roomsById[id]?.status==='synthesized').length;
+}
+
+function showTyping(name){
+  let row = document.getElementById('typing-row');
+  if(!row){
+    const wrap=document.getElementById('transcript-wrap'); if(!wrap) return;
+    row=document.createElement('div'); row.id='typing-row';
+    row.className='msg msg-typing';
+    row.innerHTML=`<div class="msg-av ${AV_CLS(name)}">${esc(initials(name))}</div>
+      <div class="msg-right">
+        <div class="msg-who"><span class="who-name">${esc(name)}</span></div>
+        <div class="msg-content"><span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span></div>
+      </div>`;
+    const pill=document.getElementById('new-pill');
+    wrap.insertBefore(row, pill);
+    scrollToBottom();
+  }
+}
+function hideTyping(){ const r=document.getElementById('typing-row'); if(r) r.remove() }
+
+// ── Hash routing ───────────────────────────────────────────────────────────
+function checkHash(){
+  const m = location.hash.match(/^#room\/(.+)/);
+  if(m){ const id=decodeURIComponent(m[1]); if(roomsById[id]) openDetail(id) }
+}
+window.addEventListener('hashchange', checkHash);
+
+// ── Keyboard nav ───────────────────────────────────────────────────────────
+function focusedCardIndex(){
+  const cards=[...document.querySelectorAll('.room-card')];
+  return cards.indexOf(document.activeElement);
+}
+document.addEventListener('keydown', e=>{
+  if(e.key==='Escape'){ closeDetail(); return }
+  if(e.target===document.getElementById('search')) return;
+  const cards=[...document.querySelectorAll('.room-card')];
+  if(!cards.length) return;
+  const idx=focusedCardIndex();
+  if(e.key==='ArrowDown'){ e.preventDefault(); cards[Math.min(idx+1,cards.length-1)]?.focus() }
+  if(e.key==='ArrowUp'){ e.preventDefault(); cards[Math.max(idx-1,0)]?.focus() }
+  if(e.key==='Enter'&&idx>=0){ openDetail(cards[idx].dataset.roomId) }
+});
+
+// ── Delegated click / keyboard ─────────────────────────────────────────────
+document.getElementById('rooms-grid').addEventListener('click', e=>{
+  const card=e.target.closest('.room-card');
+  if(card) openDetail(card.dataset.roomId);
+});
+document.getElementById('rooms-grid').addEventListener('keydown', e=>{
+  if(e.key===' '||e.key==='Enter'){
+    const card=e.target.closest('.room-card');
+    if(card){ e.preventDefault(); openDetail(card.dataset.roomId) }
+  }
+});
+document.getElementById('close-btn').addEventListener('click', closeDetail);
+document.getElementById('overlay').addEventListener('click', closeDetail);
+
+// ── Filters ────────────────────────────────────────────────────────────────
+document.querySelectorAll('.chip[data-filter]').forEach(btn=>{
+  btn.addEventListener('click',()=>{
+    const f=btn.dataset.filter;
+    if(activeFilters.has(f)){ activeFilters.delete(f); btn.classList.remove('on') }
+    else { activeFilters.add(f); btn.classList.add('on') }
+    renderGrid();
+  });
+});
+
+// ── Search ─────────────────────────────────────────────────────────────────
+let searchDebounce;
+document.getElementById('search').addEventListener('input', e=>{
+  clearTimeout(searchDebounce);
+  searchDebounce=setTimeout(()=>{ searchQ=e.target.value.trim(); renderGrid() }, 150);
+});
+
+// ── Relative timestamp refresh ─────────────────────────────────────────────
+function refreshTs(){
+  document.querySelectorAll('.rel-ts[data-ts]').forEach(el=>{
+    const ts=el.dataset.ts;
+    if(ts) el.textContent=relTime(parseFloat(ts)||ts)||fmtTs(ts);
+  });
+  // also update detail timestamps
+  if(openRoomId){
+    document.querySelectorAll('.who-ts[title]').forEach(el=>{
+      const title=el.getAttribute('title');
+      if(title) el.textContent=relTime(title)||title;
+    });
+  }
+}
+setInterval(refreshTs, 30000);
+
+// ── Bootstrap ─────────────────────────────────────────────────────────────
+connect();
+// Fallback: if SSE never fires, load from /api/rooms
+setTimeout(()=>{
+  if(!roomOrder.length){
+    fetch('/api/rooms').then(r=>r.json()).then(rooms=>{
+      if(roomOrder.length) return; // SSE beat us
+      rooms.forEach(r=>{ roomsById[r.id]=r; roomOrder.push(r.id) });
+      renderGrid(); checkHash();
+    }).catch(()=>{});
+  }
+}, 3000);
+</script>
+</body>
+</html>"""
+
+
+async def _start_dashboard(port: int = 7680) -> None:
+    """Serve the rooms dashboard on http://localhost:{port}.
+
+    SSE protocol — slim snapshot + incremental deltas:
+      {type:'snapshot',   rooms:[<slim>]}
+      {type:'room_new',   room:<slim>}
+      {type:'message',    room_id, index, message}
+      {type:'room_meta',  room_id, meta}
+      {type:'room_reset', room_id, room:<slim>}
+      {type:'turn_start', room_id, name}
+      {type:'turn_end',   room_id}
+    Full transcript via /api/rooms/{id} only (cold hydration on first open).
+    """
+    from aiohttp import web
+    import asyncio, json as _json, time
+
+    rooms_dir = Path.home() / ".chitta-bridge" / "rooms"
+    _sse_queues: list[asyncio.Queue] = []
+    _SYS = {"TOPIC", "CONTEXT", "MODERATOR", "⟳ Synthesizer"}
+    STALE_AFTER = 600.0
+
+    def _load_room(path: Path) -> dict | None:
+        try:
+            with open(path) as f:
+                d = _json.load(f)
+            d.setdefault("id", path.stem)
+            return d
+        except Exception:
+            return None
+
+    def _ts_epoch(ts) -> float:
+        if ts is None:
+            return 0.0
+        if isinstance(ts, (int, float)):
+            return float(ts)
+        try:
+            from datetime import datetime
+            return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
+        except Exception:
+            return 0.0
+
+    def _msgs(room: dict) -> list:
+        m = room.get("messages")
+        return m if isinstance(m, list) else []
+
+    def _turns(room: dict) -> list:
+        return [m for m in _msgs(room) if m.get("name") not in _SYS]
+
+    def _last_activity(room: dict) -> float:
+        epochs = [_ts_epoch(m.get("ts")) for m in _msgs(room)]
+        epochs.append(_ts_epoch(room.get("created")))
+        return max(epochs) if epochs else 0.0
+
+    def _verdict(room: dict) -> str:
+        for m in reversed(_msgs(room)):
+            if m.get("name") == "⟳ Synthesizer":
+                lines = (m.get("content") or "").strip().splitlines()
+                return (lines[0] if lines else "").replace("**", "")[:200]
+        return ""
+
+    def _status(room: dict) -> str:
+        msgs = _msgs(room)
+        if any(m.get("name") == "⟳ Synthesizer" for m in msgs):
+            return "synthesized"
+        if not _turns(room):
+            return "empty"
+        if (time.time() - _last_activity(room)) > STALE_AFTER:
+            return "stale"
+        return "active"
+
+    def _slim(room: dict) -> dict:
+        turns = _turns(room)
+        last = turns[-1] if turns else None
+        preview = ""
+        if last:
+            preview = (last.get("content") or "").replace("**", "").strip()[:140]
+        parts = [
+            {"name": p.get("name", ""), "backend": p.get("backend", ""),
+             "model": p.get("model", ""), "effort": p.get("effort", "")}
+            for p in (room.get("participants") or [])
+        ]
+        return {
+            "id": room.get("id"),
+            "topic": room.get("topic") or room.get("id"),
+            "created": room.get("created"),
+            "participants": parts,
+            "file_count": len(room.get("files") or []),
+            "turns": len(turns),
+            "messages": len(_msgs(room)),
+            "status": _status(room),
+            "verdict": _verdict(room),
+            "preview": preview,
+            "last_activity": _last_activity(room),
+            "last_author": (last.get("name") if last else ""),
+        }
+
+    def _meta(slim: dict) -> dict:
+        return {k: slim[k] for k in ("status", "verdict", "preview", "turns",
+                                      "messages", "last_activity", "last_author")}
+
+    def _all_slim() -> list[dict]:
+        out = []
+        for p in sorted(rooms_dir.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
+            r = _load_room(p)
+            if r:
+                out.append(_slim(r))
+        return out
+
+    async def _emit(payload: dict) -> None:
+        if not _sse_queues:
+            return
+        msg = _json.dumps(payload)
+        for q in list(_sse_queues):
+            await q.put(msg)
+
+    async def _watch_rooms():
+        seen_mtime: dict[str, float] = {}
+        seen_count: dict[str, int] = {}
+        seen_meta: dict[str, dict] = {}
+        seen_pending: dict[str, str] = {}
+        for p in rooms_dir.glob("*.json"):
+            r = _load_room(p)
+            if not r:
+                continue
+            rid = r["id"]
+            seen_mtime[str(p)] = p.stat().st_mtime
+            seen_count[rid] = len(_msgs(r))
+            seen_meta[rid] = _meta(_slim(r))
+            seen_pending[rid] = r.get("pending") or ""
+        while True:
+            await asyncio.sleep(2)
+            try:
+                for p in rooms_dir.glob("*.json"):
+                    mtime = p.stat().st_mtime
+                    if seen_mtime.get(str(p)) == mtime:
+                        continue
+                    seen_mtime[str(p)] = mtime
+                    r = _load_room(p)
+                    if not r:
+                        continue
+                    rid = r["id"]
+                    slim = _slim(r)
+                    msgs = _msgs(r)
+                    prev = seen_count.get(rid)
+                    if prev is None:
+                        await _emit({"type": "room_new", "room": slim})
+                    elif len(msgs) < prev:
+                        await _emit({"type": "room_reset", "room_id": rid, "room": slim})
+                    elif len(msgs) > prev:
+                        for i in range(prev, len(msgs)):
+                            await _emit({"type": "message", "room_id": rid,
+                                         "index": i, "message": msgs[i]})
+                    pending = r.get("pending") or ""
+                    if pending != seen_pending.get(rid, ""):
+                        if pending:
+                            await _emit({"type": "turn_start", "room_id": rid, "name": pending})
+                        else:
+                            await _emit({"type": "turn_end", "room_id": rid})
+                        seen_pending[rid] = pending
+                    meta = _meta(slim)
+                    if meta != seen_meta.get(rid):
+                        await _emit({"type": "room_meta", "room_id": rid, "meta": meta})
+                        seen_meta[rid] = meta
+                    seen_count[rid] = len(msgs)
+            except Exception:
+                pass
+
+    async def handle_index(request):
+        return web.Response(text=_DASHBOARD_HTML, content_type="text/html")
+
+    async def handle_rooms(request):
+        return web.Response(text=_json.dumps(_all_slim()), content_type="application/json")
+
+    async def handle_room(request):
+        rid = request.match_info["id"]
+        path = rooms_dir / f"{rid}.json"
+        r = _load_room(path) if path.exists() else None
+        if r is None:
+            return web.Response(status=404, text="not found")
+        return web.Response(text=_json.dumps(r), content_type="application/json")
+
+    async def handle_events(request):
+        resp = web.StreamResponse(headers={
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        })
+        await resp.prepare(request)
+        await resp.write(
+            f"data: {_json.dumps({'type': 'snapshot', 'rooms': _all_slim()})}\n\n".encode())
+        q: asyncio.Queue = asyncio.Queue()
+        _sse_queues.append(q)
+        try:
+            while True:
+                try:
+                    msg = await asyncio.wait_for(q.get(), timeout=25)
+                    await resp.write(f"data: {msg}\n\n".encode())
+                except asyncio.TimeoutError:
+                    await resp.write(b": ping\n\n")
+        except Exception:
+            pass
+        finally:
+            if q in _sse_queues:
+                _sse_queues.remove(q)
+        return resp
+
+    app = web.Application()
+    app.router.add_get("/", handle_index)
+    app.router.add_get("/api/rooms", handle_rooms)
+    app.router.add_get("/api/rooms/{id}", handle_room)
+    app.router.add_get("/events", handle_events)
+
+    async def _try_bind() -> bool:
+        nonlocal runner
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", port)
+        try:
+            await site.start()
+            return True
+        except OSError as _e:
+            await runner.cleanup()
+            if _e.errno != 98:
+                raise
+            return False
+
+    runner = None
+    if not await _try_bind():
+        # Port in use — if the HTTP daemon owns it, defer to it and skip
+        if not _evict_port(port, allow_http=True):
+            return  # held by HTTP daemon or unrelated process — skip silently
+        await asyncio.sleep(1.2)
+        if not await _try_bind():
+            return  # still can't bind — give up silently
+
+    asyncio.create_task(_watch_rooms())
+
+
+def _evict_port(port: int, *, allow_http: bool = True) -> bool:
+    """SIGTERM any chitta-bridge process holding *port*.
+
+    If allow_http=True (default), never evicts the persistent HTTP daemon
+    (identified by '--http' in its cmdline). Returns True only if something
+    was actually evicted.
+    """
+    import subprocess, os
+    try:
+        pids = [
+            int(p) for p in
+            subprocess.run(["fuser", f"{port}/tcp"], capture_output=True, text=True).stdout.split()
+            if p.strip().isdigit()
+        ]
+    except Exception:
+        return False
+    evicted = False
+    for pid in pids:
+        try:
+            cmd = open(f"/proc/{pid}/cmdline").read().replace("\x00", " ")
+            if "chitta" not in cmd:
+                continue
+            if allow_http and "--http" in cmd:
+                continue  # never kill the persistent HTTP daemon
+            os.kill(pid, 15)
+            evicted = True
+        except Exception:
+            pass
+    return evicted
+
+
+def _make_init_options() -> "InitializationOptions":
+    return InitializationOptions(
+        server_name="chitta-bridge",
+        server_version=__version__,
+        capabilities=ServerCapabilities(tools=ToolsCapability()),
+        instructions=(
+            "## Multi-model discussions — use rooms\n"
+            "For any discussion involving multiple models (e.g. GPT + Claude), always use "
+            "room_create (via advanced gateway) with participant shorthands:\n"
+            "  codex:gpt-5.5                  — Codex backend, default effort (high)\n"
+            "  codex:gpt-5.5:medium           — Codex backend, medium reasoning effort\n"
+            "  codex:gpt-5.5:xhigh            — Codex backend, extended reasoning\n"
+            "  claude:claude-opus-4-7         — Claude API, default effort\n"
+            "  claude:claude-opus-4-7:xhigh   — Claude Opus 4.7 with extended thinking (xhigh/max only)\n"
+            "Effort: codex=low/medium/high/xhigh; claude=low/medium/xhigh/max. "
+            "NOTE: 'high' is NOT valid for claude-opus-4-7 — use xhigh.\n"
+            "Then run with room_run. Never route multi-model discussions through opencode.\n\n"
+            "## Room follow-ups — CRITICAL\n"
+            "To send a follow-up question to a live room, use room_run with prompt=:\n"
+            "  room_run(room_id='room-xxx', prompt='Your follow-up question here')\n"
+            "This is the ONLY correct pattern — it injects the message AND triggers inference "
+            "atomically. DO NOT call room_run without prompt hoping a prior message was queued; "
+            "that will produce 0 responses. rounds defaults to 1 for follow-ups.\n\n"
+            "## Codex session reuse\n"
+            "Prefer codex_discuss over codex_start when a session already exists. "
+            "Never call codex_start unless the user asks for a new session or specific model.\n\n"
+            "## File Attachments — CRITICAL\n"
+            "The 'files' parameter in opencode_discuss, opencode_review, and similar tools "
+            "MUST be an array, even for a single file.\n"
+            "WRONG: files: \"/path/to/file.hpp\"\n"
+            "CORRECT: files: [\"/path/to/file.hpp\"]"
+        ),
+    )
+
+
+async def _run_http_mode(mcp_port: int = 7681, dashboard_port: int = 7680) -> None:
+    """Run MCP over SSE (shared persistent server) + dashboard, both evicting stale bridges."""
+    import uvicorn
+    from mcp.server.sse import SseServerTransport
+    from starlette.applications import Starlette
+    from starlette.routing import Mount, Route
+    from starlette.responses import Response
+
+    init_options = _make_init_options()
+    sse_transport = SseServerTransport("/messages/")
+
+    async def handle_sse(request):
+        async with sse_transport.connect_sse(
+            request.scope, request.receive, request._send
+        ) as (read_stream, write_stream):
+            await server.run(read_stream, write_stream, init_options)
+        return Response()
+
+    starlette_app = Starlette(routes=[
+        Route("/sse", endpoint=handle_sse),
+        Mount("/messages/", app=sse_transport.handle_post_message),
+    ])
+
+    # Evict stale bridge on MCP port if needed
+    import socket
+    for port, label in ((mcp_port, "MCP"), (dashboard_port, "dashboard")):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        in_use = sock.connect_ex(("127.0.0.1", port)) == 0
+        sock.close()
+        if in_use:
+            if _evict_port(port):
+                await asyncio.sleep(1.5)
+
+    # Write port file so other tools can discover us
+    port_file = Path.home() / ".chitta-bridge" / "http.ports"
+    port_file.write_text(f"mcp={mcp_port}\ndashboard={dashboard_port}\npid={__import__('os').getpid()}\n")
+
+    # Start dashboard and MCP SSE concurrently
+    await _start_dashboard(port=dashboard_port)
+
+    config = uvicorn.Config(starlette_app, host="0.0.0.0", port=mcp_port,
+                            log_level="warning", access_log=False)
+    userver = uvicorn.Server(config)
+    print(f"chitta-bridge HTTP mode: MCP SSE on :{mcp_port}, dashboard on :{dashboard_port}",
+          flush=True)
+
+    # Use _serve() directly to avoid uvicorn's signal handler installation,
+    # which would exit the process on SIGTERM from unrelated bridge instances.
+    loop = asyncio.get_running_loop()
+    stop = asyncio.Event()
+
+    def _on_signal():
+        userver.should_exit = True
+        stop.set()
+
+    for sig in (_signal.SIGTERM, _signal.SIGINT):
+        loop.add_signal_handler(sig, _on_signal)
+
+    try:
+        await userver._serve()
+    finally:
+        for sig in (_signal.SIGTERM, _signal.SIGINT):
+            loop.remove_signal_handler(sig)
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--exec", action="store_true",
                         help="Single-shot mode: read JSON from stdin, write JSON to stdout")
+    parser.add_argument("--http", action="store_true",
+                        help="HTTP mode: shared persistent MCP SSE server (no stdio)")
+    parser.add_argument("--mcp-port", type=int, default=7681,
+                        help="MCP SSE port in --http mode (default: 7681)")
+    parser.add_argument("--dashboard-port", type=int, default=7680,
+                        help="Dashboard port (default: 7680)")
     args, _ = parser.parse_known_args()
 
     if args.exec:
         asyncio.run(_run_exec_mode())
         return
 
-    # Clean up stale snapshot files on every startup (issue #6845)
     cleanup_opencode_snapshot()
 
+    if args.http:
+        asyncio.run(_run_http_mode(mcp_port=args.mcp_port, dashboard_port=args.dashboard_port))
+        return
+
+    # Stdio mode (default) — one bridge per Claude session
     async def run():
-        init_options = InitializationOptions(
-            server_name="chitta-bridge",
-            server_version=__version__,
-            capabilities=ServerCapabilities(tools=ToolsCapability()),
-            instructions=(
-                "## Multi-model discussions — use rooms\n"
-                "For any discussion involving multiple models (e.g. GPT + Claude), always use "
-                "room_create (via advanced gateway) with participant shorthands:\n"
-                "  codex:gpt-5.5                  — Codex backend, default effort (high)\n"
-                "  codex:gpt-5.5:medium           — Codex backend, medium reasoning effort\n"
-                "  codex:gpt-5.5:xhigh            — Codex backend, extended reasoning\n"
-                "  claude:claude-opus-4-7         — Claude API, default effort\n"
-                "  claude:claude-opus-4-7:xhigh   — Claude Opus 4.7 with extended thinking (xhigh/max only)\n"
-                "Effort: codex=low/medium/high/xhigh; claude=low/medium/xhigh/max. "
-                "NOTE: 'high' is NOT valid for claude-opus-4-7 — use xhigh.\n"
-                "Then run with room_run. Never route multi-model discussions through opencode.\n\n"
-                "## Room follow-ups — CRITICAL\n"
-                "To send a follow-up question to a live room, use room_run with prompt=:\n"
-                "  room_run(room_id='room-xxx', prompt='Your follow-up question here')\n"
-                "This is the ONLY correct pattern — it injects the message AND triggers inference "
-                "atomically. DO NOT call room_run without prompt hoping a prior message was queued; "
-                "that will produce 0 responses. rounds defaults to 1 for follow-ups.\n\n"
-                "## Codex session reuse\n"
-                "Prefer codex_discuss over codex_start when a session already exists. "
-                "Never call codex_start unless the user asks for a new session or specific model.\n\n"
-                "## File Attachments — CRITICAL\n"
-                "The 'files' parameter in opencode_discuss, opencode_review, and similar tools "
-                "MUST be an array, even for a single file.\n"
-                "WRONG: files: \"/path/to/file.hpp\"\n"
-                "CORRECT: files: [\"/path/to/file.hpp\"]"
-            )
-        )
+        await _start_dashboard(port=args.dashboard_port)
         async with stdio_server() as (read_stream, write_stream):
-            await server.run(read_stream, write_stream, init_options)
+            await server.run(read_stream, write_stream, _make_init_options())
 
     asyncio.run(run())
 
