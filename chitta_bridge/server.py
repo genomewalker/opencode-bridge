@@ -7993,8 +7993,9 @@ class RoomManager:
         lower = normalized.lower()
 
         # Warn if sandbox unavailable — agents assume isolation, they should know
+        import shutil as _shutil
         _sandbox_warn = ""
-        if not shutil.which("bwrap"):
+        if not _shutil.which("bwrap"):
             _sandbox_warn = "\n⚠️ [unsandboxed] bwrap not available — command runs without filesystem/network isolation."
 
         if any(lower.startswith(p) for p in ("sudo ", "su ", "su\n", "doas ")):
@@ -11898,7 +11899,9 @@ async def _start_dashboard(port: int = 7680) -> None:
     Full transcript via /api/rooms/{id} only (cold hydration on first open).
     """
     from aiohttp import web
-    import asyncio, json as _json, time
+    import asyncio
+    import json as _json
+    import time
 
     rooms_dir = Path.home() / ".chitta-bridge" / "rooms"
     _sse_queues: list[asyncio.Queue] = []
@@ -12130,7 +12133,8 @@ def _evict_port(port: int, *, allow_http: bool = True) -> bool:
     (identified by '--http' in its cmdline). Returns True only if something
     was actually evicted.
     """
-    import subprocess, os
+    import subprocess
+    import os
     try:
         pids = [
             int(p) for p in
