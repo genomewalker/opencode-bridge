@@ -9,7 +9,7 @@
   "mcpServers": {
     "chitta-bridge": {
       "url": "http://localhost:7681/sse",
-      "description": "Multi-agent discussion sessions — OpenCode, Codex, local GPU models. Start server: chitta-bridge --http"
+      "description": "Multi-agent discussion sessions — OpenCode, Codex, local GPU models. Start server: chitta-bridge --http. Token auto-read from ~/.chitta-bridge/token or CHITTA_BRIDGE_TOKEN env var."
     }
   },
   "skills": [

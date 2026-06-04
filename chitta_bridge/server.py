@@ -7992,6 +7992,11 @@ class RoomManager:
         normalized = " ".join(command.split())
         lower = normalized.lower()
 
+        # Warn if sandbox unavailable — agents assume isolation, they should know
+        _sandbox_warn = ""
+        if not shutil.which("bwrap"):
+            _sandbox_warn = "\n⚠️ [unsandboxed] bwrap not available — command runs without filesystem/network isolation."
+
         if any(lower.startswith(p) for p in ("sudo ", "su ", "su\n", "doas ")):
             return "(blocked: privilege escalation)"
 
@@ -8144,7 +8149,7 @@ class RoomManager:
                     truncated.append(line)
                     total_len += len(line) + 1
                 result = "\n".join(truncated) + "\n... (truncated)"
-            return result
+            return result + _sandbox_warn
         except asyncio.TimeoutError:
             return "(failed to start command within 5s)"
         except Exception as e:
@@ -10557,6 +10562,7 @@ async def call_tool(name: str, arguments: dict):
                         "name": "MODERATOR",
                         "content": prompt,
                         "ts": datetime.now().isoformat(),
+                        "op_id": str(uuid.uuid4()),  # idempotency key — dedup retries
                     })
                     rooms._save_room(rid)
             files_arg = arguments.get("files")
@@ -12095,7 +12101,7 @@ async def _start_dashboard(port: int = 7680) -> None:
         nonlocal runner
         runner = web.AppRunner(app)
         await runner.setup()
-        site = web.TCPSite(runner, "0.0.0.0", port)
+        site = web.TCPSite(runner, "127.0.0.1", port)
         try:
             await site.start()
             return True
@@ -12183,18 +12189,48 @@ def _make_init_options() -> "InitializationOptions":
     )
 
 
+def _http_token() -> str:
+    """Load or create the shared bearer token for HTTP mode."""
+    import secrets as _sec
+    token_path = Path.home() / ".chitta-bridge" / "token"
+    env = os.environ.get("CHITTA_BRIDGE_TOKEN", "").strip()
+    if env:
+        return env
+    if token_path.exists():
+        t = token_path.read_text().strip()
+        if t:
+            return t
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    t = _sec.token_urlsafe(32)
+    token_path.write_text(t)
+    token_path.chmod(0o600)
+    return t
+
+
 async def _run_http_mode(mcp_port: int = 7681, dashboard_port: int = 7680) -> None:
     """Run MCP over SSE (shared persistent server) + dashboard, both evicting stale bridges."""
+    import hmac as _hmac
     import uvicorn
     from mcp.server.sse import SseServerTransport
     from starlette.applications import Starlette
     from starlette.routing import Mount, Route
-    from starlette.responses import Response
+    from starlette.responses import Response, PlainTextResponse
+
+    _token = _http_token()
+
+    def _auth_ok(request) -> bool:
+        auth = request.headers.get("authorization", "")
+        if auth.startswith("Bearer "):
+            return _hmac.compare_digest(auth[7:], _token)
+        # Also allow token as query param for SSE clients that can't set headers
+        return _hmac.compare_digest(request.query_params.get("token", ""), _token)
 
     init_options = _make_init_options()
     sse_transport = SseServerTransport("/messages/")
 
     async def handle_sse(request):
+        if not _auth_ok(request):
+            return PlainTextResponse("Unauthorized", status_code=401)
         async with sse_transport.connect_sse(
             request.scope, request.receive, request._send
         ) as (read_stream, write_stream):
@@ -12216,14 +12252,17 @@ async def _run_http_mode(mcp_port: int = 7681, dashboard_port: int = 7680) -> No
             if _evict_port(port):
                 await asyncio.sleep(1.5)
 
-    # Write port file so other tools can discover us
+    # Write port file so other tools can discover us (token included for auth)
     port_file = Path.home() / ".chitta-bridge" / "http.ports"
-    port_file.write_text(f"mcp={mcp_port}\ndashboard={dashboard_port}\npid={__import__('os').getpid()}\n")
+    port_file.write_text(
+        f"mcp={mcp_port}\ndashboard={dashboard_port}\npid={os.getpid()}\ntoken={_token}\n"
+    )
+    port_file.chmod(0o600)
 
     # Start dashboard and MCP SSE concurrently
     await _start_dashboard(port=dashboard_port)
 
-    config = uvicorn.Config(starlette_app, host="0.0.0.0", port=mcp_port,
+    config = uvicorn.Config(starlette_app, host="127.0.0.1", port=mcp_port,
                             log_level="warning", access_log=False)
     userver = uvicorn.Server(config)
     print(f"chitta-bridge HTTP mode: MCP SSE on :{mcp_port}, dashboard on :{dashboard_port}",
