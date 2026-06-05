@@ -3718,10 +3718,12 @@ Set via:
             args.extend(["--model", model])
         args.extend(["-c", f'model_reasoning_effort="{effort}"'])
         effective_sandbox = sandbox or self.config.codex_sandbox
-        # danger-full-access: omit --sandbox entirely so codex reads config file
-        # (use_linux_sandbox_bwrap = false), which skips bwrap before the lock check.
-        # Passing --sandbox overrides config and re-enables bwrap initialization.
-        if effective_sandbox != "danger-full-access":
+        if effective_sandbox == "danger-full-access":
+            # --dangerously-bypass-approvals-and-sandbox skips ALL sandboxing including
+            # tool-call bwrap. Required on kernels where max_user_namespaces=0 (el8).
+            # Omitting --sandbox only bypasses init-bwrap, not tool-call bwrap.
+            args.append("--dangerously-bypass-approvals-and-sandbox")
+        else:
             args.extend(["--sandbox", effective_sandbox])
         if full_auto:
             args.append("--full-auto")
@@ -12221,6 +12223,9 @@ async def _run_http_mode(mcp_port: int = 7681, dashboard_port: int = 7680) -> No
     from starlette.responses import Response, PlainTextResponse
 
     _token = _http_token()
+    # Propagate token to subprocesses (Codex, OpenCode) so they can connect back
+    # to this bridge's HTTP SSE endpoint without spawning a new stdio bridge.
+    os.environ["CHITTA_BRIDGE_TOKEN"] = _token
 
     def _auth_ok(request) -> bool:
         auth = request.headers.get("authorization", "")
