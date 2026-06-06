@@ -3718,12 +3718,10 @@ Set via:
             args.extend(["--model", model])
         args.extend(["-c", f'model_reasoning_effort="{effort}"'])
         effective_sandbox = sandbox or self.config.codex_sandbox
-        if effective_sandbox == "danger-full-access":
-            # --dangerously-bypass-approvals-and-sandbox skips ALL sandboxing including
-            # tool-call bwrap. Required on kernels where max_user_namespaces=0 (el8).
-            # Omitting --sandbox only bypasses init-bwrap, not tool-call bwrap.
-            args.append("--dangerously-bypass-approvals-and-sandbox")
-        else:
+        if effective_sandbox != "danger-full-access":
+            # danger-full-access: omit --sandbox so codex reads config file
+            # (use_linux_sandbox_bwrap = false). --dangerously-bypass-approvals-and-sandbox
+            # is TUI-only and rejected by `codex exec`.
             args.extend(["--sandbox", effective_sandbox])
         if full_auto:
             args.append("--full-auto")
@@ -12177,12 +12175,18 @@ def _make_init_options() -> "InitializationOptions":
             "Effort: codex=low/medium/high/xhigh; claude=low/medium/xhigh/max. "
             "NOTE: 'high' is NOT valid for claude-opus-4-7 — use xhigh.\n"
             "Then run with room_run. Never route multi-model discussions through opencode.\n\n"
-            "## Room follow-ups — CRITICAL\n"
-            "To send a follow-up question to a live room, use room_run with prompt=:\n"
-            "  room_run(room_id='room-xxx', prompt='Your follow-up question here')\n"
-            "This is the ONLY correct pattern — it injects the message AND triggers inference "
-            "atomically. DO NOT call room_run without prompt hoping a prior message was queued; "
-            "that will produce 0 responses. rounds defaults to 1 for follow-ups.\n\n"
+            "## room_run always needs prompt= — CRITICAL\n"
+            "Every room_run call — initial AND follow-up — MUST include prompt=. "
+            "Without it the room produces 0 responses.\n"
+            "  room_run(room_id='room-xxx', prompt='Your full brief or question here')\n"
+            "DO NOT call room_run without prompt hoping a prior message was queued. "
+            "rounds defaults to 1 for follow-ups.\n\n"
+            "## Room → Workflow pattern (design then execute)\n"
+            "Rooms design. Workflows execute. Never describe a workflow in prose — call Workflow().\n"
+            "  1. room_create + room_run(prompt=<full brief>) — get the design\n"
+            "  2. Synthesize room output into a JS Workflow script\n"
+            "  3. Workflow(script=<the script>) — actually makes the changes\n"
+            "Skipping step 3 and describing the workflow in text is a failure mode.\n\n"
             "## Codex session reuse\n"
             "Prefer codex_discuss over codex_start when a session already exists. "
             "Never call codex_start unless the user asks for a new session or specific model.\n\n"
