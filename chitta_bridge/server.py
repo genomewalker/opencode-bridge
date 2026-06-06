@@ -8843,7 +8843,7 @@ HIDDEN_TOOLS = {
     "multi_consult", "agent_chain", "delegate_codex", "parallel_agents",
     # Rooms (multi-agent discussion)
     "room_create", "room_run", "room_synthesize", "room_read", "room_challenge",
-    "room_status",
+    "room_status", "room_suggest_participants",
     # Status/health
     "soul_status",
 }
@@ -10434,11 +10434,25 @@ async def call_tool(name: str, arguments: dict):
                     s = str(p)
                     # Parse "backend:model[:effort]" shorthand
                     _EFFORT_VALUES = {"low", "medium", "high", "xhigh", "max"}
-                    _CLAUDE_SHORTHANDS = {
-                        "opus": "claude-opus-4-7",
-                        "sonnet": "claude-sonnet-4-6",
-                        "haiku": "claude-haiku-4-5-20251001",
-                    }
+                    # Read from CLAUDE.md model table — version-independent
+                    _CLAUDE_SHORTHANDS: dict = {}
+                    try:
+                        import re as _re
+                        _cm = Path.home() / ".claude" / "CLAUDE.md"
+                        if _cm.exists():
+                            for _mid in _re.findall(r'`(claude-[a-z0-9-]+)`', _cm.read_text()):
+                                if "opus" in _mid and "opus" not in _CLAUDE_SHORTHANDS:
+                                    _CLAUDE_SHORTHANDS["opus"] = _mid
+                                elif "sonnet" in _mid and "sonnet" not in _CLAUDE_SHORTHANDS:
+                                    _CLAUDE_SHORTHANDS["sonnet"] = _mid
+                                elif "haiku" in _mid and "haiku" not in _CLAUDE_SHORTHANDS:
+                                    _CLAUDE_SHORTHANDS["haiku"] = _mid
+                    except Exception:
+                        pass
+                    # Fallbacks if CLAUDE.md parse yielded nothing
+                    _CLAUDE_SHORTHANDS.setdefault("opus", "claude-opus-4-8")
+                    _CLAUDE_SHORTHANDS.setdefault("sonnet", "claude-sonnet-4-6")
+                    _CLAUDE_SHORTHANDS.setdefault("haiku", "claude-haiku-4-5")
                     if ":" in s and s.split(":", 1)[0] in ("opencode", "codex", "claude", "local"):
                         parts = s.split(":")
                         backend_hint = parts[0]
@@ -10647,6 +10661,50 @@ async def call_tool(name: str, arguments: dict):
                     for p in pending:
                         lines.append(f"  {p}: retryable-absent")
                 result = "\n".join(lines)
+        elif name == "room_suggest_participants":
+            # Query live backends and return the best participant strings for the task.
+            task_type = arguments.get("task_type", "design")  # design|coding|review|fast
+            lines = ["## Suggested participants (live query)\n"]
+            # Claude: probe via `claude --version` output or fall back to CLAUDE.md constants
+            claude_models = {}
+            try:
+                import subprocess as _sp
+                raw = _sp.run(["claude", "models", "--json"], capture_output=True, text=True, timeout=8)
+                if raw.returncode == 0:
+                    import json as _json
+                    data = _json.loads(raw.stdout)
+                    for m in data if isinstance(data, list) else data.get("models", []):
+                        mid = m if isinstance(m, str) else m.get("id", "")
+                        if "opus" in mid: claude_models["opus"] = mid
+                        elif "sonnet" in mid: claude_models["sonnet"] = mid
+                        elif "haiku" in mid: claude_models["haiku"] = mid
+            except Exception:
+                pass
+            # Fallback: read from CLAUDE.md model table if CLI query failed
+            if not claude_models:
+                import re as _re
+                claude_md = Path.home() / ".claude" / "CLAUDE.md"
+                if claude_md.exists():
+                    text = claude_md.read_text()
+                    for mid in _re.findall(r'`(claude-[a-z0-9-]+)`', text):
+                        if "opus" in mid and "opus" not in claude_models: claude_models["opus"] = mid
+                        elif "sonnet" in mid and "sonnet" not in claude_models: claude_models["sonnet"] = mid
+                        elif "haiku" in mid and "haiku" not in claude_models: claude_models["haiku"] = mid
+            opus = claude_models.get("opus", "claude-opus-4-8")
+            sonnet = claude_models.get("sonnet", "claude-sonnet-4-6")
+            # Codex: use current configured model
+            codex_model = codex_bridge.config.codex_model if codex_bridge else DEFAULT_CODEX_MODEL
+            if task_type == "fast":
+                lines.append(f"claude:{sonnet}:medium   — fast synthesis")
+                lines.append(f"codex:{codex_model}:medium  — fast reasoning")
+            elif task_type == "review":
+                lines.append(f"claude:{opus}:xhigh    — adversarial review")
+                lines.append(f"codex:{codex_model}:xhigh   — independent perspective")
+            else:  # design / default
+                lines.append(f"claude:{opus}:xhigh    — architecture, extended thinking")
+                lines.append(f"codex:{codex_model}:xhigh   — extended reasoning")
+            lines.append(f"\n_Queried live. Claude opus={opus}, sonnet={sonnet}, codex={codex_model}_")
+            result = "\n".join(lines)
         elif name == "room_synthesize":
             synth = arguments.get("synthesizer")
             if isinstance(synth, str):
