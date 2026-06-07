@@ -26,3 +26,5 @@ ENV/
 *.swp
 *.swo
 .DS_Store
+artifacts
+graph_state.json

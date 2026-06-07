@@ -375,6 +375,47 @@ LARGE_FILE = 5000       # lines
 
 # Chunked processing thresholds
 CHUNK_THRESHOLD = 2000   # lines — files above this get chunked
+
+# Opus 4.8 pricing ($/MTok); other models estimated from public rates.
+_MODEL_RATES: dict[str, tuple[float, float]] = {
+    "claude-opus-4-8":    (15.0, 75.0),
+    "claude-opus-4-7":    (15.0, 75.0),
+    "claude-sonnet-4-6":  (3.0,  15.0),
+    "claude-haiku-4-5":   (0.8,   4.0),
+}
+
+def _estimate_cost_usd(model: str, in_tok: int, out_tok: int,
+                        cache_write: int = 0, cache_read: int = 0) -> float:
+    for prefix, (r_in, r_out) in _MODEL_RATES.items():
+        if model.startswith(prefix):
+            cost = (in_tok * r_in + out_tok * r_out) / 1_000_000
+            cost += cache_write * r_in * 1.25 / 1_000_000  # cache write = 1.25× input rate
+            cost += cache_read * r_in * 0.10 / 1_000_000   # cache read = 0.10× input rate
+            return round(cost, 6)
+    return 0.0
+
+def _append_room_cost(rooms_dir: "Path", room_id: str, participant_name: str,
+                       backend: str, model: str, effort: Optional[str],
+                       round_num: int, usage: dict) -> None:
+    in_tok   = usage.get("input_tokens", 0)
+    out_tok  = usage.get("output_tokens", 0)
+    cw_tok   = usage.get("cache_creation_input_tokens", 0)
+    cr_tok   = usage.get("cache_read_input_tokens", 0)
+    est_usd  = _estimate_cost_usd(model, in_tok, out_tok, cw_tok, cr_tok)
+    record = {
+        "ts": __import__("datetime").datetime.now().isoformat(),
+        "room_id": room_id, "participant": participant_name,
+        "backend": backend, "model": model, "effort": effort, "round": round_num,
+        "in_tok": in_tok, "out_tok": out_tok,
+        "cache_write_tok": cw_tok, "cache_read_tok": cr_tok,
+        "est_usd": est_usd,
+    }
+    cost_path = rooms_dir / f"{room_id}.costs.jsonl"
+    try:
+        with open(cost_path, "a") as fh:
+            fh.write(__import__("json").dumps(record) + "\n")
+    except OSError:
+        pass
 CHUNK_SIZE = 800         # lines per chunk
 CHUNK_OVERLAP = 20       # overlap between adjacent chunks
 MAX_PARALLEL_CHUNKS = 6  # concurrency limit
@@ -4468,18 +4509,23 @@ class WebSearch:
             return academic[:max_chars]
 
         # ── General fetch with browser-like headers ────────────────────────
+        # r.jina.ai returns plain markdown — skip encoding negotiation so we
+        # get raw text instead of brotli/gzip that urllib can't decompress.
+        jina = "r.jina.ai" in url
         headers = {
             **cls._HEADERS,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept": "text/plain" if jina else "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Cache-Control": "no-cache",
-            "Pragma": "no-cache",
+            **({"Cache-Control": "no-cache", "Pragma": "no-cache"} if not jina else {}),
+            **({} if jina else {"Accept-Encoding": "gzip, deflate, br"}),
         }
         try:
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 raw = resp.read()
+                if resp.headers.get("Content-Encoding") == "gzip":
+                    import gzip as _gzip
+                    raw = _gzip.decompress(raw)
                 enc = resp.headers.get_content_charset("utf-8")
                 body = raw.decode(enc, errors="replace")
         except urllib.error.HTTPError as e:
@@ -8209,11 +8255,16 @@ class RoomManager:
 
         if backend == "claude":
             full_prompt = f"{system_prompt}\n\n{message}" if system_prompt else message
-            return await self._run_claude_p(
+            _usage: dict = {}
+            result = await self._run_claude_p(
                 full_prompt, files=files,
                 model=participant.get("model"),
                 effort=participant.get("effort"),
+                _usage_out=_usage,
             )
+            if _usage:
+                participant["_last_usage"] = _usage
+            return result
 
         elif backend == "local":
             fixed_url = participant.get("base_url") or participant.get("endpoint")
@@ -8291,7 +8342,8 @@ class RoomManager:
     async def _run_claude_p(self, prompt: str, timeout: int = 300,
                              files: Optional[list[str]] = None,
                              model: Optional[str] = None,
-                             effort: Optional[str] = None) -> str:
+                             effort: Optional[str] = None,
+                             _usage_out: Optional[dict] = None) -> str:
         """Run `claude -p --output-format json` and return the response text.
 
         The native claude binary hangs after outputting its result (never closes
@@ -8338,6 +8390,8 @@ class RoomManager:
                             result_text = f"[error: {data.get('result', 'claude error')}]"
                         else:
                             result_text = data.get("result", "")
+                        if _usage_out is not None and "usage" in data:
+                            _usage_out.update(data["usage"])
                         return
 
             try:
@@ -8483,6 +8537,20 @@ class RoomManager:
 
         # turn_counts is NOT mutated here; run_rounds reconciles it from committed messages
         # after the dedup append so the count is always consistent with disk state.
+
+        # ── Cost tracking ─────────────────────────────────────────────────────
+        usage = participant.pop("_last_usage", None)
+        if usage:
+            _append_room_cost(
+                rooms_dir=self.rooms_dir,
+                room_id=room.id,
+                participant_name=name,
+                backend=participant.get("backend", "?"),
+                model=participant.get("model", "?"),
+                effort=participant.get("effort"),
+                round_num=round_num,
+                usage=usage,
+            )
 
         return {"name": name, "content": final, "ts": datetime.now().isoformat(),
                 "dispatch_id": str(uuid.uuid4()), "turn_key": turn_key}
@@ -8842,7 +8910,7 @@ HIDDEN_TOOLS = {
     # Orchestration (complex, rarely needed)
     "multi_consult", "agent_chain", "delegate_codex", "parallel_agents",
     # Rooms (multi-agent discussion)
-    "room_create", "room_run", "room_synthesize", "room_read", "room_challenge",
+    "room_create", "room_run", "room_synthesize", "room_read", "room_challenge", "room_cost",
     "room_status", "room_suggest_participants",
     # Status/health
     "soul_status",
@@ -10705,6 +10773,32 @@ async def call_tool(name: str, arguments: dict):
                 lines.append(f"codex:{codex_model}:xhigh   — extended reasoning")
             lines.append(f"\n_Queried live. Claude opus={opus}, sonnet={sonnet}, codex={codex_model}_")
             result = "\n".join(lines)
+        elif name == "room_cost":
+            rid = arguments.get("room_id", "")
+            cost_path = rooms.rooms_dir / f"{rid}.costs.jsonl"
+            if not cost_path.exists():
+                result = f"No cost data for room '{rid}' (no claude: participants or room not found)."
+            else:
+                import json as _j
+                records = [_j.loads(l) for l in cost_path.read_text().splitlines() if l.strip()]
+                total_in = sum(r.get("in_tok", 0) for r in records)
+                total_out = sum(r.get("out_tok", 0) for r in records)
+                total_usd = sum(r.get("est_usd", 0.0) for r in records)
+                lines = [f"# Room cost: {rid}\n"]
+                by_participant: dict = {}
+                for r in records:
+                    p = r["participant"]
+                    by_participant.setdefault(p, {"in": 0, "out": 0, "usd": 0.0, "rounds": 0})
+                    by_participant[p]["in"]  += r.get("in_tok", 0)
+                    by_participant[p]["out"] += r.get("out_tok", 0)
+                    by_participant[p]["usd"] += r.get("est_usd", 0.0)
+                    by_participant[p]["rounds"] += 1
+                for p, s in by_participant.items():
+                    lines.append(f"**{p}** — {s['rounds']} round(s)")
+                    lines.append(f"  in: {s['in']:,} tok · out: {s['out']:,} tok · est ${s['usd']:.4f}")
+                lines.append(f"\n**Total** — in: {total_in:,} · out: {total_out:,} · est **${total_usd:.4f}**")
+                lines.append(f"\n_$200/mo Agent SDK credit on Max 20x — {total_usd/200*100:.1f}% used by this room_")
+                result = "\n".join(lines)
         elif name == "room_synthesize":
             synth = arguments.get("synthesizer")
             if isinstance(synth, str):
