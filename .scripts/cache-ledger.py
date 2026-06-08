@@ -19,13 +19,29 @@ import sys
 from pathlib import Path
 
 
-# Opus pricing ($/MTok)
-RATES = {
-    "input":       15.0,
-    "output":      75.0,
-    "cache_write": 18.75,   # 1.25× input
-    "cache_read":   1.50,   # 0.10× input
+# Pricing per model family ($/MTok). cache_write = 1.25× input, cache_read = 0.10× input.
+_MODEL_RATES: dict[str, tuple[float, float]] = {
+    "claude-opus-4":    (15.0,  75.0),
+    "claude-sonnet-4":  ( 3.0,  15.0),
+    "claude-haiku-4":   ( 0.8,   4.0),
+    "claude-opus-3":    (15.0,  75.0),
+    "claude-sonnet-3":  ( 3.0,  15.0),
+    "claude-haiku-3":   ( 0.25,  1.25),
 }
+_DEFAULT_RATES = (3.0, 15.0)  # sonnet as fallback
+
+def _rates(model: str) -> tuple[float, float]:
+    if not model:
+        return _DEFAULT_RATES
+    m = model.lower()
+    for prefix, r in _MODEL_RATES.items():
+        if m.startswith(prefix):
+            return r
+    return _DEFAULT_RATES
+
+def _cost(model: str, inp: int, out: int, cw: int, cr: int) -> float:
+    r_in, r_out = _rates(model)
+    return (inp * r_in + out * r_out + cw * r_in * 1.25 + cr * r_in * 0.10) / 1_000_000
 
 
 def find_sessions(last_n: int) -> list[Path]:
@@ -65,6 +81,7 @@ def parse_session(path: Path) -> list[dict]:
             usage = msg.get("usage", {})
             if not usage:
                 continue
+            model = msg.get("model", "")
 
             inp  = usage.get("input_tokens", 0)
             out  = usage.get("output_tokens", 0)
@@ -74,22 +91,16 @@ def parse_session(path: Path) -> list[dict]:
 
             efficiency = cr / total if total > 0 else 0.0
 
-            cost = (
-                inp  * RATES["input"]       / 1_000_000 +
-                out  * RATES["output"]      / 1_000_000 +
-                cw   * RATES["cache_write"] / 1_000_000 +
-                cr   * RATES["cache_read"]  / 1_000_000
-            )
-
             turns.append({
-                "n":          len(turns) + 1,
-                "input":      inp,
-                "output":     out,
+                "n":           len(turns) + 1,
+                "model":       model,
+                "input":       inp,
+                "output":      out,
                 "cache_write": cw,
-                "cache_read": cr,
+                "cache_read":  cr,
                 "total_input": total,
-                "efficiency": efficiency,
-                "cost_usd":   cost,
+                "efficiency":  efficiency,
+                "cost_usd":    _cost(model, inp, out, cw, cr),
                 "soul_inject": pending_soul,
             })
             pending_soul = False
@@ -102,10 +113,16 @@ def analyse(turns: list[dict]) -> None:
         print("No turns with usage data found.")
         return
 
+    # Model breakdown
+    from collections import Counter
+    model_counts: Counter = Counter(t["model"] or "unknown" for t in turns)
+    print("Models: " + ", ".join(f"{m}×{n}" for m, n in model_counts.most_common()))
+    print()
+
     # Per-turn table
-    print(f"{'#':>3}  {'in':>7}  {'out':>6}  {'cw':>7}  {'cr':>7}  "
+    print(f"{'#':>5}  {'model':>16}  {'in':>7}  {'out':>6}  {'cw':>7}  {'cr':>7}  "
           f"{'eff%':>6}  {'cost$':>7}  soul  flags")
-    print("-" * 72)
+    print("-" * 90)
 
     prev_eff = None
     total_cost = 0.0
@@ -123,7 +140,8 @@ def analyse(turns: list[dict]) -> None:
                 flags_count += 1
 
         soul_mark = "✓" if t["soul_inject"] else " "
-        print(f"{t['n']:>3}  {t['input']:>7,}  {t['output']:>6,}  "
+        model_short = (t.get("model") or "?")[-16:]
+        print(f"{t['n']:>5}  {model_short:>16}  {t['input']:>7,}  {t['output']:>6,}  "
               f"{t['cache_write']:>7,}  {t['cache_read']:>7,}  "
               f"{eff_pct:>5.1f}%  ${t['cost_usd']:>6.4f}  {soul_mark:<4}  {drop_flag}")
 
@@ -138,8 +156,8 @@ def analyse(turns: list[dict]) -> None:
     total_all    = total_input + total_cw + total_cr
     avg_eff      = total_cr / total_all * 100 if total_all else 0
 
-    print("-" * 72)
-    print(f"{'TOT':>3}  {total_input:>7,}  {total_output:>6,}  "
+    print("-" * 90)
+    print(f"{'TOT':>5}  {'':>16}  {total_input:>7,}  {total_output:>6,}  "
           f"{total_cw:>7,}  {total_cr:>7,}  "
           f"{avg_eff:>5.1f}%  ${total_cost:>6.4f}")
     print()
