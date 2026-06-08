@@ -8911,6 +8911,7 @@ HIDDEN_TOOLS = {
     "multi_consult", "agent_chain", "delegate_codex", "parallel_agents",
     # Rooms (multi-agent discussion)
     "room_create", "room_run", "room_synthesize", "room_read", "room_challenge", "room_cost",
+    "scheduler_list", "scheduler_run_now", "scheduler_pause", "scheduler_resume", "scheduler_history",
     "room_status", "room_suggest_participants",
     # Status/health
     "soul_status",
@@ -10799,6 +10800,31 @@ async def call_tool(name: str, arguments: dict):
                 lines.append(f"\n**Total** — in: {total_in:,} · out: {total_out:,} · est **${total_usd:.4f}**")
                 lines.append(f"\n_$200/mo Agent SDK credit on Max 20x — {total_usd/200*100:.1f}% used by this room_")
                 result = "\n".join(lines)
+        elif name in ("scheduler_list", "scheduler_run_now", "scheduler_pause",
+                       "scheduler_resume", "scheduler_history"):
+            # Lazy import so stdio-mode sessions don't pay the import cost
+            try:
+                from chitta_bridge.scheduler import SchedulerService  # noqa: F401
+                # Retrieve the running scheduler instance from the HTTP mode global
+                import chitta_bridge.server as _self_mod
+                _sched = getattr(_self_mod, "_active_scheduler", None)
+                if _sched is None:
+                    result = "Scheduler not running (start bridge with --http to enable)."
+                elif name == "scheduler_list":
+                    result = _sched.list_jobs()
+                elif name == "scheduler_run_now":
+                    result = await _sched.run_now(
+                        arguments.get("job_id", ""),
+                        dry_run=arguments.get("dry_run", False),
+                    )
+                elif name == "scheduler_pause":
+                    result = _sched.pause(arguments.get("job_id", ""))
+                elif name == "scheduler_resume":
+                    result = _sched.resume(arguments.get("job_id", ""))
+                elif name == "scheduler_history":
+                    result = _sched.job_history(arguments.get("job_id", ""))
+            except Exception as e:
+                result = f"[scheduler error: {e}]"
         elif name == "room_synthesize":
             synth = arguments.get("synthesizer")
             if isinstance(synth, str):
@@ -12425,6 +12451,24 @@ async def _run_http_mode(mcp_port: int = 7681, dashboard_port: int = 7680) -> No
     )
     port_file.chmod(0o600)
 
+    # Start scheduler daemon
+    import chitta_bridge.server as _self_mod
+    from chitta_bridge.scheduler import SchedulerService, JOBS_YAML
+    _scheduler = SchedulerService(
+        jobs_yaml=JOBS_YAML,
+        bridge_tools={
+            "codex_bin": str(CODEX_BIN) if CODEX_BIN else "codex",
+            "claude_bin": str(CLAUDE_BIN) if CLAUDE_BIN else "claude",
+            "room_manager": rooms,
+            "bridge_url": f"http://127.0.0.1:{mcp_port}",
+            "bridge_token": _token,
+        },
+        slack_fn=None,   # wire Slack MCP here when available
+        chitta_fn=SoulClient.remember if SoulClient.is_available() else None,
+    )
+    await _scheduler.start()
+    _self_mod._active_scheduler = _scheduler
+
     # Start dashboard and MCP SSE concurrently
     await _start_dashboard(port=dashboard_port)
 
@@ -12449,6 +12493,7 @@ async def _run_http_mode(mcp_port: int = 7681, dashboard_port: int = 7680) -> No
     try:
         await userver._serve()
     finally:
+        await _scheduler.stop()
         for sig in (_signal.SIGTERM, _signal.SIGINT):
             loop.remove_signal_handler(sig)
 

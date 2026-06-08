@@ -1,0 +1,104 @@
+version: 1
+
+jobs:
+  # Morning GitHub PR/CI brief → Slack
+  - id: morning-brief
+    description: "Summarise open PRs and CI status across repos"
+    enabled: true
+    schedule:
+      cron: "0 8 * * 1-5"
+      timezone: Europe/Copenhagen
+      jitter_seconds: 60
+      catchup: false
+    executor:
+      type: codex
+      prompt: |
+        Check open PRs and recent CI failures across my GitHub repos.
+        Summarise as 5 bullets: what's blocking, what needs review, what's red.
+        Be brief. Focus on actionable items only.
+      timeout_seconds: 900
+      effort: medium
+    output:
+      memory_tags: ["daily-brief", "github"]
+      slack:
+        success: ["#chitta-dev"]
+        failure: ["#chitta-alerts"]
+    conditions:
+      skip_if_running: true
+      cost_ceiling_usd: 1.0
+
+  # Nightly arxiv watch → chitta + Slack if hits
+  - id: arxiv-watch
+    description: "Watch arxiv for ancient metagenomics / microbial paleogenomics"
+    enabled: true
+    schedule:
+      cron: "0 23 * * *"
+      timezone: Europe/Copenhagen
+      catchup: false
+    executor:
+      type: codex
+      prompt: |
+        Search arxiv for papers published in the last 24 hours on:
+        - ancient metagenomics
+        - microbial paleogenomics
+        - ancient DNA microbiome
+        - sedaDNA microbial communities
+        For each hit: title, authors, abstract first sentence, arxiv ID.
+        Output as JSON: {"hits": N, "papers": [...]}
+        If no hits, output: {"hits": 0, "papers": []}
+      timeout_seconds: 600
+      effort: medium
+    output:
+      memory_tags: ["arxiv", "literature"]
+      slack:
+        failure: ["#chitta-alerts"]
+    conditions:
+      cost_ceiling_usd: 0.5
+    on_result:
+      - when: "metrics.get('hits', 0) > 0 or 'hits' in summary"
+        trigger: arxiv-notify
+        with_data: {}
+
+  # Notify on arxiv hits (chained from arxiv-watch)
+  - id: arxiv-notify
+    description: "Slack notification when arxiv watch finds new papers"
+    enabled: true
+    schedule:
+      cron: "0 4 1 1 *"   # effectively never fires on schedule; only via chain
+      catchup: false
+    executor:
+      type: claude
+      prompt: "Summarise the arxiv findings from today's watch in 3-5 bullets for Slack."
+      timeout_seconds: 120
+    output:
+      slack:
+        success: ["#chitta-dev"]
+
+  # Nightly code audit
+  - id: nightly-audit
+    description: "Flag risky commits: TODOs, debug prints, missing tests"
+    enabled: true
+    schedule:
+      cron: "0 22 * * *"
+      timezone: Europe/Copenhagen
+      catchup: false
+    executor:
+      type: codex
+      prompt: |
+        Look at today's commits across my repos.
+        Flag anything risky:
+        - TODO / FIXME left in shipped code
+        - debug prints (console.log, print(), eprintln!, tracing::debug in hot paths)
+        - functions over 100 lines added today
+        - changed files with no test coverage
+        Summarise as a short list. If nothing risky, say "clean".
+      cwd: /maps/projects/fernandezguerra/apps/repos
+      timeout_seconds: 900
+      effort: medium
+    output:
+      memory_tags: ["audit", "code-quality"]
+      slack:
+        success: ["#chitta-dev"]
+        failure: ["#chitta-alerts"]
+    conditions:
+      cost_ceiling_usd: 1.0
