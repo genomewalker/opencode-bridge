@@ -12421,6 +12421,12 @@ async def _run_http_mode(mcp_port: int = 7681, dashboard_port: int = 7680) -> No
     init_options = _make_init_options()
     sse_transport = SseServerTransport("/messages/")
 
+    # Streamable HTTP transport (MCP ≥ 1.0 preferred transport — Codex uses this)
+    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+    session_manager = StreamableHTTPSessionManager(
+        app=server, stateless=True, json_response=False,
+    )
+
     async def handle_sse(request):
         if not _auth_ok(request):
             return PlainTextResponse("Unauthorized", status_code=401)
@@ -12430,10 +12436,24 @@ async def _run_http_mode(mcp_port: int = 7681, dashboard_port: int = 7680) -> No
             await server.run(read_stream, write_stream, init_options)
         return Response()
 
-    starlette_app = Starlette(routes=[
-        Route("/sse", endpoint=handle_sse),
-        Mount("/messages/", app=sse_transport.handle_post_message),
-    ])
+    async def handle_mcp(request):
+        if not _auth_ok(request):
+            return PlainTextResponse("Unauthorized", status_code=401)
+        await session_manager.handle_request(request.scope, request.receive, request._send)
+        return Response()
+
+    async def lifespan(app):
+        async with session_manager.run():
+            yield
+
+    starlette_app = Starlette(
+        routes=[
+            Route("/sse", endpoint=handle_sse),
+            Route("/mcp", endpoint=handle_mcp, methods=["GET", "POST", "DELETE"]),
+            Mount("/messages/", app=sse_transport.handle_post_message),
+        ],
+        lifespan=lifespan,
+    )
 
     # Evict stale bridge on MCP port if needed
     import socket
