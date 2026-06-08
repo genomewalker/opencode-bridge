@@ -12144,6 +12144,7 @@ async def _start_dashboard(port: int = 7680) -> None:
         parts = [
             {"name": p.get("name", ""), "backend": p.get("backend", ""),
              "model": p.get("model", ""), "effort": p.get("effort", "")}
+            if isinstance(p, dict) else {"name": str(p), "backend": "", "model": "", "effort": ""}
             for p in (room.get("participants") or [])
         ]
         return {
