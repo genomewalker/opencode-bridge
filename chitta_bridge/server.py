@@ -7039,6 +7039,14 @@ class RoomManager:
             if soul.response_format:
                 sys_parts.append(f"\n## Response Format\n{soul.response_format}")
 
+            # Output discipline — applies to all room participants regardless of soul
+            sys_parts.append(
+                "\n## Output discipline\n"
+                "Be concise — output tokens are expensive and uncacheable at API rates. "
+                "Cite file:line instead of quoting code. One claim per sentence. "
+                "No preamble, no recap of prior messages."
+            )
+
             # Challenge bias instruction
             if soul.challenge_bias > 0.6:
                 sys_parts.append(
@@ -7055,7 +7063,11 @@ class RoomManager:
                 f"You are **{name}**, a specialist participant in a multi-agent discussion. "
                 f"Contribute your distinct expertise to the topic. Be analytical, specific, "
                 f"and direct. React to other participants' arguments — challenge, extend, or "
-                f"correct them as warranted."
+                f"correct them as warranted.\n\n"
+                f"## Output discipline\n"
+                f"Be concise — output tokens are expensive and uncacheable. "
+                f"Cite file:line instead of quoting code blocks. One claim per sentence. "
+                f"No preamble, no recap of what others said."
             )
 
         # Inject epistemic role text (re-prepended every turn so it doesn't decay)
