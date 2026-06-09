@@ -6517,6 +6517,8 @@ class DiscussionRoom:
     retry_counts: dict = field(default_factory=dict)  # {participant_name: int} cumulative failures across all rounds
     clean: bool = False          # inject-only mode: participants see only TOPIC/CONTEXT/MODERATOR/SUMMARY
     verbatim_rounds: int = 2     # keep last N rounds verbatim; compress older to SUMMARY (0 = disable)
+    max_total_rounds: int = 6    # hard cap — run_rounds refuses past this; call room_fork to continue
+    forked_from: str = ""        # parent room_id if this room was forked
     schema_version: int = PERSISTED_SCHEMA_VERSION
 
     def save(self, path: Path):
@@ -6660,6 +6662,55 @@ class RoomManager:
         room.messages.insert(insert_at, summary_msg)
         self._save_room(room.id)
 
+    async def _summarize_room(self, room: "DiscussionRoom") -> str:
+        """Summarize an entire room transcript into a compact context block via haiku."""
+        transcript = self._build_annotated_transcript(room)
+        if not transcript.strip():
+            return f"[Previous room '{room.id}': no discussion recorded]"
+        prompt = (
+            f"Summarize this multi-agent discussion transcript into 5-8 bullet points. "
+            f"Capture: key claims, decisions reached, unresolved disagreements, and any artefacts produced. "
+            f"Be terse — this will seed a continuation room.\n\nTopic: {room.topic}\n\n{transcript[:6000]}"
+        )
+        try:
+            summary = await self._run_claude_p(prompt, model="claude-haiku-4-5-20251001", timeout=60)
+            if summary.startswith("[error:"):
+                return f"[Previous room '{room.id}' — summary unavailable]\nTopic: {room.topic}"
+            return f"[Summary of previous discussion: {room.id}]\nTopic: {room.topic}\n\n{summary}"
+        except Exception:
+            return f"[Previous room '{room.id}' — summary unavailable]\nTopic: {room.topic}"
+
+    async def fork(self, old_room_id: str, new_room_id: str,
+                   topic: Optional[str] = None,
+                   participants: Optional[list] = None,
+                   clean: bool = True,
+                   verbatim_rounds: int = 2) -> str:
+        """Create a new room seeded with a summary of an existing room. Rooms are single-use."""
+        if old_room_id not in self.rooms:
+            self._try_load_room(old_room_id)
+        old_room = self.rooms.get(old_room_id)
+        if new_room_id in self.rooms:
+            return f"Room '{new_room_id}' already exists — choose a different ID."
+        summary = await self._summarize_room(old_room) if old_room else f"[Previous room: {old_room_id}]"
+        fork_topic = topic or (old_room.topic if old_room else new_room_id)
+        fork_participants = participants or (old_room.participants if old_room else [])
+        fork_files = old_room.files if old_room else []
+        fork_roles = old_room.roles if old_room else {}
+        new_room = DiscussionRoom(
+            id=new_room_id, topic=fork_topic, participants=fork_participants,
+            files=fork_files, roles=fork_roles, clean=clean, verbatim_rounds=verbatim_rounds,
+            forked_from=old_room_id,
+        )
+        new_room.messages.append({"name": "TOPIC", "content": fork_topic, "ts": datetime.now().isoformat()})
+        new_room.messages.append({"name": "CONTEXT", "content": summary, "ts": datetime.now().isoformat()})
+        self.rooms[new_room_id] = new_room
+        self._save_room(new_room_id)
+        names = ", ".join(p["name"] for p in fork_participants)
+        return (
+            f"Room '{new_room_id}' forked from '{old_room_id}' with {len(fork_participants)} participants: {names}. "
+            f"Context seeded with summary of previous discussion."
+        )
+
     async def create(self, room_id: str, topic: str, participants: list[dict],
                      files: Optional[list[str]] = None,
                      roles: Optional[dict] = None,
@@ -6667,7 +6718,13 @@ class RoomManager:
                      verbatim_rounds: int = 2) -> str:
         _sanitize_session_id(room_id)
         if room_id in self.rooms:
-            return f"Room '{room_id}' already exists."
+            # Auto-fork: summarize old room, create new room with UUID suffix
+            new_id = f"{room_id}-{uuid.uuid4().hex[:6]}"
+            fork_result = await self.fork(
+                old_room_id=room_id, new_room_id=new_id,
+                topic=topic, participants=participants, clean=clean, verbatim_rounds=verbatim_rounds,
+            )
+            return f"⚠ Room '{room_id}' exists — auto-forked to '{new_id}'.\n{fork_result}"
         if roles:
             valid = set(ROLE_PROMPTS)
             for pname, role in roles.items():
@@ -8822,6 +8879,18 @@ class RoomManager:
 
         async with self._room_lock(room_id):
             room = self.rooms[room_id]
+
+            # Hard cap — rooms are single-use; fork to continue
+            if room.max_total_rounds > 0:
+                max_committed = max(room.turn_counts.values(), default=0)
+                if max_committed >= room.max_total_rounds:
+                    suggested = f"{room_id}-cont"
+                    return (
+                        f"Room '{room_id}' has reached its round limit ({room.max_total_rounds} rounds). "
+                        f"Rooms are single-use — call room_fork to continue in a fresh room seeded with a summary.\n"
+                        f"Suggested: room_fork(room_id='{room_id}', new_room_id='{suggested}')"
+                    )
+
             room.challenge_mode = challenge
             start_msg_count = len(room.messages)
 
@@ -8995,7 +9064,7 @@ HIDDEN_TOOLS = {
     "multi_consult", "agent_chain", "delegate_codex", "parallel_agents",
     # Rooms (multi-agent discussion)
     "room_create", "room_run", "room_synthesize", "room_read", "room_challenge", "room_cost",
-    "room_inject",
+    "room_inject", "room_fork",
     "scheduler_list", "scheduler_run_now", "scheduler_pause", "scheduler_resume", "scheduler_history",
     "room_status", "room_suggest_participants",
     # Status/health
@@ -9741,6 +9810,24 @@ async def list_tools():
                     "room_id": {"type": "string", "description": "Room ID"}
                 },
                 "required": ["room_id"]
+            }
+        ),
+        Tool(
+            name="room_fork",
+            description=(
+                "Fork a completed room into a new room seeded with a haiku-generated summary of the previous discussion. "
+                "Rooms are single-use — use room_fork to continue a discussion without accumulating transcript cost. "
+                "The new room starts clean with only the summary as context."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "room_id": {"type": "string", "description": "ID of the room to fork from"},
+                    "new_room_id": {"type": "string", "description": "ID for the new room"},
+                    "topic": {"type": "string", "description": "New topic (defaults to same as original)"},
+                    "participants": {"type": "string", "description": "JSON array of participants (defaults to same as original)"},
+                },
+                "required": ["room_id", "new_room_id"]
             }
         ),
         Tool(
@@ -10788,6 +10875,22 @@ async def call_tool(name: str, arguments: dict):
                 sparse_topology=arguments.get("sparse_topology", False),
                 stop_early=arguments.get("stop_early", False),
             )
+        elif name == "room_fork":
+            old_id = arguments.get("room_id", "")
+            new_id = arguments.get("new_room_id", "")
+            if not old_id or not new_id:
+                result = "Error: room_id and new_room_id are required"
+            else:
+                if old_id not in rooms.rooms:
+                    rooms._try_load_room(old_id)
+                topic_arg = arguments.get("topic")
+                parts_arg = arguments.get("participants")
+                if isinstance(parts_arg, str):
+                    parts_arg = json.loads(parts_arg) if parts_arg else None
+                result = await rooms.fork(
+                    old_room_id=old_id, new_room_id=new_id,
+                    topic=topic_arg, participants=parts_arg,
+                )
         elif name == "room_inject":
             rid = arguments.get("room_id", "")
             if rid not in rooms.rooms:
