@@ -8952,6 +8952,21 @@ class RoomManager:
                 if not active:
                     break
 
+                # Per-round hard cap check (catches multi-round calls that straddle the limit)
+                if room.max_total_rounds > 0:
+                    if max(room.turn_counts.values(), default=0) >= room.max_total_rounds:
+                        suggested = f"{room_id}-cont"
+                        room.messages.append({
+                            "name": "MODERATOR",
+                            "content": (
+                                f"[Round limit reached: {room.max_total_rounds}] "
+                                f"Call room_fork(room_id='{room_id}', new_room_id='{suggested}') to continue."
+                            ),
+                            "ts": datetime.now().isoformat(),
+                        })
+                        self._save_room(room_id)
+                        break
+
                 is_blind = sparse_topology or (blind_first_round and loop_idx == 0)
                 coros = [self._participant_respond(room, p, round_num=round_num, blind=is_blind)
                          for p in active]
