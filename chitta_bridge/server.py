@@ -6515,6 +6515,8 @@ class DiscussionRoom:
     open_questions: list = field(default_factory=list)
     roles: dict = field(default_factory=dict)  # {participant_name: role_key}
     retry_counts: dict = field(default_factory=dict)  # {participant_name: int} cumulative failures across all rounds
+    clean: bool = False          # inject-only mode: participants see only TOPIC/CONTEXT/MODERATOR/SUMMARY
+    verbatim_rounds: int = 2     # keep last N rounds verbatim; compress older to SUMMARY (0 = disable)
     schema_version: int = PERSISTED_SCHEMA_VERSION
 
     def save(self, path: Path):
@@ -6616,9 +6618,53 @@ class RoomManager:
         except Exception as e:
             print(f"Warning: failed to persist room {room_id}: {e}", file=sys.stderr)
 
+    async def _compress_round(self, room: "DiscussionRoom", round_num: int) -> None:
+        """Replace one completed round's messages with a haiku-generated SUMMARY."""
+        prefix = f"r{round_num}:"
+        target_idxs = [
+            i for i, m in enumerate(room.messages)
+            if m.get("turn_key", "").startswith(prefix)
+        ]
+        if not target_idxs:
+            return
+        if any(m.get("name") == "SUMMARY" and m.get("round") == round_num
+               for m in room.messages):
+            return  # already compressed
+        msgs_to_compress = [room.messages[i] for i in target_idxs]
+        snippet = "\n\n".join(
+            f"**{m['name']}:** {m['content'][:800]}" for m in msgs_to_compress
+        )
+        prompt = (
+            f"Summarise this discussion round in 3-5 bullet points. "
+            f"Focus on key claims, disagreements, and any concrete decisions or artefacts. "
+            f"Be terse — this summary replaces the full round in future context.\n\n"
+            f"Round {round_num}:\n{snippet}"
+        )
+        try:
+            summary_text = await self._run_claude_p(
+                prompt, model="claude-haiku-4-5-20251001", timeout=60
+            )
+        except Exception:
+            return  # compression failure is non-fatal
+        if summary_text.startswith("[error:"):
+            return
+        summary_msg = {
+            "name": "SUMMARY",
+            "content": f"**Round {round_num} summary:**\n{summary_text}",
+            "ts": datetime.now().isoformat(),
+            "round": round_num,
+        }
+        for i in sorted(target_idxs, reverse=True):
+            del room.messages[i]
+        insert_at = target_idxs[0]
+        room.messages.insert(insert_at, summary_msg)
+        self._save_room(room.id)
+
     async def create(self, room_id: str, topic: str, participants: list[dict],
                      files: Optional[list[str]] = None,
-                     roles: Optional[dict] = None) -> str:
+                     roles: Optional[dict] = None,
+                     clean: bool = False,
+                     verbatim_rounds: int = 2) -> str:
         _sanitize_session_id(room_id)
         if room_id in self.rooms:
             return f"Room '{room_id}' already exists."
@@ -6629,7 +6675,7 @@ class RoomManager:
                     return f"Invalid role '{role}' for '{pname}'. Valid: {sorted(valid)}"
         expanded = _expand_paths(files or [])
         room = DiscussionRoom(id=room_id, topic=topic, participants=participants, files=expanded,
-                              roles=roles or {})
+                              roles=roles or {}, clean=clean, verbatim_rounds=verbatim_rounds)
         room.messages.append({"name": "TOPIC", "content": topic, "ts": datetime.now().isoformat()})
         # Inject soul context if chittad is running (filter code symbols)
         if SoulClient.is_available():
@@ -6961,9 +7007,15 @@ class RoomManager:
 
         # -- Build discussion transcript --
         # SYSTEM_NAMES: messages that are always visible regardless of blind mode
-        _system_names = {"TOPIC", "CONTEXT", "MODERATOR"}
+        _system_names = {"TOPIC", "CONTEXT", "MODERATOR", "SUMMARY"}
+        # Clean rooms: participants see only injected context, not accumulated history
+        _vis_names = {"TOPIC", "CONTEXT", "MODERATOR", "SUMMARY"}
+        visible_msgs = (
+            [m for m in room.messages if m["name"] in _vis_names]
+            if room.clean else room.messages
+        )
         transcript_parts = []
-        for msg in room.messages:
+        for msg in visible_msgs:
             if msg["name"] == "TOPIC":
                 continue
             if blind and msg["name"] not in _system_names:
@@ -7040,11 +7092,13 @@ class RoomManager:
                 sys_parts.append(f"\n## Response Format\n{soul.response_format}")
 
             # Output discipline — applies to all room participants regardless of soul
+            _m_disc = (participant.get("model") or "").lower()
+            _wlim = 300 if "haiku" in _m_disc else (700 if "opus" in _m_disc else 500)
             sys_parts.append(
                 "\n## Output discipline\n"
                 "Be concise — output tokens are expensive and uncacheable at API rates. "
                 "Cite file:line instead of quoting code. One claim per sentence. "
-                "No preamble, no recap of prior messages."
+                f"No preamble, no recap of prior messages. Keep your response under {_wlim} words."
             )
 
             # Challenge bias instruction
@@ -7059,6 +7113,8 @@ class RoomManager:
 
             system_prompt = "\n".join(sys_parts)
         else:
+            _m_disc2 = (participant.get("model") or "").lower()
+            _wlim2 = 300 if "haiku" in _m_disc2 else (700 if "opus" in _m_disc2 else 500)
             system_prompt = (
                 f"You are **{name}**, a specialist participant in a multi-agent discussion. "
                 f"Contribute your distinct expertise to the topic. Be analytical, specific, "
@@ -7067,7 +7123,7 @@ class RoomManager:
                 f"## Output discipline\n"
                 f"Be concise — output tokens are expensive and uncacheable. "
                 f"Cite file:line instead of quoting code blocks. One claim per sentence. "
-                f"No preamble, no recap of what others said."
+                f"No preamble, no recap of what others said. Keep your response under {_wlim2} words."
             )
 
         # Inject epistemic role text (re-prepended every turn so it doesn't decay)
@@ -8769,6 +8825,16 @@ class RoomManager:
             room.challenge_mode = challenge
             start_msg_count = len(room.messages)
 
+            # Pre-flight cost estimate
+            _ctx_chars = sum(len(m.get("content", "")) for m in room.messages)
+            _ctx_tok = _ctx_chars // 4
+            _rate_cr = 0.30  # $/MTok sonnet cache_read — conservative lower bound
+            _est = _ctx_tok * _rate_cr / 1_000_000 * len(room.participants) * rounds
+            _est_line = (
+                f"⚡ Est. ≥${_est:.3f} "
+                f"({rounds}r × {len(room.participants)} participants, ~{_ctx_tok // 1000}k ctx tokens)"
+            )
+
             # Start from the next uncommitted round so follow-up runs don't collide
             # with already-committed turn_keys (r1:name, r2:name, etc.)
             existing_round_nums: set[int] = set()
@@ -8867,6 +8933,12 @@ class RoomManager:
 
                 self._save_room(room_id)
 
+                # Compress rounds that have aged out of the verbatim window
+                if room.verbatim_rounds > 0:
+                    compress_target = round_num - room.verbatim_rounds
+                    if compress_target >= 1:
+                        await self._compress_round(room, compress_target)
+
                 # Stop-early: halt when ledger stops moving and no disagreement.
                 # Only substantive (non-poison) responses count toward convergence.
                 if good_responses:
@@ -8883,7 +8955,7 @@ class RoomManager:
         # Return only the new messages from this run (not the full transcript)
         room = self.rooms[room_id]
         new_msgs = room.messages[start_msg_count:]
-        lines = [f"# Room: {room_id} — new messages ({len(new_msgs)} total)", ""]
+        lines = [_est_line, "", f"# Room: {room_id} — new messages ({len(new_msgs)} total)", ""]
         for msg in new_msgs:
             ts = msg["ts"][11:19]
             lines.append(f"**[{ts}] {msg['name']}:**")
@@ -8923,6 +8995,7 @@ HIDDEN_TOOLS = {
     "multi_consult", "agent_chain", "delegate_codex", "parallel_agents",
     # Rooms (multi-agent discussion)
     "room_create", "room_run", "room_synthesize", "room_read", "room_challenge", "room_cost",
+    "room_inject",
     "scheduler_list", "scheduler_run_now", "scheduler_pause", "scheduler_resume", "scheduler_history",
     "room_status", "room_suggest_participants",
     # Status/health
@@ -9574,6 +9647,14 @@ async def list_tools():
                     "roles": {
                         "type": "string",
                         "description": 'JSON object mapping participant name → epistemic role. Valid roles: "skeptic", "empiricist", "advocate", "devils_advocate". E.g. {"Claude-A": "skeptic", "Claude-B": "devils_advocate"}. Role text is injected into every turn prompt so it persists across rounds.'
+                    },
+                    "clean": {
+                        "type": "boolean",
+                        "description": "Clean room: participants only see injected CONTEXT/MODERATOR messages, not each other's accumulated history. Use for doc review, independent evaluation, or any task where you want explicit context injection rather than accumulated transcript. (default: false)"
+                    },
+                    "verbatim_rounds": {
+                        "type": "integer",
+                        "description": "Keep last N rounds verbatim; compress older rounds to haiku-generated summaries to bound context growth. Default: 2. Set 0 to disable compression (old behaviour)."
                     }
                 },
                 "required": ["room_id", "topic", "participants"]
@@ -9660,6 +9741,31 @@ async def list_tools():
                     "room_id": {"type": "string", "description": "Room ID"}
                 },
                 "required": ["room_id"]
+            }
+        ),
+        Tool(
+            name="room_inject",
+            description=(
+                "Inject explicit context into a room as CONTEXT messages. "
+                "Use before room_run to add files, text, or memories without relying on the accumulated transcript. "
+                "Essential for clean rooms (clean=true). Also useful to refresh context mid-discussion."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "room_id": {"type": "string", "description": "Room ID to inject into"},
+                    "items": {
+                        "type": "array",
+                        "description": (
+                            'List of context items to inject. Each item: '
+                            '{"type": "file", "path": "/abs/path", "label": "optional label"} — reads file, truncates to 8k chars; '
+                            '{"type": "text", "content": "...", "label": "label"} — injects text directly; '
+                            '{"type": "memory", "query": "search query", "limit": 5} — recalls from chitta memory.'
+                        ),
+                        "items": {"type": "object"}
+                    }
+                },
+                "required": ["room_id", "items"]
             }
         ),
         # Local model tools (Ollama / vLLM on GPU nodes)
@@ -10621,6 +10727,8 @@ async def call_tool(name: str, arguments: dict):
                     participants=participants,
                     files=files_arg,
                     roles=roles_arg,
+                    clean=bool(arguments.get("clean", False)),
+                    verbatim_rounds=int(arguments.get("verbatim_rounds", 2)),
                 )
         elif name == "room_add_participant":
             p = arguments.get("participant")
@@ -10680,6 +10788,48 @@ async def call_tool(name: str, arguments: dict):
                 sparse_topology=arguments.get("sparse_topology", False),
                 stop_early=arguments.get("stop_early", False),
             )
+        elif name == "room_inject":
+            rid = arguments.get("room_id", "")
+            if rid not in rooms.rooms:
+                rooms._try_load_room(rid)
+            if rid not in rooms.rooms:
+                result = f"Room '{rid}' not found."
+            else:
+                room_obj = rooms.rooms[rid]
+                items = arguments.get("items", [])
+                if isinstance(items, str):
+                    items = json.loads(items)
+                injected = 0
+                total_chars = 0
+                for item in items:
+                    itype = item.get("type", "text")
+                    label = item.get("label", itype)
+                    if itype == "file":
+                        path = item.get("path", "")
+                        try:
+                            content = Path(path).read_text(errors="replace")[:8192]
+                            msg_content = f"[{label}: {path}]\n{content}"
+                        except Exception as e:
+                            msg_content = f"[{label}: {path} — read error: {e}]"
+                    elif itype == "memory":
+                        if SoulClient.is_available():
+                            query = item.get("query", "")
+                            limit = int(item.get("limit", 5))
+                            recalled = SoulClient.hybrid_recall(query, limit=limit)
+                            msg_content = f"[Memory: {query}]\n{recalled or '(no results)'}"
+                        else:
+                            msg_content = "[Memory: chitta not available]"
+                    else:
+                        msg_content = f"[{label}]\n{item.get('content', '')}"
+                    room_obj.messages.append({
+                        "name": "CONTEXT",
+                        "content": msg_content,
+                        "ts": datetime.now().isoformat(),
+                    })
+                    injected += 1
+                    total_chars += len(msg_content)
+                rooms._save_room(rid)
+                result = f"Injected {injected} context item(s) into '{rid}' ({total_chars:,} chars total)."
         elif name == "room_read":
             result = rooms.read(room_id=arguments.get("room_id", ""), last_n=arguments.get("last_n"))
         elif name == "room_status":
