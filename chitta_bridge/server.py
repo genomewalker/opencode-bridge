@@ -6747,7 +6747,7 @@ class RoomManager:
         # Inject soul context if chittad is running (filter code symbols)
         if SoulClient.is_available():
             ctx = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: SoulClient.hybrid_recall(topic, limit=5)
+                None, lambda: SoulClient.hybrid_recall(topic, limit=3)
             )
             if ctx and len(ctx.strip()) > 20:
                 code_markers = ["[code]", "[symbol]", "function ", "class ", "method "]
@@ -7090,23 +7090,27 @@ class RoomManager:
             transcript_parts.append(f"**{msg['name']}:** {msg['content']}")
             transcript_parts.append("")
         transcript = "\n".join(transcript_parts)
+        # Hard cap: keep only the tail if transcript is too large
+        # Summaries + MODERATOR are cheap; verbatim participant messages are the bulk
+        _TRANSCRIPT_CHAR_CAP = 60_000
+        if len(transcript) > _TRANSCRIPT_CHAR_CAP:
+            transcript = "[...earlier content omitted — see SUMMARY blocks above...]\n\n" + transcript[-_TRANSCRIPT_CHAR_CAP:]
 
         # -- System prompt (the soul) --
         if soul and soul.system_prompt:
             sys_parts = [soul.system_prompt]
 
-            # Load relevant memories from the agent's realm
-            if soul.realm and SoulClient.is_available():
-                memories = SoulClient.hybrid_recall(room.topic, limit=5, realm=soul.realm)
+            # Load relevant memories — limit=2 each to bound cache_write cost per round
+            # Skip recall entirely in clean rooms (context is explicitly injected)
+            if soul.realm and SoulClient.is_available() and not room.clean:
+                memories = SoulClient.hybrid_recall(room.topic, limit=2, realm=soul.realm)
                 if memories and len(memories.strip()) > 20:
-                    sys_parts.append(f"\n## Your Memories\n{memories}")
-                # Also check global memories — but filter to non-code types only
-                global_mem = SoulClient.hybrid_recall(room.topic, limit=3)
+                    sys_parts.append(f"\n## Your Memories\n{memories[:600]}")
+                global_mem = SoulClient.hybrid_recall(room.topic, limit=2)
                 if global_mem and len(global_mem.strip()) > 20:
-                    # Skip if it's mostly code symbols (not useful for discussions)
                     code_markers = ["[code]", "[symbol]", "function ", "class ", "method "]
                     if not any(m in global_mem[:200] for m in code_markers):
-                        sys_parts.append(f"\n## Shared Knowledge\n{global_mem}")
+                        sys_parts.append(f"\n## Shared Knowledge\n{global_mem[:600]}")
 
             # Tool instructions (XML fallback — always included for models that
             # don't support native tool calling)
