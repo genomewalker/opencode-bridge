@@ -6643,9 +6643,7 @@ class RoomManager:
             f"Round {round_num}:\n{snippet}"
         )
         try:
-            summary_text = await self._run_claude_p(
-                prompt, model="claude-haiku-4-5-20251001", timeout=60
-            )
+            summary_text = await self._cheap_llm_call(prompt, timeout=60)
         except Exception:
             return  # compression failure is non-fatal
         if summary_text.startswith("[error:"):
@@ -6662,8 +6660,20 @@ class RoomManager:
         room.messages.insert(insert_at, summary_msg)
         self._save_room(room.id)
 
+    async def _cheap_llm_call(self, prompt: str, timeout: int = 60) -> str:
+        """Run a cheap summarisation call — codex preferred (not API-billed), haiku fallback."""
+        try:
+            result = await codex_bridge.run_task(
+                prompt, model="gpt-4.1-mini", effort="low", timeout=timeout
+            )
+            if result and not result.startswith("[error:"):
+                return result
+        except Exception:
+            pass
+        return await self._run_claude_p(prompt, model="claude-haiku-4-5-20251001", timeout=timeout)
+
     async def _summarize_room(self, room: "DiscussionRoom") -> str:
-        """Summarize an entire room transcript into a compact context block via haiku."""
+        """Summarize an entire room transcript into a compact context block."""
         transcript = self._build_annotated_transcript(room)
         if not transcript.strip():
             return f"[Previous room '{room.id}': no discussion recorded]"
@@ -6673,7 +6683,7 @@ class RoomManager:
             f"Be terse — this will seed a continuation room.\n\nTopic: {room.topic}\n\n{transcript[:6000]}"
         )
         try:
-            summary = await self._run_claude_p(prompt, model="claude-haiku-4-5-20251001", timeout=60)
+            summary = await self._cheap_llm_call(prompt, timeout=60)
             if summary.startswith("[error:"):
                 return f"[Previous room '{room.id}' — summary unavailable]\nTopic: {room.topic}"
             return f"[Summary of previous discussion: {room.id}]\nTopic: {room.topic}\n\n{summary}"
@@ -11056,30 +11066,58 @@ async def call_tool(name: str, arguments: dict):
             result = "\n".join(lines)
         elif name == "room_cost":
             rid = arguments.get("room_id", "")
-            cost_path = rooms.rooms_dir / f"{rid}.costs.jsonl"
-            if not cost_path.exists():
-                result = f"No cost data for room '{rid}' (no claude: participants or room not found)."
-            else:
-                import json as _j
-                records = [_j.loads(l) for l in cost_path.read_text().splitlines() if l.strip()]
-                total_in = sum(r.get("in_tok", 0) for r in records)
+            import json as _j
+
+            def _summarise_cost_records(records: list, header: str) -> str:
+                total_in  = sum(r.get("in_tok", 0) for r in records)
                 total_out = sum(r.get("out_tok", 0) for r in records)
+                total_cw  = sum(r.get("cache_write_tok", 0) for r in records)
+                total_cr  = sum(r.get("cache_read_tok", 0) for r in records)
                 total_usd = sum(r.get("est_usd", 0.0) for r in records)
-                lines = [f"# Room cost: {rid}\n"]
+                lines = [header]
                 by_participant: dict = {}
                 for r in records:
-                    p = r["participant"]
-                    by_participant.setdefault(p, {"in": 0, "out": 0, "usd": 0.0, "rounds": 0})
-                    by_participant[p]["in"]  += r.get("in_tok", 0)
-                    by_participant[p]["out"] += r.get("out_tok", 0)
-                    by_participant[p]["usd"] += r.get("est_usd", 0.0)
+                    p = r.get("participant", "?")
+                    by_participant.setdefault(p, {"in": 0, "out": 0, "cw": 0, "cr": 0, "usd": 0.0, "rounds": 0})
+                    by_participant[p]["in"]     += r.get("in_tok", 0)
+                    by_participant[p]["out"]    += r.get("out_tok", 0)
+                    by_participant[p]["cw"]     += r.get("cache_write_tok", 0)
+                    by_participant[p]["cr"]     += r.get("cache_read_tok", 0)
+                    by_participant[p]["usd"]    += r.get("est_usd", 0.0)
                     by_participant[p]["rounds"] += 1
-                for p, s in by_participant.items():
-                    lines.append(f"**{p}** — {s['rounds']} round(s)")
-                    lines.append(f"  in: {s['in']:,} tok · out: {s['out']:,} tok · est ${s['usd']:.4f}")
-                lines.append(f"\n**Total** — in: {total_in:,} · out: {total_out:,} · est **${total_usd:.4f}**")
-                lines.append(f"\n_$200/mo Agent SDK credit on Max 20x — {total_usd/200*100:.1f}% used by this room_")
-                result = "\n".join(lines)
+                for p, s in sorted(by_participant.items(), key=lambda x: -x[1]["usd"]):
+                    lines.append(f"  **{p}** — {s['rounds']} turns  in {s['in']:,} · out {s['out']:,} · cw {s['cw']:,} · cr {s['cr']:,} · **${s['usd']:.4f}**")
+                lines.append(f"\n  **Total** — in {total_in:,} · out {total_out:,} · cw {total_cw:,} · cr {total_cr:,} · **${total_usd:.4f}**")
+                lines.append(f"  _$200/mo Agent SDK credit — {total_usd / 200 * 100:.2f}% used_")
+                return "\n".join(lines)
+
+            if rid:
+                cost_path = rooms.rooms_dir / f"{rid}.costs.jsonl"
+                if not cost_path.exists():
+                    result = f"No cost data for room '{rid}' (no claude: participants or room not found)."
+                else:
+                    records = [_j.loads(l) for l in cost_path.read_text().splitlines() if l.strip()]
+                    result = _summarise_cost_records(records, f"# Room cost: {rid}\n")
+            else:
+                # All rooms summary
+                all_files = sorted(rooms.rooms_dir.glob("*.costs.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
+                if not all_files:
+                    result = "No room cost data found."
+                else:
+                    all_records = []
+                    room_lines = ["# All rooms cost summary\n"]
+                    for cf in all_files:
+                        recs = [_j.loads(l) for l in cf.read_text().splitlines() if l.strip()]
+                        if not recs:
+                            continue
+                        room_total = sum(r.get("est_usd", 0.0) for r in recs)
+                        room_rounds = len(set(f"r{r.get('round',0)}:{r.get('participant','')}" for r in recs))
+                        room_lines.append(f"  **{cf.stem}** — {room_rounds} turns  ${room_total:.4f}")
+                        all_records.extend(recs)
+                    grand_total = sum(r.get("est_usd", 0.0) for r in all_records)
+                    room_lines.append(f"\n**Grand total across {len(all_files)} room(s): ${grand_total:.4f}**")
+                    room_lines.append(f"_$200/mo Agent SDK credit — {grand_total / 200 * 100:.2f}% used_")
+                    result = "\n".join(room_lines)
         elif name in ("scheduler_list", "scheduler_run_now", "scheduler_pause",
                        "scheduler_resume", "scheduler_history"):
             # Lazy import so stdio-mode sessions don't pay the import cost
