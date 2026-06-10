@@ -24,7 +24,7 @@ import subprocess
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
@@ -466,15 +466,19 @@ async def _execute_job(cfg: JobConfig, run_id: str,
                 return JobResult(status="failure", summary=str(e))
 
     elif kind == "workflow":
+        # The bridge has no workflow-run API yet: this kind falls back to a
+        # codex_run with the raw prompt. A custom script cannot be honoured —
+        # fail loudly instead of silently dropping it.
+        if ex.script:
+            return JobResult(
+                status="failure",
+                summary="workflow kind cannot run custom scripts yet "
+                        "(bridge has no workflow-run API); remove ex.script "
+                        "or use kind=codex",
+            )
         # Fire-and-forget via bridge HTTP API (avoids circular import)
         http_url = bridge_tools.get("bridge_url", "http://localhost:7681")
         token = bridge_tools.get("bridge_token", "")
-        script = ex.script or f"""
-export const meta = {{name: 'sched-{cfg.id}', description: '{cfg.id}'}}
-phase('Run')
-const result = await agent({json.dumps(ex.prompt)})
-return result
-"""
         import aiohttp as _ah
         async with semaphore:
             try:

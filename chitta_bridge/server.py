@@ -11163,9 +11163,12 @@ async def call_tool(name: str, arguments: dict):
                     data = _json.loads(raw.stdout)
                     for m in data if isinstance(data, list) else data.get("models", []):
                         mid = m if isinstance(m, str) else m.get("id", "")
-                        if "opus" in mid: claude_models["opus"] = mid
-                        elif "sonnet" in mid: claude_models["sonnet"] = mid
-                        elif "haiku" in mid: claude_models["haiku"] = mid
+                        if "opus" in mid:
+                            claude_models["opus"] = mid
+                        elif "sonnet" in mid:
+                            claude_models["sonnet"] = mid
+                        elif "haiku" in mid:
+                            claude_models["haiku"] = mid
             except Exception:
                 pass
             # Fallback: read from CLAUDE.md model table if CLI query failed
@@ -11175,9 +11178,12 @@ async def call_tool(name: str, arguments: dict):
                 if claude_md.exists():
                     text = claude_md.read_text()
                     for mid in _re.findall(r'`(claude-[a-z0-9-]+)`', text):
-                        if "opus" in mid and "opus" not in claude_models: claude_models["opus"] = mid
-                        elif "sonnet" in mid and "sonnet" not in claude_models: claude_models["sonnet"] = mid
-                        elif "haiku" in mid and "haiku" not in claude_models: claude_models["haiku"] = mid
+                        if "opus" in mid and "opus" not in claude_models:
+                            claude_models["opus"] = mid
+                        elif "sonnet" in mid and "sonnet" not in claude_models:
+                            claude_models["sonnet"] = mid
+                        elif "haiku" in mid and "haiku" not in claude_models:
+                            claude_models["haiku"] = mid
             opus = claude_models.get("opus", "claude-opus-4-8")
             sonnet = claude_models.get("sonnet", "claude-sonnet-4-6")
             # Codex: use current configured model
@@ -11225,7 +11231,7 @@ async def call_tool(name: str, arguments: dict):
                 if not cost_path.exists():
                     result = f"No cost data for room '{rid}' (no claude: participants or room not found)."
                 else:
-                    records = [_j.loads(l) for l in cost_path.read_text().splitlines() if l.strip()]
+                    records = [_j.loads(line) for line in cost_path.read_text().splitlines() if line.strip()]
                     result = _summarise_cost_records(records, f"# Room cost: {rid}\n")
             else:
                 # All rooms summary
@@ -11236,7 +11242,7 @@ async def call_tool(name: str, arguments: dict):
                     all_records = []
                     room_lines = ["# All rooms cost summary\n"]
                     for cf in all_files:
-                        recs = [_j.loads(l) for l in cf.read_text().splitlines() if l.strip()]
+                        recs = [_j.loads(line) for line in cf.read_text().splitlines() if line.strip()]
                         if not recs:
                             continue
                         room_total = sum(r.get("est_usd", 0.0) for r in recs)
