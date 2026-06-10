@@ -27,8 +27,8 @@ jobs:
       - name: Install dependencies
         run: uv pip install --system -e ".[dev]"
 
-      - name: Check import
-        run: python -c "from chitta_bridge.server import OpenCodeBridge; print('OK')"
+      - name: Run tests
+        run: pytest tests/ -q
 
   lint:
     runs-on: ubuntu-latest
