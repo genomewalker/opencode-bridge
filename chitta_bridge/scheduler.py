@@ -20,7 +20,6 @@ import logging
 import os
 import random
 import sqlite3
-import subprocess
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -509,14 +508,30 @@ async def _execute_job(cfg: JobConfig, run_id: str,
             script_path = run_dir / "job.sh"
             run_dir.mkdir(parents=True, exist_ok=True)
             script_path.write_text(script_content)
-            result = subprocess.run(
-                ["sbatch"] + sbatch_args + [str(script_path)],
-                capture_output=True, text=True, timeout=30,
+            # Async subprocess — a busy SLURM controller can take seconds to
+            # respond, and this coroutine shares the event loop with MCP SSE,
+            # the dashboard, and the scheduler tick. subprocess.run would stall
+            # all of them. Mirror the _run_subprocess path.
+            proc = await asyncio.create_subprocess_exec(
+                "sbatch", *sbatch_args, str(script_path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
             )
-            if result.returncode != 0:
-                return JobResult(status="failure", summary=result.stderr.strip())
+            try:
+                out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=30)
+            except asyncio.TimeoutError:
+                import signal as _signal
+                try:
+                    os.killpg(os.getpgid(proc.pid), _signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    proc.kill()
+                await proc.wait()
+                return JobResult(status="failure", summary="sbatch timed out after 30s")
+            if proc.returncode != 0:
+                return JobResult(status="failure", summary=err_b.decode(errors="replace").strip())
             # Extract SLURM job id: "Submitted batch job 12345"
-            slurm_jobid = result.stdout.strip().split()[-1]
+            slurm_jobid = out_b.decode(errors="replace").strip().split()[-1]
             # Return a pending result; slurm_reconcile will finish it
             return JobResult(
                 status="slurm_submitted",

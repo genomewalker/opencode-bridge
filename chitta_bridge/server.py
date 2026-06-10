@@ -12842,7 +12842,10 @@ def _evict_port(port: int, *, allow_http: bool = True) -> bool:
     for pid in pids:
         try:
             cmd = open(f"/proc/{pid}/cmdline").read().replace("\x00", " ")
-            if "chitta" not in cmd:
+            # Match this server's own entrypoint, not the bare substring
+            # "chitta" — that would also kill chittad, the chitta CLI, or any
+            # other user tool with "chitta" in its path.
+            if "chitta-bridge" not in cmd and "chitta_bridge" not in cmd:
                 continue
             if allow_http and "--http" in cmd:
                 continue  # never kill the persistent HTTP daemon
@@ -12895,6 +12898,23 @@ def _make_init_options() -> "InitializationOptions":
     )
 
 
+def _write_private(path: Path, text: str) -> None:
+    """Write `text` to `path` with mode 0600 atomically from creation.
+
+    write_text()+chmod() leaves a window where the file is world/group
+    readable under the prevailing umask — on a shared NFS home that exposes
+    the bearer token. O_CREAT|O_EXCL-style creation with mode 0600 closes it.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, text.encode())
+    finally:
+        os.close(fd)
+    # Re-assert mode in case the file pre-existed with looser perms.
+    os.chmod(str(path), 0o600)
+
+
 def _http_token() -> str:
     """Load or create the shared bearer token for HTTP mode."""
     import secrets as _sec
@@ -12906,10 +12926,8 @@ def _http_token() -> str:
         t = token_path.read_text().strip()
         if t:
             return t
-    token_path.parent.mkdir(parents=True, exist_ok=True)
     t = _sec.token_urlsafe(32)
-    token_path.write_text(t)
-    token_path.chmod(0o600)
+    _write_private(token_path, t)
     return t
 
 
@@ -13007,12 +13025,13 @@ async def _run_http_mode(mcp_port: int = 7681, dashboard_port: int = 7680) -> No
             if _evict_port(port):
                 await asyncio.sleep(1.5)
 
-    # Write port file so other tools can discover us (token included for auth)
+    # Write port file so other tools can discover us (token included for auth).
+    # 0600 from creation — it carries the bearer token.
     port_file = Path.home() / ".chitta-bridge" / "http.ports"
-    port_file.write_text(
-        f"mcp={mcp_port}\ndashboard={dashboard_port}\npid={os.getpid()}\ntoken={_token}\n"
+    _write_private(
+        port_file,
+        f"mcp={mcp_port}\ndashboard={dashboard_port}\npid={os.getpid()}\ntoken={_token}\n",
     )
-    port_file.chmod(0o600)
 
     # Start scheduler daemon
     import chitta_bridge.server as _self_mod

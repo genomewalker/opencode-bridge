@@ -240,7 +240,11 @@ def _start_local(args, model: str, port: int, url_file: Path, ollama: str):
     # Start ollama serve in background
     print("# Starting Ollama locally (no SLURM detected)...", file=sys.stderr)
     env = os.environ.copy()
-    env["OLLAMA_HOST"] = f"0.0.0.0:{port}"
+    # Local serve is only ever reached as localhost (url_file=local_url below).
+    # Bind loopback so a login-node serve isn't exposed unauthenticated to every
+    # other user on the host. Set CHITTA_OLLAMA_BIND to override if remote access
+    # is genuinely needed.
+    env["OLLAMA_HOST"] = f"{os.environ.get('CHITTA_OLLAMA_BIND', '127.0.0.1')}:{port}"
     log_path = _log_file(model)
     pid_path = _pid_file(model)
     with open(log_path, "w") as log_fh:
@@ -282,8 +286,15 @@ def _start_slurm(args, model: str, port: int, job_name: str, url_file: Path, oll
     q_ollama = shlex.quote(ollama)
     q_model = shlex.quote(model)
     q_url_file = shlex.quote(str(url_file))
+    # NOTE: ollama has no auth. The compute node must be reachable cross-node
+    # (other nodes connect to http://$(hostname):port), so bind the node's own
+    # routable IP rather than 0.0.0.0 — this limits exposure to the one
+    # interface peers actually use instead of every interface on the host.
+    # On the shared cluster network this endpoint is still reachable by other
+    # users; gate via SLURM allocation / network policy if that matters.
     wrap_script = f"""\
-export OLLAMA_HOST=0.0.0.0:{port}
+BIND_IP=$(hostname -i 2>/dev/null | tr ' ' '\\n' | grep -v '^127\\.' | head -1)
+export OLLAMA_HOST=${{BIND_IP:-0.0.0.0}}:{port}
 export OLLAMA_MODELS=${{OLLAMA_MODELS:-$HOME/.ollama/models}}
 {q_ollama} serve &
 SERVE_PID=$!
