@@ -48,3 +48,59 @@ jobs:
 
       - name: Lint
         run: ruff check chitta_bridge/
+
+  clean-install:
+    # Build the wheel and install it into a FRESH venv with only declared
+    # runtime deps — no dev extras, no editable, no transitive leakage. Catches
+    # undeclared imports (the dependency-declaration bug class) deterministically.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Build wheel
+        run: |
+          uv pip install --system build
+          python -m build --wheel
+
+      - name: Install wheel into clean venv
+        run: |
+          uv venv /tmp/clean
+          uv pip install --python /tmp/clean/bin/python dist/*.whl
+
+      - name: Import every module + runtime dep
+        # Module import covers top-level deps (yaml/croniter/filelock/pydantic);
+        # the explicit list covers function-local imports (--http only) that
+        # module import does not trigger: aiohttp, simpleeval, pytz.
+        run: |
+          /tmp/clean/bin/python -c "
+          import chitta_bridge.server, chitta_bridge.scheduler
+          import chitta_bridge.gpu_serve, chitta_bridge.doctor, chitta_bridge.install
+          import aiohttp, simpleeval, pytz, yaml, croniter, filelock, pydantic
+          print('clean-install OK')
+          "
+
+      - name: Smoke-start --http (must not crash on missing deps)
+        # Start the HTTP daemon in the clean env; it should bind and stay up.
+        # No claude/codex bins are needed for startup (only when a tool runs).
+        run: |
+          export CHITTA_BRIDGE_TOKEN=citoken
+          timeout 12 /tmp/clean/bin/chitta-bridge --http --mcp-port 7681 --dashboard-port 7680 &
+          pid=$!
+          sleep 8
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            -X POST http://127.0.0.1:7681/mcp \
+            -H "Authorization: Bearer citoken" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json, text/event-stream" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"ping"}')
+          kill $pid 2>/dev/null || true
+          test "$code" = "200" || { echo "ping returned $code, expected 200"; exit 1; }
+          echo "--http smoke OK"
