@@ -331,7 +331,10 @@ def _next_due(cfg: ScheduleConfig, after: Optional[float] = None) -> float:
     import pytz
     tz = pytz.timezone(cfg.timezone)
     base = after or time.time()
-    nxt = float(croniter(cfg.cron, base, hash_values=True).get_next())
+    # Evaluate the cron expression in the job's configured timezone, not
+    # the system locale — croniter needs a tz-aware base datetime for that.
+    base_dt = datetime.fromtimestamp(base, tz)
+    nxt = float(croniter(cfg.cron, base_dt, hash_values=True).get_next(float))
     if cfg.jitter_seconds > 0:
         nxt += random.uniform(0, cfg.jitter_seconds)
     return nxt
@@ -389,7 +392,13 @@ async def _run_subprocess(cmd: list[str], cwd: str, prompt: str,
                 proc.communicate(prompt.encode()), timeout=timeout
             )
         except asyncio.TimeoutError:
-            proc.kill()
+            # start_new_session=True puts children in their own process group —
+            # kill the whole group or grandchildren survive as orphans.
+            import signal as _signal
+            try:
+                os.killpg(os.getpgid(proc.pid), _signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                proc.kill()
             await proc.wait()
             return JobResult(status="timeout",
                              summary=f"timed out after {timeout}s")
@@ -571,8 +580,10 @@ class SchedulerService:
             return
 
         self._active = True
-        self._recover_stale_runs()
+        # Load configs before recovery — _recover_stale_runs reads self._configs
+        # to compute next_due for abandoned runs.
         await self._reload_yaml()
+        self._recover_stale_runs()
 
         self._tasks = [
             asyncio.create_task(self._tick_loop(),     name="sched-tick"),
@@ -665,19 +676,28 @@ class SchedulerService:
                     if self.db.create_run(
                         run_id, job_id, cfg.executor.type, scheduled_ts, idem_key
                     ):
-                        await self._enqueue(RunRequest(job_id, scheduled_ts, run_id))
                         # Advance next_due immediately to prevent re-firing
                         nxt = _next_due(cfg.schedule)
                         self.db.upsert_job(job_id, _config_hash(cfg), nxt)
+                        if not await self._enqueue(RunRequest(job_id, scheduled_ts, run_id)):
+                            # Queue full: finalize the run row we just created,
+                            # else it stays 'running' forever and blocks the job.
+                            self.db.finish_run(
+                                run_id, job_id,
+                                JobResult(status="failure", summary="run queue full — dropped"),
+                                nxt,
+                            )
             except Exception as e:
                 log.error("tick_loop error: %s", e)
             await asyncio.sleep(1.0)
 
-    async def _enqueue(self, req: RunRequest) -> None:
+    async def _enqueue(self, req: RunRequest) -> bool:
         try:
             self._run_queue.put_nowait(req)
+            return True
         except asyncio.QueueFull:
             log.warning("scheduler: run queue full, dropping %s", req.job_id)
+            return False
 
     # ── Worker loop ───────────────────────────────────────────────────────────
 

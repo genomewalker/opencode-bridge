@@ -36,7 +36,12 @@ DEFAULT_PARTITION = "compregular"
 DEFAULT_GRES = "gpu:1"
 DEFAULT_MEM = "48G"
 DEFAULT_TIME = "08:00:00"
-URL_FILE_PATTERN = "/tmp/ollama-server-{model}.url"
+# URL files are the cross-node discovery channel — they must live on a shared
+# filesystem (compute node writes, login node reads). /tmp is node-local.
+SHARED_DIR = Path(os.environ.get("CHITTA_GPU_DIR", str(Path.home() / ".chitta-bridge" / "gpu")))
+URL_FILE_PATTERN = str(SHARED_DIR / "ollama-server-{model}.url")
+LOG_FILE_PATTERN_SLURM = str(SHARED_DIR / "ollama-{model}-%j.log")
+# PID/log of a *local* (non-SLURM) serve are node-local by nature.
 PID_FILE_PATTERN = "/tmp/ollama-local-{model}.pid"
 LOG_FILE_PATTERN = "/tmp/ollama-local-{model}.log"
 JOB_NAME_PATTERN = "ollama-{model}"
@@ -58,7 +63,9 @@ def _pid_cmdline(pid: int) -> str:
 
 
 def _url_file(model: str) -> Path:
-    return Path(URL_FILE_PATTERN.format(model=model))
+    p = Path(URL_FILE_PATTERN.format(model=model))
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
 
 
 def _job_name(model: str) -> str:
@@ -106,9 +113,9 @@ def _probe_ollama(base_url: str, timeout: int = 4) -> list[str] | None:
 
 
 def _cached_endpoints() -> list[dict]:
-    """Return endpoints from /tmp/ollama-server-*.url files."""
+    """Return endpoints from ollama-server-*.url files in the shared dir."""
     results = []
-    for path in glob.glob("/tmp/ollama-server-*.url"):
+    for path in glob.glob(str(SHARED_DIR / "ollama-server-*.url")):
         try:
             url = Path(path).read_text().strip()
             if url:
@@ -294,7 +301,7 @@ wait $SERVE_PID
              f"--gres={args.gres}",
              f"--mem={args.mem}",
              f"--time={args.time}",
-             f"--output=/tmp/ollama-{model}-%j.log",
+             f"--output={LOG_FILE_PATTERN_SLURM.format(model=model)}",
              f"--wrap={wrap_script}"],
             timeout=30, text=True, stderr=subprocess.PIPE,
         )

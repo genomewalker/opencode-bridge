@@ -149,6 +149,29 @@ def _reject_sensitive_path(path: Path) -> Optional[str]:
     return None
 
 
+def _blocked_read_path(path: Path) -> Optional[str]:
+    """Return a block message if reading `path` is forbidden, else None.
+
+    Read-side guard for room tools (read_file, pdf_read, doc_read): blocks
+    kernel pseudo-filesystems, shadow files, and credential dotpaths.
+    """
+    str_path = str(path)
+    blocked_prefixes = ("/proc", "/sys", "/dev")
+    blocked_exact = ("/etc/shadow", "/etc/gshadow", "/etc/master.passwd")
+    blocked_dotpaths = (
+        "/.ssh/", "/.gnupg/", "/.aws/", "/.azure/", "/.gcloud/",
+        "/.config/gh/", "/.docker/config.json", "/.kube/config",
+        "/.netrc", "/.env", "/.npmrc",
+    )
+    if any(str_path.startswith(b) for b in blocked_prefixes):
+        return f"(blocked: cannot read {path})"
+    if str_path in blocked_exact:
+        return f"(blocked: cannot read {path})"
+    if any(bp in str_path for bp in blocked_dotpaths):
+        return f"(blocked: sensitive file — {path})"
+    return None
+
+
 # ── Atomic write + per-path locks (concurrent patch/write safety) ──────────────
 
 _path_write_locks: dict[str, _threading.Lock] = {}
@@ -242,9 +265,9 @@ def _atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> Non
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
             | getattr(os, "O_CLOEXEC", 0)
         )
+        data = content.encode(encoding)
         tmp_fd = os.open(tmp_name, file_flags, 0o600, dir_fd=dirfd)
         try:
-            data = content.encode(encoding)
             with os.fdopen(tmp_fd, "wb") as f:
                 f.write(data)
                 f.flush()
@@ -368,6 +391,25 @@ def _scrub_env(env: Optional[dict] = None) -> dict:
     return out
 
 
+_LLM_KEEP_RE = re.compile(
+    r"^(ANTHROPIC_|OPENAI_|OPENROUTER_|GROQ_|GEMINI_|GOOGLE_|MISTRAL_|DEEPSEEK_"
+    r"|XAI_|TOGETHER_|FIREWORKS_|CEREBRAS_|OLLAMA_|CHITTA_)|_API_KEY$"
+)
+
+
+def _llm_env() -> dict:
+    """Env for spawned LLM CLIs (opencode/codex/claude).
+
+    Scrubs unrelated secrets (AWS, GitHub, Slack tokens, ...) but keeps
+    model-provider keys the CLIs need to authenticate.
+    """
+    out = _scrub_env(os.environ)
+    for k, v in os.environ.items():
+        if k not in out and _LLM_KEEP_RE.search(k.upper()):
+            out[k] = v
+    return out
+
+
 # File size thresholds
 SMALL_FILE = 500        # lines
 MEDIUM_FILE = 1500      # lines
@@ -409,6 +451,7 @@ def _append_room_cost(rooms_dir: "Path", room_id: str, participant_name: str,
         "in_tok": in_tok, "out_tok": out_tok,
         "cache_write_tok": cw_tok, "cache_read_tok": cr_tok,
         "est_usd": est_usd,
+        "estimated": bool(usage.get("estimated", False)),
     }
     cost_path = rooms_dir / f"{room_id}.costs.jsonl"
     try:
@@ -697,6 +740,15 @@ def _merge_delta(original_body: str, delta: str) -> str:
                     break
 
         if not post_found:
+            if mi != marker_positions[-1]:
+                # A non-final marker with an unmatchable post-anchor would absorb
+                # the entire remaining body, leaving later markers nothing to
+                # preserve and duplicating code. Refuse instead of corrupting.
+                raise ValueError(
+                    f"delta merge: context line {post_anchor!r} after a "
+                    f"`... existing code ...` marker not found in the original — "
+                    f"provide the full body or fix the anchor"
+                )
             # post_anchor missing from original (new code added after marker, or
             # brace-language closing delimiter): trim original tail lines that
             # also appear in the delta suffix to avoid duplicating braces/dedents.
@@ -763,6 +815,9 @@ def _apply_symbol_patch(filepath: str, symbol: str, new_body: str) -> str:
         if ts_loc is not None:
             ls, le = ts_loc
             lines = content.splitlines(keepends=True)
+            # Clamp daemon-reported line numbers — a stale index can point past EOF.
+            ls = max(1, min(ls, len(lines)))
+            le = min(le, len(lines))
             start = sum(len(lines[i]) for i in range(ls - 1))
             end = min(sum(len(lines[i]) for i in range(le)), len(content))
             # Snap start to the beginning of its line — tree-sitter may point to
@@ -795,7 +850,10 @@ def _apply_symbol_patch(filepath: str, symbol: str, new_body: str) -> str:
         old_lines = content[start:end].count('\n') + 1
 
         original_body = content[start:end]
-        merged = _merge_delta(original_body, new_body)
+        try:
+            merged = _merge_delta(original_body, new_body)
+        except ValueError as e:
+            return f"Error: {e}"
         body = merged if merged.endswith('\n') else merged + '\n'
         new_lines = body.count('\n')
         delta = new_lines - old_lines
@@ -909,6 +967,9 @@ def _locate_symbol(p: Path, symbol: str, content: str):
     if ts_loc is not None:
         ls, le = ts_loc
         lines = content.splitlines(keepends=True)
+        # Clamp daemon-reported line numbers — a stale index can point past EOF.
+        ls = max(1, min(ls, len(lines)))
+        le = min(le, len(lines))
         start = sum(len(lines[i]) for i in range(ls - 1))
         end = min(sum(len(lines[i]) for i in range(le)), len(content))
         return start, end, ls
@@ -1267,6 +1328,8 @@ def _apply_symbol_insert_child(
             loc = _locate_symbol(p, parent, content)
             if loc is None:
                 return f"Error: parent '{parent}' not found in {p.name}"
+            if isinstance(loc, str):
+                return loc
             start, end, _ = loc
             block = content[start:end]
             # body indent = indent of first non-empty line after header
@@ -1337,7 +1400,7 @@ def _apply_symbol_insert_child(
             else:
                 # after = end of child's block
                 child_loc = _locate_symbol(p, child, content)
-                if child_loc is None:
+                if child_loc is None or isinstance(child_loc, str):
                     return f"Error: cannot locate end of child '{child}'"
                 insert_at = child_loc[1]
                 if insert_at > 0 and content[insert_at - 1] != "\n":
@@ -2247,6 +2310,7 @@ class OpenCodeBridge:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
+                env=_llm_env(),
             )
             proc.stdin.close()
 
@@ -2566,7 +2630,7 @@ class OpenCodeBridge:
         agent = agent or self.config.agent
         variant = variant or self.config.variant
 
-        claude_session_id = _get_claude_session_id()
+        claude_session_id = await asyncio.to_thread(_get_claude_session_id)
 
         session = Session(
             id=session_id,
@@ -3188,6 +3252,7 @@ class CodexBridge:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
                 start_new_session=True,
+                env=_llm_env(),
             )
             proc.stdin.close()
 
@@ -3282,6 +3347,7 @@ class CodexBridge:
                 cwd=cwd,
                 start_new_session=True,
                 limit=2**20,  # 1MB per line — prevents LimitOverrunError on long JSONL events
+                env=_llm_env(),
             )
             proc.stdin.write(stdin_data.encode())
             await proc.stdin.drain()
@@ -3416,7 +3482,7 @@ class CodexBridge:
         if not CODEX_BIN:
             return "Codex not installed — session not started. Install from: https://github.com/openai/codex"
 
-        claude_session_id = _get_claude_session_id()
+        claude_session_id = await asyncio.to_thread(_get_claude_session_id)
 
         session = CodexSession(
             id=session_id,
@@ -4140,7 +4206,7 @@ class GpuNodeDiscovery:
     @staticmethod
     def _probe_ollama(base_url: str, timeout: int = 4) -> Optional[list[str]]:
         """Return list of available model names at base_url, or None if unreachable."""
-        tags_url = base_url.rstrip("/v1").rstrip("/") + "/api/tags"
+        tags_url = base_url.rstrip("/").removesuffix("/v1") + "/api/tags"
         try:
             req = urllib.request.urlopen(tags_url, timeout=timeout)
             data = json.loads(req.read().decode())
@@ -4437,7 +4503,7 @@ class LocalModelBridge:
 
     @staticmethod
     def list_models_at(endpoint: str, timeout: int = 8) -> list[str]:
-        tags_url = endpoint.rstrip("/v1").rstrip("/") + "/api/tags"
+        tags_url = endpoint.rstrip("/").removesuffix("/v1") + "/api/tags"
         try:
             req = urllib.request.urlopen(tags_url, timeout=timeout)
             data = json.loads(req.read().decode())
@@ -4631,6 +4697,16 @@ class WebSearch:
             text = text[:max_chars] + "\n\n[truncated]"
         return text
 
+    _DOI_RE = re.compile(r"^10\.\d{4,9}/[-._;()/:A-Za-z0-9]+$")
+
+    @classmethod
+    def _clean_doi(cls, doi: str) -> str:
+        """Validate a DOI for safe interpolation into API URLs ('' if unsafe)."""
+        doi = doi.strip()
+        if not cls._DOI_RE.match(doi) or "/.." in doi or "../" in doi:
+            return ""
+        return doi
+
     @classmethod
     def _academic_fetch(cls, url: str, timeout: int = 15) -> str:
         """Route known academic URLs to their open APIs. Returns "" if not matched."""
@@ -4641,8 +4717,8 @@ class WebSearch:
             r"https?://(?:www\.)?(biorxiv|medrxiv)\.org/content/([^?\s]+?)(?:v\d+)?(?:\.full(?:\.pdf)?|\.abstract)?/?$",
             url,
         )
-        if m:
-            server, doi = m.group(1), m.group(2)
+        if m and cls._clean_doi(m.group(2)):
+            server, doi = m.group(1), cls._clean_doi(m.group(2))
             api = f"https://api.biorxiv.org/details/{server}/{doi}/na/json"
             try:
                 req = urllib.request.Request(api, headers=cls._HEADERS)
@@ -4827,6 +4903,8 @@ class WebSearch:
             m = re.search(r"(10\.\d{4,}/\S+)", url)
             if m:
                 doi = m.group(1).rstrip("/")
+        if doi:
+            doi = cls._clean_doi(doi) or None
 
         if doi:
             # Try bioRxiv API for any bioRxiv-style DOI before generic handlers
@@ -4974,7 +5052,7 @@ class WebSearch:
         doi = ""
         m = re.search(r"(10\.\d{4,}/[^\s\]\)\"]+)", url + "\n" + meta)
         if m:
-            doi = m.group(1).rstrip(".),\"'")
+            doi = cls._clean_doi(m.group(1).rstrip(".),\"'"))
 
         supplement_lines: list[str] = []
 
@@ -5212,6 +5290,11 @@ class LitSearch:
     def biorxiv(cls, query: str, start_date: str, end_date: str,
                 server: str = "biorxiv", max_results: int = 20) -> str:
         import time
+        if server not in ("biorxiv", "medrxiv"):
+            return f"bioRxiv API error: invalid server '{server}' (use biorxiv or medrxiv)"
+        for d in (start_date, end_date):
+            if not re.match(r"^\d{4}-\d{2}-\d{2}$", d):
+                return f"bioRxiv API error: invalid date '{d}' (use YYYY-MM-DD)"
         results = []
         cursor = 0
         while len(results) < max_results:
@@ -5847,10 +5930,10 @@ async def _doc_ingest(
     # 1. Read source
     src_path = Path(source)
     if source.startswith("http://") or source.startswith("https://"):
-        raw_text = WebSearch.fetch_page(source, max_chars=80_000)
+        raw_text = await asyncio.to_thread(WebSearch.fetch_page, source, max_chars=80_000)
     elif src_path.exists():
         if source.lower().endswith(".pdf"):
-            raw_text = rooms._tool_pdf_read({"path": source, "pages": "all"})
+            raw_text = await asyncio.to_thread(rooms._tool_pdf_read, {"path": source, "pages": "all"})
         else:
             raw_text = src_path.read_text(errors="replace")
     else:
@@ -5957,7 +6040,8 @@ async def _doc_ingest(
         rec_tags = list(dict.fromkeys(
             (tags or []) + rec.get("tags", []) + [doc_id, rec.get("kind", "insight")]
         ))
-        mem = SoulClient.remember(
+        mem = await asyncio.to_thread(
+            SoulClient.remember,
             content=full_content,
             kind=rec.get("type", "wisdom"),
             tags=",".join(rec_tags),
@@ -6620,6 +6704,25 @@ class RoomManager:
         except Exception as e:
             print(f"Warning: failed to persist room {room_id}: {e}", file=sys.stderr)
 
+    @staticmethod
+    def _committed_rounds(room: "DiscussionRoom") -> int:
+        """Highest committed round number.
+
+        Counts both live turn_keys (r<N>:name) and SUMMARY messages (which keep
+        a `round` field) so compression never resets the max_total_rounds cap.
+        """
+        highest = 0
+        for m in room.messages:
+            tk = m.get("turn_key", "")
+            if tk.startswith("r") and ":" in tk:
+                try:
+                    highest = max(highest, int(tk[1:tk.index(":")]))
+                except ValueError:
+                    pass
+            if m.get("name") == "SUMMARY" and isinstance(m.get("round"), int):
+                highest = max(highest, m["round"])
+        return highest
+
     async def _compress_round(self, room: "DiscussionRoom", round_num: int) -> None:
         """Replace one completed round's messages with a haiku-generated SUMMARY."""
         prefix = f"r{round_num}:"
@@ -6702,10 +6805,15 @@ class RoomManager:
         if new_room_id in self.rooms:
             return f"Room '{new_room_id}' already exists — choose a different ID."
         summary = await self._summarize_room(old_room) if old_room else f"[Previous room: {old_room_id}]"
+        import copy as _copy
         fork_topic = topic or (old_room.topic if old_room else new_room_id)
-        fork_participants = participants or (old_room.participants if old_room else [])
-        fork_files = old_room.files if old_room else []
-        fork_roles = old_room.roles if old_room else {}
+        # Deep-copy parent state — _participant_respond mutates participant dicts
+        # (session_id, _room_id), which would bleed into the parent room.
+        fork_participants = _copy.deepcopy(
+            participants or (old_room.participants if old_room else [])
+        )
+        fork_files = list(old_room.files) if old_room else []
+        fork_roles = dict(old_room.roles) if old_room else {}
         new_room = DiscussionRoom(
             id=new_room_id, topic=fork_topic, participants=fork_participants,
             files=fork_files, roles=fork_roles, clean=clean, verbatim_rounds=verbatim_rounds,
@@ -7502,22 +7610,9 @@ class RoomManager:
     def _tool_read_file(self, args: dict, participant_name: str = "") -> str:
         """Read a file — handles text, PDF, Jupyter notebooks, and images."""
         path = Path(args.get("path", "")).expanduser().resolve()
-        str_path = str(path)
-        # Block sensitive system paths
-        blocked_prefixes = ("/proc", "/sys", "/dev")
-        blocked_exact = ("/etc/shadow", "/etc/gshadow", "/etc/master.passwd")
-        # Block sensitive dotfiles/dirs (credentials, keys, tokens)
-        blocked_dotpaths = (
-            "/.ssh/", "/.gnupg/", "/.aws/", "/.azure/", "/.gcloud/",
-            "/.config/gh/", "/.docker/config.json", "/.kube/config",
-            "/.netrc", "/.env", "/.npmrc",
-        )
-        if any(str_path.startswith(b) for b in blocked_prefixes):
-            return f"(blocked: cannot read {path})"
-        if str_path in blocked_exact:
-            return f"(blocked: cannot read {path})"
-        if any(bp in str_path for bp in blocked_dotpaths):
-            return f"(blocked: sensitive file — {path})"
+        blocked = _blocked_read_path(path)
+        if blocked:
+            return blocked
         if not path.exists():
             return f"(file not found: {path})"
         if not path.is_file():
@@ -7641,6 +7736,9 @@ class RoomManager:
     def _tool_pdf_read(self, args: dict, participant_name: str = "") -> str:
         """Read a PDF using pdfplumber (tables + layout) with pypdf fallback."""
         path = Path(args.get("path", "")).expanduser().resolve()
+        blocked = _blocked_read_path(path)
+        if blocked:
+            return blocked
         if not path.exists():
             return f"(file not found: {path})"
         if path.suffix.lower() != ".pdf":
@@ -7751,6 +7849,9 @@ class RoomManager:
     def _tool_doc_read(self, args: dict, participant_name: str = "") -> str:
         """Read Office/LibreOffice documents: docx, xlsx, pptx, odt, ods, odp."""
         path = Path(args.get("path", "")).expanduser().resolve()
+        blocked = _blocked_read_path(path)
+        if blocked:
+            return blocked
         if not path.exists():
             return f"(file not found: {path})"
         suffix = path.suffix.lower()
@@ -8460,22 +8561,37 @@ class RoomManager:
                 tail = full_prompt[-(70_000):]
                 full_prompt = head + "\n\n[...earlier transcript truncated for length...]\n\n" + tail
             if sid and sid in self.codex.sessions:
-                return await self.codex.send_message(full_prompt, sid)
-            return await self.codex.run_task(
-                full_prompt,
-                model=participant.get("model"),
-                effort=participant.get("effort"),
-            )
+                reply = await self.codex.send_message(full_prompt, sid)
+            else:
+                reply = await self.codex.run_task(
+                    full_prompt,
+                    model=participant.get("model"),
+                    effort=participant.get("effort"),
+                )
+            # Codex CLI reports no token usage — estimate from characters so
+            # room_cost doesn't silently omit codex spend.
+            participant["_last_usage"] = {
+                "input_tokens": len(full_prompt) // 4,
+                "output_tokens": len(reply) // 4,
+                "estimated": True,
+            }
+            return reply
 
         else:  # opencode
             full_prompt = f"{system_prompt}\n\n{message}" if system_prompt else message
             if sid and sid in self.opencode.sessions:
-                return await self.opencode.send_message(full_prompt, sid, files=files, _raw=True)
-            safe_name = re.sub(r"[^a-zA-Z0-9_-]", "-", name.lower())
-            tmp = f"room-{participant.get('_room_id', 'r')}-{safe_name}"
-            await self.opencode.start_session(tmp, model=participant.get("model"))
-            reply = await self.opencode.send_message(full_prompt, tmp, files=files, _raw=True)
-            self.opencode.end_session(tmp)
+                reply = await self.opencode.send_message(full_prompt, sid, files=files, _raw=True)
+            else:
+                safe_name = re.sub(r"[^a-zA-Z0-9_-]", "-", name.lower())
+                tmp = f"room-{participant.get('_room_id', 'r')}-{safe_name}"
+                await self.opencode.start_session(tmp, model=participant.get("model"))
+                reply = await self.opencode.send_message(full_prompt, tmp, files=files, _raw=True)
+                self.opencode.end_session(tmp)
+            participant["_last_usage"] = {
+                "input_tokens": len(full_prompt) // 4,
+                "output_tokens": len(reply) // 4,
+                "estimated": True,
+            }
             return reply
 
     async def _run_claude_p(self, prompt: str, timeout: int = 300,
@@ -8508,6 +8624,7 @@ class RoomManager:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
+                env=_llm_env(),
             )
             proc.stdin.write(full_prompt.encode())
             await proc.stdin.drain()
@@ -8574,16 +8691,19 @@ class RoomManager:
         if soul and soul.realm and SoulClient.is_available():
             committed = sum(1 for m in room.messages if m.get("turn_key", "").endswith(f":{name}"))
             if committed == 0:
-                existing = SoulClient.recall("identity role expertise", limit=1, realm=soul.realm)
+                existing = await asyncio.to_thread(
+                    SoulClient.recall, "identity role expertise", limit=1, realm=soul.realm)
                 if not existing or len(existing.strip()) < 20:
-                    SoulClient.remember(
+                    await asyncio.to_thread(
+                        SoulClient.remember,
                         content=f"I am {name}. {soul.system_prompt[:300]}",
                         kind="identity",
                         tags="identity,role,seed",
                         confidence=0.95,
                         realm=soul.realm,
                     )
-                    SoulClient.remember(
+                    await asyncio.to_thread(
+                        SoulClient.remember,
                         content=f"Discussion topic: {room.topic}",
                         kind="episode",
                         tags="topic,room,seed",
@@ -8821,11 +8941,11 @@ class RoomManager:
                         jaccards.append(len(sets[i] & sets[j]) / u if u else 0.0)
                 if jaccards:
                     claim_overlap = sum(jaccards) / len(jaccards)
-                    w = 1.0 - claim_overlap
-                    weights = [w] * n
-                    sw = sum(weights)
-                    sw2 = sum(x * x for x in weights)
-                    N_eff = (sw ** 2) / sw2 if sw2 > 0 else float(n)
+                    # Effective sample size under pairwise correlation ρ:
+                    # n_eff = n / (1 + (n-1)ρ). The previous uniform-weight
+                    # (Σw)²/Σw² always equalled n, so the warning never fired.
+                    m_ = len(sets)
+                    N_eff = m_ / (1.0 + (m_ - 1) * claim_overlap)
 
         warning_parts: list[str] = []
         if collisions:
@@ -8894,9 +9014,10 @@ class RoomManager:
         async with self._room_lock(room_id):
             room = self.rooms[room_id]
 
-            # Hard cap — rooms are single-use; fork to continue
+            # Hard cap — rooms are single-use; fork to continue.
+            # _committed_rounds (not turn_counts) so compression can't reset the cap.
             if room.max_total_rounds > 0:
-                max_committed = max(room.turn_counts.values(), default=0)
+                max_committed = self._committed_rounds(room)
                 if max_committed >= room.max_total_rounds:
                     suggested = f"{room_id}-cont"
                     return (
@@ -8906,7 +9027,9 @@ class RoomManager:
                     )
 
             room.challenge_mode = challenge
-            start_msg_count = len(room.messages)
+            # Track new messages by identity — compression deletes/inserts
+            # mid-list, so a positional slice would return the wrong tail.
+            _pre_run_ids = {id(m) for m in room.messages}
 
             # Pre-flight cost estimate
             _ctx_chars = sum(len(m.get("content", "")) for m in room.messages)
@@ -8919,21 +9042,22 @@ class RoomManager:
             )
 
             # Start from the next uncommitted round so follow-up runs don't collide
-            # with already-committed turn_keys (r1:name, r2:name, etc.)
-            existing_round_nums: set[int] = set()
-            for m in room.messages:
-                tk = m.get("turn_key", "")
-                if tk and tk.startswith("r") and ":" in tk:
-                    try:
-                        existing_round_nums.add(int(tk[1:tk.index(":")]))
-                    except ValueError:
-                        pass
-            round_start = (max(existing_round_nums) + 1) if existing_round_nums else 1
+            # with already-committed turn_keys (r1:name, r2:name, etc.).
+            # Includes compressed (SUMMARY) rounds so round numbers are never reused.
+            round_start = self._committed_rounds(room) + 1
 
             for loop_idx, round_num in enumerate(range(round_start, round_start + rounds)):
                 # Inject challenge prompt between rounds if enabled
                 if challenge and loop_idx > 0:
-                    prev_round_msgs = room.messages[-(len(room.participants)):]
+                    # Select the previous round by turn_key — a tail slice picks up
+                    # MODERATOR/SUMMARY messages appended between rounds.
+                    prev_prefix = f"r{round_num - 1}:"
+                    prev_round_msgs = [m for m in room.messages
+                                       if m.get("turn_key", "").startswith(prev_prefix)]
+                    if not prev_round_msgs:
+                        prev_round_msgs = [m for m in room.messages
+                                           if m.get("name") == "SUMMARY"
+                                           and m.get("round") == round_num - 1]
                     claims = self._extract_claims(prev_round_msgs)
                     if claims:
                         challenge_text = (
@@ -8968,7 +9092,7 @@ class RoomManager:
 
                 # Per-round hard cap check (catches multi-round calls that straddle the limit)
                 if room.max_total_rounds > 0:
-                    if max(room.turn_counts.values(), default=0) >= room.max_total_rounds:
+                    if self._committed_rounds(room) >= room.max_total_rounds:
                         suggested = f"{room_id}-cont"
                         room.messages.append({
                             "name": "MODERATOR",
@@ -9052,7 +9176,7 @@ class RoomManager:
 
         # Return only the new messages from this run (not the full transcript)
         room = self.rooms[room_id]
-        new_msgs = room.messages[start_msg_count:]
+        new_msgs = [m for m in room.messages if id(m) not in _pre_run_ids]
         lines = [_est_line, "", f"# Room: {room_id} — new messages ({len(new_msgs)} total)", ""]
         for msg in new_msgs:
             ts = msg["ts"][11:19]
@@ -9080,6 +9204,7 @@ HIDDEN_TOOLS = {
     "opencode_start", "opencode_end", "opencode_end_all",
     "opencode_history", "opencode_model", "opencode_agent", "opencode_variant",
     "opencode_config", "opencode_configure", "opencode_export", "opencode_health",
+    "opencode_models", "opencode_agents", "opencode_brainstorm",
     "codex_start", "codex_end", "codex_end_all",
     "codex_switch", "codex_sessions", "codex_history",
     "codex_model", "codex_config", "codex_configure",
@@ -9093,7 +9218,7 @@ HIDDEN_TOOLS = {
     "multi_consult", "agent_chain", "delegate_codex", "parallel_agents",
     # Rooms (multi-agent discussion)
     "room_create", "room_run", "room_synthesize", "room_read", "room_challenge", "room_cost",
-    "room_inject", "room_fork",
+    "room_inject", "room_fork", "room_add_participant",
     "scheduler_list", "scheduler_run_now", "scheduler_pause", "scheduler_resume", "scheduler_history",
     "room_status", "room_suggest_participants",
     # Status/health
@@ -11247,7 +11372,7 @@ async def call_tool(name: str, arguments: dict):
                 claude_session_id=arguments["claude_session_id"]
             )
         elif name == "opencode_end_unattached":
-            result = bridge.end_unattached()
+            result = await asyncio.to_thread(bridge.end_unattached)
         elif name == "opencode_end_all":
             result = bridge.end_all(
                 session_ids=arguments.get("session_ids"),
@@ -11264,7 +11389,7 @@ async def call_tool(name: str, arguments: dict):
                 claude_session_id=arguments["claude_session_id"]
             )
         elif name == "codex_end_unattached":
-            result = codex_bridge.end_unattached()
+            result = await asyncio.to_thread(codex_bridge.end_unattached)
         elif name == "codex_end_all":
             result = codex_bridge.end_all(
                 session_ids=arguments.get("session_ids"),
@@ -12595,7 +12720,33 @@ async def _start_dashboard(port: int = 7680) -> None:
                 _sse_queues.remove(q)
         return resp
 
-    app = web.Application()
+    _dash_token = _http_token()
+
+    @web.middleware
+    async def _auth_middleware(request, handler):
+        import hmac as _hmac
+        bearer = ""
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            bearer = auth[7:]
+        qp = request.query.get("token", "")
+        cookie = request.cookies.get("cb_token", "")
+        if not any(c and _hmac.compare_digest(c, _dash_token) for c in (bearer, qp, cookie)):
+            return web.Response(
+                status=401,
+                text="Unauthorized — open /?token=<token> (token in ~/.chitta-bridge/token)",
+            )
+        resp = await handler(request)
+        if qp and not cookie:
+            # First visit via ?token= — set a cookie so the page's own
+            # /api and /events requests authenticate without the query param.
+            try:
+                resp.set_cookie("cb_token", _dash_token, httponly=True, samesite="Strict")
+            except Exception:
+                pass
+        return resp
+
+    app = web.Application(middlewares=[_auth_middleware])
     app.router.add_get("/", handle_index)
     app.router.add_get("/api/rooms", handle_rooms)
     app.router.add_get("/api/rooms/{id}", handle_room)
@@ -12768,11 +12919,30 @@ async def _run_http_mode(mcp_port: int = 7681, dashboard_port: int = 7680) -> No
         async with session_manager.run():
             yield
 
+    from starlette.requests import Request as _Request
+
+    async def _messages_guard(scope, receive, send):
+        # POST-back channel for SSE clients. The session_id is an unguessable
+        # UUID disclosed only over the authenticated SSE stream, so it acts as
+        # the capability; still reject explicit bad credentials and requests
+        # that carry neither a token nor a session_id.
+        if scope["type"] == "http":
+            req = _Request(scope, receive)
+            auth = req.headers.get("authorization", "")
+            if auth.startswith("Bearer "):
+                if not _hmac.compare_digest(auth[7:], _token):
+                    await PlainTextResponse("Unauthorized", status_code=401)(scope, receive, send)
+                    return
+            elif not _auth_ok(req) and not req.query_params.get("session_id"):
+                await PlainTextResponse("Unauthorized", status_code=401)(scope, receive, send)
+                return
+        await sse_transport.handle_post_message(scope, receive, send)
+
     starlette_app = Starlette(
         routes=[
             Route("/sse", endpoint=handle_sse),
             Route("/mcp", endpoint=handle_mcp, methods=["GET", "POST", "DELETE"]),
-            Mount("/messages/", app=sse_transport.handle_post_message),
+            Mount("/messages/", app=_messages_guard),
         ],
         lifespan=lifespan,
     )
