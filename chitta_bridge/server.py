@@ -546,6 +546,34 @@ _BACKEND_RULES: list[tuple[tuple[str, ...], str]] = [
 ]
 
 
+def _normalize_participant_shorthands(plist: list) -> list:
+    """Accept 'backend:model[:effort]' shorthand strings alongside participant dicts.
+
+    room_create has a richer normalizer (live model discovery); this is the
+    minimal subset for tools like room_fork that take a participants override.
+    """
+    shorthands = {"opus": "claude-opus-4-8", "sonnet": "claude-sonnet-4-6",
+                  "haiku": "claude-haiku-4-5"}
+    out = []
+    for p in plist or []:
+        if isinstance(p, dict):
+            out.append(p)
+            continue
+        s = str(p)
+        parts = s.split(":")
+        if parts[0] in ("opencode", "codex", "claude", "local") and len(parts) > 1:
+            model = parts[1]
+            if parts[0] == "claude":
+                model = shorthands.get(model.lower(), model)
+            d = {"name": s, "backend": parts[0], "model": model}
+            if len(parts) > 2:
+                d["effort"] = parts[2].lower()
+            out.append(d)
+        else:
+            out.append({"name": s, "backend": _infer_backend(s)})
+    return out
+
+
 def _infer_backend(participant_name: str, model: Optional[str] = None) -> str:
     """Infer the backend from participant name or model string.
 
@@ -6814,6 +6842,13 @@ class RoomManager:
         )
         fork_files = list(old_room.files) if old_room else []
         fork_roles = dict(old_room.roles) if old_room else {}
+        # Validate participant shape before creating anything — failing later
+        # (e.g. on a string participant) would orphan a half-saved room.
+        bad = [p for p in fork_participants if not (isinstance(p, dict) and p.get("name"))]
+        if bad:
+            return (f"Error: participants must be dicts with a 'name' key "
+                    f"(got {type(bad[0]).__name__}: {str(bad[0])[:60]}) — "
+                    f"use 'backend:model[:effort]' shorthands via the room_fork tool")
         new_room = DiscussionRoom(
             id=new_room_id, topic=fork_topic, participants=fork_participants,
             files=fork_files, roles=fork_roles, clean=clean, verbatim_rounds=verbatim_rounds,
@@ -11041,6 +11076,8 @@ async def call_tool(name: str, arguments: dict):
                 parts_arg = arguments.get("participants")
                 if isinstance(parts_arg, str):
                     parts_arg = json.loads(parts_arg) if parts_arg else None
+                if parts_arg:
+                    parts_arg = _normalize_participant_shorthands(parts_arg)
                 result = await rooms.fork(
                     old_room_id=old_id, new_room_id=new_id,
                     topic=topic_arg, participants=parts_arg,
