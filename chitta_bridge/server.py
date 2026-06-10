@@ -12909,11 +12909,18 @@ async def _run_http_mode(mcp_port: int = 7681, dashboard_port: int = 7680) -> No
             await server.run(read_stream, write_stream, init_options)
         return Response()
 
-    async def handle_mcp(request):
-        if not _auth_ok(request):
-            return PlainTextResponse("Unauthorized", status_code=401)
-        await session_manager.handle_request(request.scope, request.receive, request._send)
-        return Response()
+    class _MCPApp:
+        # Non-function Route endpoints are used as raw ASGI apps (no
+        # request_response wrapper) — the session manager sends the full
+        # response itself; a wrapped endpoint returning Response() afterwards
+        # double-sends and logs "Unexpected ASGI message ... already completed".
+        async def __call__(self, scope, receive, send):
+            if scope["type"] != "http":
+                return
+            if not _auth_ok(_Request(scope, receive)):
+                await PlainTextResponse("Unauthorized", status_code=401)(scope, receive, send)
+                return
+            await session_manager.handle_request(scope, receive, send)
 
     async def lifespan(app):
         async with session_manager.run():
@@ -12941,7 +12948,7 @@ async def _run_http_mode(mcp_port: int = 7681, dashboard_port: int = 7680) -> No
     starlette_app = Starlette(
         routes=[
             Route("/sse", endpoint=handle_sse),
-            Route("/mcp", endpoint=handle_mcp, methods=["GET", "POST", "DELETE"]),
+            Route("/mcp", endpoint=_MCPApp(), methods=["GET", "POST", "DELETE"]),
             Mount("/messages/", app=_messages_guard),
         ],
         lifespan=lifespan,
