@@ -27,9 +27,38 @@ _MANAGED_RE = re.compile(
 
 # ── helpers ──────────────────────────────────────────────────────────
 
+DEFAULT_MCP_PORT = 7681
+DEFAULT_MCP_URL = f"http://127.0.0.1:{DEFAULT_MCP_PORT}/mcp"
+
+
 def _chitta_bridge_path() -> str:
     """Resolve absolute path to chitta-bridge binary."""
     return shutil.which("chitta-bridge") or "chitta-bridge"
+
+
+def _bridge_token() -> str:
+    """Get-or-create the shared bearer token (matches the daemon's _http_token).
+
+    Reading/creating it here means a fresh install embeds the same token the
+    daemon will load from ~/.chitta-bridge/token on first start.
+    """
+    env = os.environ.get("CHITTA_BRIDGE_TOKEN", "").strip()
+    if env:
+        return env
+    tp = Path.home() / ".chitta-bridge" / "token"
+    if tp.is_file():
+        t = tp.read_text().strip()
+        if t:
+            return t
+    import secrets
+    t = secrets.token_urlsafe(32)
+    tp.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(tp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, t.encode())
+    finally:
+        os.close(fd)
+    return t
 
 
 def _codex_home() -> Path:
@@ -66,14 +95,23 @@ def _plugin_source_dir() -> Path:
 # ── Claude Code ──────────────────────────────────────────────────────
 
 def _install_claude_code():
+    # HTTP transport against the persistent daemon, not a per-session stdio
+    # bridge: stdio clients freeze on the bridge code that existed at their
+    # startup and never see daemon restarts. Requires `chitta-bridge --http`
+    # to be running (the systemd user service).
+    token = _bridge_token()
     try:
+        # Remove any prior (e.g. stdio) registration so the transport switches cleanly.
+        subprocess.run(["claude", "mcp", "remove", "chitta-bridge"],
+                       capture_output=True, text=True)
         result = subprocess.run(
-            ["claude", "mcp", "add", "--transport", "stdio", "--scope", "user",
-             "chitta-bridge", "--", "chitta-bridge"],
+            ["claude", "mcp", "add", "--transport", "http", "--scope", "user",
+             "chitta-bridge", DEFAULT_MCP_URL,
+             "--header", f"Authorization: Bearer {token}"],
             capture_output=True, text=True,
         )
         if result.returncode == 0:
-            print("  Claude Code: registered")
+            print(f"  Claude Code: registered (HTTP → {DEFAULT_MCP_URL})")
         elif "already exists" in result.stderr.lower():
             print("  Claude Code: already registered")
         else:
@@ -124,16 +162,21 @@ def _install_codex():
     if skills.is_dir():
         shutil.copytree(skills, dest / "skills", dirs_exist_ok=True)
 
-    # Write .mcp.json with resolved absolute path
-    cb_path = _chitta_bridge_path()
-    mcp_json = {"mcpServers": {"chitta-bridge": {"command": cb_path, "args": []}}}
+    # Write .mcp.json pointing at the persistent HTTP daemon (not a stdio
+    # bridge that would freeze on startup-time code). Codex reads the bearer
+    # token from CHITTA_BRIDGE_TOKEN at launch.
+    mcp_json = {"mcpServers": {"chitta-bridge": {
+        "type": "http",
+        "url": DEFAULT_MCP_URL,
+        "headers": {"Authorization": "Bearer ${CHITTA_BRIDGE_TOKEN}"},
+    }}}
     (dest / ".mcp.json").write_text(json.dumps(mcp_json, indent=2) + "\n")
 
     if not _enable_codex_config():
         return False
 
     print(f"  Codex: installed to {dest}")
-    print(f"  Codex: MCP server → {cb_path}")
+    print(f"  Codex: MCP server → {DEFAULT_MCP_URL} (HTTP)")
     print("  Codex: skills — /review, /rescue, /room, /soul")
     return True
 
