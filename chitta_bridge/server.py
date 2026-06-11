@@ -3590,8 +3590,14 @@ Set via:
         if session.model:
             args.extend(["--model", session.model])
 
-        # Add sandbox mode (for new sessions or as override)
-        if session.full_auto:
+        # Add sandbox mode (for new sessions or as override).
+        # danger-full-access must use the bypass flag, NOT --full-auto, which
+        # expands to workspace-write+bwrap and fails where user namespaces are
+        # disabled (max_user_namespaces=0). See _build_exec_args.
+        if session.sandbox == "danger-full-access":
+            if not session.codex_session_id:
+                args.append("--dangerously-bypass-approvals-and-sandbox")
+        elif session.full_auto:
             args.append("--full-auto")
         elif not session.codex_session_id:
             # Only set sandbox on first call; resume inherits
@@ -3853,13 +3859,17 @@ Set via:
             args.extend(["--model", model])
         args.extend(["-c", f'model_reasoning_effort="{effort}"'])
         effective_sandbox = sandbox or self.config.codex_sandbox
-        if effective_sandbox != "danger-full-access":
-            # danger-full-access: omit --sandbox so codex reads config file
-            # (use_linux_sandbox_bwrap = false). --dangerously-bypass-approvals-and-sandbox
-            # is TUI-only and rejected by `codex exec`.
+        if effective_sandbox == "danger-full-access":
+            # Truly unsandboxed. --full-auto must NOT be added here: it expands to
+            # `--sandbox workspace-write --ask-for-approval on-failure`, which forces
+            # bwrap and fails on hosts where user namespaces are disabled
+            # (max_user_namespaces=0). `codex exec` DOES accept this flag (the prior
+            # claim that it is TUI-only was wrong — see `codex exec --help`).
+            args.append("--dangerously-bypass-approvals-and-sandbox")
+        else:
             args.extend(["--sandbox", effective_sandbox])
-        if full_auto:
-            args.append("--full-auto")
+            if full_auto:
+                args.append("--full-auto")
         args.extend(["--json", "-"])
         return args
 
