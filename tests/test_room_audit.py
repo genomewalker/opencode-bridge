@@ -111,7 +111,7 @@ class TestParticipantRespondAudit:
              patch.object(rm, "_extract_tool_call", return_value=None), \
              patch.object(rm, "_extract_final_response", return_value="The answer is 4."), \
              patch.object(rm, "_parse_soul", return_value=None):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 rm._participant_respond(room, participant, round_num=1)
             )
 
@@ -135,7 +135,7 @@ class TestParticipantRespondAudit:
              patch.object(rm, "_extract_tool_call", return_value=None), \
              patch.object(rm, "_extract_final_response", return_value=fabricated), \
              patch.object(rm, "_parse_soul", return_value=None):
-            asyncio.get_event_loop().run_until_complete(
+            asyncio.run(
                 rm._participant_respond(room, participant, round_num=1)
             )
 
@@ -157,7 +157,7 @@ class TestParticipantRespondAudit:
              patch.object(rm, "_extract_tool_call", return_value=None), \
              patch.object(rm, "_extract_final_response", return_value=plain), \
              patch.object(rm, "_parse_soul", return_value=None):
-            asyncio.get_event_loop().run_until_complete(
+            asyncio.run(
                 rm._participant_respond(room, participant, round_num=1)
             )
 

@@ -17,7 +17,7 @@ class TestSoulToolRegistry:
         import chitta_bridge.server as srv
         # The handler is registered via @server.list_tools(); retrieve it by
         # calling the coroutine that was decorated.
-        return asyncio.get_event_loop().run_until_complete(srv.list_tools())
+        return asyncio.run(srv.list_tools())
 
     def test_exactly_one_soul_remember(self):
         tools = self._get_tools()
