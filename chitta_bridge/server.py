@@ -579,7 +579,9 @@ def _normalize_participant_shorthands(plist: list) -> list:
                 d["effort"] = parts[2].lower()
             out.append(d)
         else:
-            out.append({"name": s, "backend": _infer_backend(s)})
+            inferred = _infer_backend(s)
+            model_id = shorthands.get(s.lower(), s) if inferred == "claude" else s
+            out.append({"name": s, "backend": inferred, "model": model_id})
     return out
 
 
@@ -10978,35 +10980,33 @@ async def call_tool(name: str, arguments: dict):
             #   "claude" or "claude/model" → backend=claude,
             #   bare string → check existing sessions (local, codex, opencode) by ID,
             #   else → backend=opencode
+            # Build claude shorthand map once — read CLAUDE.md for version-pinned IDs
+            _EFFORT_VALUES = {"low", "medium", "high", "xhigh", "max"}
+            _CLAUDE_SHORTHANDS: dict = {}
+            try:
+                import re as _re
+                _cm = Path.home() / ".claude" / "CLAUDE.md"
+                if _cm.exists():
+                    for _mid in _re.findall(r'`(claude-[a-z0-9-]+)`', _cm.read_text()):
+                        if "opus" in _mid and "opus" not in _CLAUDE_SHORTHANDS:
+                            _CLAUDE_SHORTHANDS["opus"] = _mid
+                        elif "sonnet" in _mid and "sonnet" not in _CLAUDE_SHORTHANDS:
+                            _CLAUDE_SHORTHANDS["sonnet"] = _mid
+                        elif "haiku" in _mid and "haiku" not in _CLAUDE_SHORTHANDS:
+                            _CLAUDE_SHORTHANDS["haiku"] = _mid
+            except Exception:
+                pass
+            _CLAUDE_SHORTHANDS.setdefault("opus", "claude-opus-4-8")
+            _CLAUDE_SHORTHANDS.setdefault("sonnet", "claude-sonnet-4-6")
+            _CLAUDE_SHORTHANDS.setdefault("haiku", "claude-haiku-4-5")
+            _CLAUDE_SHORTHANDS.setdefault("fable5", "claude-fable-5")
+            _CLAUDE_SHORTHANDS.setdefault("fable", "claude-fable-5")
             normalized = []
             for p in participants:
                 if isinstance(p, dict):
                     normalized.append(p)
                 else:
                     s = str(p)
-                    # Parse "backend:model[:effort]" shorthand
-                    _EFFORT_VALUES = {"low", "medium", "high", "xhigh", "max"}
-                    # Read from CLAUDE.md model table — version-independent
-                    _CLAUDE_SHORTHANDS: dict = {}
-                    try:
-                        import re as _re
-                        _cm = Path.home() / ".claude" / "CLAUDE.md"
-                        if _cm.exists():
-                            for _mid in _re.findall(r'`(claude-[a-z0-9-]+)`', _cm.read_text()):
-                                if "opus" in _mid and "opus" not in _CLAUDE_SHORTHANDS:
-                                    _CLAUDE_SHORTHANDS["opus"] = _mid
-                                elif "sonnet" in _mid and "sonnet" not in _CLAUDE_SHORTHANDS:
-                                    _CLAUDE_SHORTHANDS["sonnet"] = _mid
-                                elif "haiku" in _mid and "haiku" not in _CLAUDE_SHORTHANDS:
-                                    _CLAUDE_SHORTHANDS["haiku"] = _mid
-                    except Exception:
-                        pass
-                    # Fallbacks if CLAUDE.md parse yielded nothing
-                    _CLAUDE_SHORTHANDS.setdefault("opus", "claude-opus-4-8")
-                    _CLAUDE_SHORTHANDS.setdefault("sonnet", "claude-sonnet-4-6")
-                    _CLAUDE_SHORTHANDS.setdefault("haiku", "claude-haiku-4-5")
-                    _CLAUDE_SHORTHANDS.setdefault("fable5", "claude-fable-5")
-                    _CLAUDE_SHORTHANDS.setdefault("fable", "claude-fable-5")
                     if ":" in s and s.split(":", 1)[0] in ("opencode", "codex", "claude", "local"):
                         parts = s.split(":")
                         backend_hint = parts[0]
@@ -11067,7 +11067,8 @@ async def call_tool(name: str, arguments: dict):
                             inferred = _infer_backend(s)
                         except ValueError:
                             inferred = "opencode"
-                        normalized.append({"name": s, "backend": inferred, "model": s})
+                        model_id = _CLAUDE_SHORTHANDS.get(s.lower(), s) if inferred == "claude" else s
+                        normalized.append({"name": s, "backend": inferred, "model": model_id})
             participants = normalized
             # Resolve backend at create time — never silently at dispatch
             unresolved = None
