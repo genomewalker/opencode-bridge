@@ -271,6 +271,10 @@ def _atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> Non
             with os.fdopen(tmp_fd, "wb") as f:
                 f.write(data)
                 f.flush()
+                # Preserve the target's mode (exec bits, group perms) — the
+                # rename would otherwise leave the file at the temp's 0600.
+                if st is not None:
+                    os.fchmod(f.fileno(), _stat_mod.S_IMODE(st.st_mode))
                 os.fsync(f.fileno())
             os.rename(tmp_name, target_name, src_dir_fd=dirfd, dst_dir_fd=dirfd)
         except Exception:
@@ -304,6 +308,10 @@ def _atomic_write_text_legacy(path: Path, content: str, encoding: str = "utf-8")
         tmp.flush()
         os.fsync(tmp.fileno())
         tmp.close()
+        try:
+            os.chmod(tmp.name, _stat_mod.S_IMODE(os.stat(path).st_mode))
+        except FileNotFoundError:
+            pass
         os.replace(tmp.name, path)
     except Exception:
         try:
@@ -530,7 +538,7 @@ MAX_READ_SIZE = 10 * 1024 * 1024  # 10MB - above this, estimate lines from size
 # Order matters — check more specific prefixes first.
 _BACKEND_RULES: list[tuple[tuple[str, ...], str]] = [
     # Anthropic → claude
-    (("claude", "opus", "sonnet", "haiku"), "claude"),
+    (("claude", "opus", "sonnet", "haiku", "fable"), "claude"),
     # OpenAI → codex  (o1/o3/o4 require exact match or clear suffix to avoid false positives
     # on participant names like "o3-planning"; gpt- prefix is unambiguous)
     (("gpt-", "chatgpt", "codex", "text-davinci", "text-embedding"), "codex"),
@@ -553,7 +561,8 @@ def _normalize_participant_shorthands(plist: list) -> list:
     minimal subset for tools like room_fork that take a participants override.
     """
     shorthands = {"opus": "claude-opus-4-8", "sonnet": "claude-sonnet-4-6",
-                  "haiku": "claude-haiku-4-5"}
+                  "haiku": "claude-haiku-4-5", "fable5": "claude-fable-5",
+                  "fable": "claude-fable-5"}
     out = []
     for p in plist or []:
         if isinstance(p, dict):
@@ -10970,6 +10979,8 @@ async def call_tool(name: str, arguments: dict):
                     _CLAUDE_SHORTHANDS.setdefault("opus", "claude-opus-4-8")
                     _CLAUDE_SHORTHANDS.setdefault("sonnet", "claude-sonnet-4-6")
                     _CLAUDE_SHORTHANDS.setdefault("haiku", "claude-haiku-4-5")
+                    _CLAUDE_SHORTHANDS.setdefault("fable5", "claude-fable-5")
+                    _CLAUDE_SHORTHANDS.setdefault("fable", "claude-fable-5")
                     if ":" in s and s.split(":", 1)[0] in ("opencode", "codex", "claude", "local"):
                         parts = s.split(":")
                         backend_hint = parts[0]
