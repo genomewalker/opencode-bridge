@@ -10526,6 +10526,32 @@ async def list_tools():
             },
         ),
         Tool(
+            name="symbol_callers",
+            description=(
+                "List the call sites of a symbol (who calls it) from the chitta "
+                "code-graph daemon. Answer 'what depends on this' before changing a "
+                "signature — structural, not guessed."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {"name": {"type": "string", "description": "Symbol name"}},
+                "required": ["name"],
+            },
+        ),
+        Tool(
+            name="symbol_callees",
+            description=(
+                "List the symbols a function calls (its callees) from the chitta "
+                "code-graph daemon. Answer 'does this function touch X?' from the "
+                "call graph instead of speculating about dataflow."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {"name": {"type": "string", "description": "Symbol name"}},
+                "required": ["name"],
+            },
+        ),
+        Tool(
             name="symbol_insert_child",
             description=(
                 "Insert a block inside a parent function/class at a named position. "
@@ -11663,6 +11689,10 @@ async def call_tool(name: str, arguments: dict):
             )
         elif name == "read_outline":
             result = _read_outline(arguments.get("file", ""))
+        elif name == "symbol_callers":
+            result = SoulClient._call("symbol_callers", {"name": arguments["name"]}) or "(no callers found)"
+        elif name == "symbol_callees":
+            result = SoulClient._call("symbol_callees", {"name": arguments["name"]}) or "(no callees found)"
         elif name == "symbol_insert_child":
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
