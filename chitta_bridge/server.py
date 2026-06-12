@@ -467,6 +467,23 @@ def _append_room_cost(rooms_dir: "Path", room_id: str, participant_name: str,
             fh.write(__import__("json").dumps(record) + "\n")
     except OSError:
         pass
+
+
+def _append_room_audit(rooms_dir: "Path", room_id: str, participant_name: str,
+                       round_num: int, record: dict) -> None:
+    """Append one audit record to {room_id}.audit.jsonl (provenance ledger).
+
+    Parallel to _append_room_cost but captures epistemic provenance: prompt
+    hashes, tool-call ids, memory-injection flag, unsourced flag. Best-effort.
+    """
+    audit_path = rooms_dir / f"{room_id}.audit.jsonl"
+    try:
+        with open(audit_path, "a") as fh:
+            fh.write(__import__("json").dumps(record) + "\n")
+    except OSError:
+        pass
+
+
 CHUNK_SIZE = 800         # lines per chunk
 CHUNK_OVERLAP = 20       # overlap between adjacent chunks
 MAX_PARALLEL_CHUNKS = 6  # concurrency limit
@@ -5523,13 +5540,45 @@ class SoulClient:
     @classmethod
     def remember(cls, content: str, kind: str = "episode",
                  tags: str = "", confidence: float = 0.8,
-                 realm: Optional[str] = None) -> Optional[str]:
+                 realm: Optional[str] = None,
+                 source_type: str = "observation", producer: str = "",
+                 evidence_pointer: str = "") -> Optional[str]:
+        # Memory hygiene: fold provenance into tags so it survives the existing
+        # daemon store unchanged (no schema migration needed). source_type is
+        # always recorded; producer/evidence_pointer only when supplied.
+        _hyg = [f"src:{source_type}"]
+        if producer:
+            _hyg.append(f"by:{producer}")
+        if evidence_pointer:
+            _hyg.append(f"ev:{evidence_pointer}")
+        tags = ",".join([t for t in (tags, *_hyg) if t])
         args: dict[str, Any] = {"content": content, "type": kind, "confidence": confidence}
         if tags:
             args["tags"] = tags
         if realm:
             args["realm"] = realm
         return cls._call("remember", args, timeout=60.0)
+
+    @staticmethod
+    def _recall_age_days(text: Optional[str]) -> Optional[float]:
+        """Best-effort: extract the first ISO/epoch timestamp in recall output and
+        return its age in days. Returns None if no parseable timestamp present.
+        """
+        if not text:
+            return None
+        import re as _re, time as _time
+        from datetime import datetime as _dt
+        m = _re.search(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}", text)
+        if m:
+            try:
+                ts = _dt.fromisoformat(m.group(0).replace(" ", "T")).timestamp()
+                return round((_time.time() - ts) / 86400.0, 2)
+            except ValueError:
+                return None
+        m2 = _re.search(r"\b(1[0-9]{9})\b", text)
+        if m2:
+            return round((_time.time() - float(m2.group(1))) / 86400.0, 2)
+        return None
 
     @classmethod
     def hybrid_recall(cls, query: str, limit: int = 5, realm: Optional[str] = None) -> Optional[str]:
@@ -7294,9 +7343,21 @@ class RoomManager:
         if len(transcript) > _TRANSCRIPT_CHAR_CAP:
             transcript = "[...earlier content omitted — see SUMMARY blocks above...]\n\n" + transcript[-_TRANSCRIPT_CHAR_CAP:]
 
+        # -- [system-evidence] provenance banner (prepended to every system prompt) --
+        _prior_round_count = len({m.get("turn_key", "").split(":", 1)[0]
+                                  for m in room.messages if m.get("turn_key")})
+        _audit_available = (self.rooms_dir / f"{room.id}.audit.jsonl").exists()
+        _backends_live = sorted({(p.get("backend") or "?")
+                                 for p in room.participants}) if getattr(room, "participants", None) else []
+        _evidence_block = (
+            "[system-evidence]\n"
+            f"prior_round_count={_prior_round_count} audit_available={_audit_available}\n"
+            f"backends_live={','.join(_backends_live)}\n"
+        )
+
         # -- System prompt (the soul) --
         if soul and soul.system_prompt:
-            sys_parts = [soul.system_prompt]
+            sys_parts = [_evidence_block, soul.system_prompt]
 
             # Load relevant memories — limit=2 each to bound cache_write cost per round
             # Skip recall entirely in clean rooms (context is explicitly injected)
@@ -8907,8 +8968,41 @@ class RoomManager:
                 usage=usage,
             )
 
+        # ── Provenance audit ledger (FIX 1 + FIX 5) ──────────────────────────
+        import time as _time
+        _audit_id = uuid.uuid4().hex
+        _sys_sha = hashlib.sha256((system_prompt or "").encode()).hexdigest()
+        _usr_sha = hashlib.sha256((user_msg or "").encode()).hexdigest()
+        _tool_calls: list = []
+        # Unsourced flagging: factual markers present but no tool calls made.
+        _unsourced = False
+        if not _tool_calls and re.search(r'[/\\][a-zA-Z]|:\d{3,}|server\.py|\bline\s+\d+', final):
+            _unsourced = True
+        _append_room_audit(
+            rooms_dir=self.rooms_dir,
+            room_id=room.id,
+            participant_name=name,
+            round_num=round_num,
+            record={
+                "audit_id": _audit_id,
+                "room_id": room.id,
+                "round_num": round_num,
+                "participant": name,
+                "backend": participant.get("backend", "?"),
+                "model": participant.get("model", "?"),
+                "timestamp": _time.time(),
+                "system_prompt_sha256": _sys_sha,
+                "user_msg_sha256": _usr_sha,
+                "tool_calls": _tool_calls,
+                "memory_injection": False,
+                "unsourced": _unsourced,
+                "usage": usage or {},
+            },
+        )
+
         return {"name": name, "content": final, "ts": datetime.now().isoformat(),
-                "dispatch_id": str(uuid.uuid4()), "turn_key": turn_key}
+                "dispatch_id": str(uuid.uuid4()), "turn_key": turn_key,
+                "audit_id": _audit_id}
     # ------------------------------------------------------------------
     # Challenge round support
     # ------------------------------------------------------------------
@@ -11572,6 +11666,16 @@ async def call_tool(name: str, arguments: dict):
             )
             result = r or "Soul not available (chittad not running)"
         elif name == "soul_remember":
+            # ── DEDUP NOTE: thin alias of mcp__chitta__remember ──────────────
+            # mcp__chitta-bridge__soul_remember and mcp__chitta__remember both
+            # terminate at the SAME chittad daemon. SoulClient._socket_path
+            # (server.py:5460-5474) derives the socket from a djb2 hash of
+            # ~/.claude/mind, so both clients dial the identical unix socket and
+            # invoke the daemon's "remember" tool. This branch is a thin alias:
+            # it adds NO storage, dedup, or transformation of its own. Prefer
+            # mcp__chitta__remember directly; this exists only for in-room tool
+            # parity. Do not add divergent behaviour here without mirroring it in
+            # the chitta MCP path or the two surfaces will silently disagree.
             r = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: SoulClient.remember(
