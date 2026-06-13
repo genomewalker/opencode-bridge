@@ -9501,7 +9501,7 @@ HIDDEN_TOOLS = {
     "codex_start", "codex_end", "codex_end_all",
     "codex_switch", "codex_sessions", "codex_history",
     "codex_model", "codex_config", "codex_configure",
-    "codex_review", "codex_rescue", "codex_health",
+    "codex_rescue", "codex_health",
     "codex_job_status", "codex_job_result", "codex_job_cancel",
     # Local model management
     "local_start", "local_end", "local_switch",
