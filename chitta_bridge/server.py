@@ -553,6 +553,10 @@ MAX_READ_SIZE = 10 * 1024 * 1024  # 10MB - above this, estimate lines from size
 
 # Backend inference: model/name prefix → backend
 # Order matters — check more specific prefixes first.
+# Set False to hard-disable OpenCode; all opencode_* tools return an error and
+# room participants with backend=opencode fail fast instead of hanging.
+_OPENCODE_ENABLED: bool = False
+
 _BACKEND_RULES: list[tuple[tuple[str, ...], str]] = [
     # Anthropic → claude
     (("claude", "opus", "sonnet", "haiku", "fable"), "claude"),
@@ -8833,6 +8837,8 @@ class RoomManager:
             return reply
 
         else:  # opencode
+            if not _OPENCODE_ENABLED:
+                return "[error: opencode backend is disabled — use backend='claude' or backend='codex']"
             full_prompt = f"{system_prompt}\n\n{message}" if system_prompt else message
             if sid and sid in self.opencode.sessions:
                 reply = await self.opencode.send_message(full_prompt, sid, files=files, _raw=True)
@@ -10998,6 +11004,8 @@ async def call_tool(name: str, arguments: dict):
                     result = f"Unknown hidden tool: {hidden_name}\nUse action='list' to see available tools."
                 else:
                     return await call_tool(hidden_name, hidden_args)
+        elif name.startswith("opencode_") and not _OPENCODE_ENABLED:
+            result = "opencode is disabled — use room_create with backend='claude' or backend='codex'"
         elif name == "opencode_models":
             result = await bridge.list_models(arguments.get("provider"))
         elif name == "opencode_agents":
