@@ -8750,6 +8750,16 @@ class RoomManager:
         backend = participant.get("backend") or participant.get("type")
         if not backend:
             backend = _infer_backend(name, participant.get("model"))
+        # Re-infer if backend is stale "opencode" but model belongs to another backend.
+        if backend == "opencode" and not _OPENCODE_ENABLED:
+            model = participant.get("model", "")
+            try:
+                re_inferred = _infer_backend(name, model) if model else "opencode"
+            except ValueError:
+                re_inferred = "opencode"
+            if re_inferred != "opencode":
+                backend = re_inferred
+                participant["backend"] = backend
         sid = participant.get("session_id")
 
         if backend == "claude":
