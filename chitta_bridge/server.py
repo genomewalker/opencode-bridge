@@ -5663,7 +5663,8 @@ class SoulClient:
         """
         if not text:
             return None
-        import re as _re, time as _time
+        import re as _re
+        import time as _time
         from datetime import datetime as _dt
         m = _re.search(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}", text)
         if m:
