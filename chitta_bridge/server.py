@@ -571,21 +571,102 @@ _BACKEND_RULES: list[tuple[tuple[str, ...], str]] = [
 ]
 
 
-def _normalize_participant_shorthands(plist: list) -> list:
-    """Accept 'backend:model[:effort]' shorthand strings alongside participant dicts.
+_CLAUDE_MODEL_CACHE: "dict[str, str] | None" = None
+_CODEX_MODEL_CACHE: "dict[str, str] | None" = None
 
-    room_create has a richer normalizer (live model discovery); this is the
-    minimal subset for tools like room_fork that take a participants override.
+
+def _discover_claude_shorthands() -> "dict[str, str]":
+    """Query Anthropic REST /v1/models and build family→model-id shorthand map.
+
+    Reads primaryApiKey from ~/.claude/config.json (same credential claude -p uses).
+    Response is ordered newest-first; first hit per family = latest.
+    Falls back to hard-coded defaults if unreachable.
     """
-    shorthands = {
+    global _CLAUDE_MODEL_CACHE
+    if _CLAUDE_MODEL_CACHE is not None:
+        return _CLAUDE_MODEL_CACHE
+    _FALLBACK: "dict[str, str]" = {
         "opus":     "claude-opus-4-8",
         "opus-4.8": "claude-opus-4-8",
         "opus-4-8": "claude-opus-4-8",
         "sonnet":   "claude-sonnet-4-6",
         "haiku":    "claude-haiku-4-5",
-        "fable5":   "claude-fable-5",
         "fable":    "claude-fable-5",
+        "fable5":   "claude-fable-5",
     }
+    try:
+        import json as _json
+        import urllib.request as _ur
+        cfg_path = Path.home() / ".claude" / "config.json"
+        if not cfg_path.exists():
+            _CLAUDE_MODEL_CACHE = _FALLBACK
+            return _CLAUDE_MODEL_CACHE
+        api_key = _json.loads(cfg_path.read_text()).get("primaryApiKey", "")
+        if not api_key:
+            _CLAUDE_MODEL_CACHE = _FALLBACK
+            return _CLAUDE_MODEL_CACHE
+        req = _ur.Request(
+            "https://api.anthropic.com/v1/models?limit=100",
+            headers={"x-api-key": api_key, "anthropic-version": "2023-06-01"},
+        )
+        with _ur.urlopen(req, timeout=8) as resp:
+            data = _json.loads(resp.read())
+        out: "dict[str, str]" = {}
+        for model in data.get("data", []):
+            mid = model.get("id", "")
+            m = re.match(r'claude-([a-z]+)-([\d].*)', mid)
+            if not m:
+                continue
+            family, ver = m.group(1), m.group(2)
+            if family not in out:          # first = latest (newest-first list)
+                out[family] = mid
+                dot_ver = ver.replace("-", ".")
+                out[f"{family}-{dot_ver}"] = mid
+                out[f"{family}-{ver}"]     = mid
+        if "fable" in out:
+            ver_num = out["fable"].rsplit("-", 1)[-1]
+            out[f"fable{ver_num}"] = out["fable"]
+        _CLAUDE_MODEL_CACHE = out if out else _FALLBACK
+    except Exception:
+        _CLAUDE_MODEL_CACHE = _FALLBACK
+    return _CLAUDE_MODEL_CACHE
+
+
+def _discover_codex_shorthands() -> "dict[str, str]":
+    """Read ~/.codex/config.toml and build GPT model shorthands.
+
+    Exposes 'gpt' → default model from config. Falls back to gpt-5.5.
+    """
+    global _CODEX_MODEL_CACHE
+    if _CODEX_MODEL_CACHE is not None:
+        return _CODEX_MODEL_CACHE
+    _FALLBACK: "dict[str, str]" = {"gpt": "gpt-5.5"}
+    try:
+        cfg_path = Path.home() / ".codex" / "config.toml"
+        if not cfg_path.exists():
+            _CODEX_MODEL_CACHE = _FALLBACK
+            return _CODEX_MODEL_CACHE
+        try:
+            import tomllib as _toml
+        except ImportError:
+            import tomli as _toml  # type: ignore
+        with open(cfg_path, "rb") as fh:
+            cfg = _toml.load(fh)
+        default_model = cfg.get("model", "gpt-5.5")
+        out: "dict[str, str]" = {"gpt": default_model}
+        # slug alias: "gpt5.5" → "gpt-5.5"
+        slug = default_model.replace("-", "").replace(".", "")
+        out[slug] = default_model
+        _CODEX_MODEL_CACHE = out
+    except Exception:
+        _CODEX_MODEL_CACHE = _FALLBACK
+    return _CODEX_MODEL_CACHE
+
+
+def _normalize_participant_shorthands(plist: list) -> list:
+    """Accept 'backend:model[:effort]' shorthand strings alongside participant dicts."""
+    claude_sh = _discover_claude_shorthands()
+    codex_sh  = _discover_codex_shorthands()
     out = []
     for p in plist or []:
         if isinstance(p, dict):
@@ -596,14 +677,24 @@ def _normalize_participant_shorthands(plist: list) -> list:
         if parts[0] in ("opencode", "codex", "claude", "local") and len(parts) > 1:
             model = parts[1]
             if parts[0] == "claude":
-                model = shorthands.get(model.lower(), model)
+                model = claude_sh.get(model.lower(), model)
+            elif parts[0] == "codex":
+                model = codex_sh.get(model.lower(), model)
             d = {"name": s, "backend": parts[0], "model": model}
             if len(parts) > 2:
                 d["effort"] = parts[2].lower()
             out.append(d)
         else:
-            inferred = _infer_backend(s)
-            model_id = shorthands.get(s.lower(), s) if inferred == "claude" else s
+            try:
+                inferred = _infer_backend(s)
+            except ValueError:
+                inferred = "opencode"
+            if inferred == "claude":
+                model_id = claude_sh.get(s.lower(), s)
+            elif inferred == "codex":
+                model_id = codex_sh.get(s.lower(), s)
+            else:
+                model_id = s
             out.append({"name": s, "backend": inferred, "model": model_id})
     return out
 
@@ -11080,17 +11171,9 @@ async def call_tool(name: str, arguments: dict):
             #   "claude" or "claude/model" → backend=claude,
             #   bare string → check existing sessions (local, codex, opencode) by ID,
             #   else → backend=opencode
-            # Build claude shorthand map once — read CLAUDE.md for version-pinned IDs
             _EFFORT_VALUES = {"low", "medium", "high", "xhigh", "max"}
-            _CLAUDE_SHORTHANDS: dict = {
-                "opus":     "claude-opus-4-8",
-                "opus-4.8": "claude-opus-4-8",
-                "opus-4-8": "claude-opus-4-8",
-                "sonnet":   "claude-sonnet-4-6",
-                "haiku":    "claude-haiku-4-5",
-                "fable5":   "claude-fable-5",
-                "fable":    "claude-fable-5",
-            }
+            _CLAUDE_SHORTHANDS = _discover_claude_shorthands()
+            _CODEX_SHORTHANDS  = _discover_codex_shorthands()
             normalized = []
             for p in participants:
                 if isinstance(p, dict):
@@ -11122,7 +11205,7 @@ async def call_tool(name: str, arguments: dict):
                                 d["session_id"] = sid_or_model
                                 d["model"] = sess.model
                             else:
-                                d["model"] = sid_or_model
+                                d["model"] = _CODEX_SHORTHANDS.get(sid_or_model.lower(), sid_or_model)
                             if effort_hint:
                                 d["effort"] = effort_hint
                             normalized.append(d)
@@ -11157,7 +11240,12 @@ async def call_tool(name: str, arguments: dict):
                             inferred = _infer_backend(s)
                         except ValueError:
                             inferred = "opencode"
-                        model_id = _CLAUDE_SHORTHANDS.get(s.lower(), s) if inferred == "claude" else s
+                        if inferred == "claude":
+                            model_id = _CLAUDE_SHORTHANDS.get(s.lower(), s)
+                        elif inferred == "codex":
+                            model_id = _CODEX_SHORTHANDS.get(s.lower(), s)
+                        else:
+                            model_id = s
                         normalized.append({"name": s, "backend": inferred, "model": model_id})
             participants = normalized
             # Resolve backend at create time — never silently at dispatch
