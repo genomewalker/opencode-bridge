@@ -9561,6 +9561,8 @@ def handle_advanced(arguments: dict) -> str:
 
 @server.list_tools()
 async def list_tools():
+    _codex_default = _discover_codex_shorthands().get("gpt", "gpt-5.5")
+    _claude_default = _discover_claude_shorthands().get("opus", "claude-opus-4-8")
     _tools = [
         Tool(
             name="opencode_start",
@@ -9784,7 +9786,7 @@ async def list_tools():
         ),
         Tool(
             name="codex_discuss",
-            description="Send a message to Codex. Use for coding tasks, file operations, debugging.",
+            description=f"Send a message to Codex ({_codex_default}). Use for coding tasks, questions, debugging.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -9803,13 +9805,13 @@ async def list_tools():
         ),
         Tool(
             name="codex_run",
-            description="Run a one-off Codex task (stateless). Returns result + session ID for resuming.",
+            description=f"Run a one-off task via the Codex CLI ({_codex_default} by default). Use this to query {_codex_default} directly. Returns the result.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "task": {
                         "type": "string",
-                        "description": "The coding task to perform"
+                        "description": "The task or question"
                     },
                     "working_dir": {
                         "type": "string",
@@ -9817,11 +9819,7 @@ async def list_tools():
                     },
                     "model": {
                         "type": "string",
-                        "description": "Model to use (default: o3)"
-                    },
-                    "full_auto": {
-                        "type": "boolean",
-                        "description": "Enable full-auto mode (default: true)"
+                        "description": f"Model to use (default: {_codex_default})"
                     },
                     "effort": {
                         "type": "string",
