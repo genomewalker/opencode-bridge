@@ -10671,57 +10671,6 @@ async def list_tools():
             },
         ),
         Tool(
-            name="read_symbol",
-            description=(
-                "Read a function/class/method body by name. Checks a sticky "
-                "session cache first (hot after symbol_patch/edit/insert_child) "
-                "before falling back to the chitta daemon. Optional `file` narrows "
-                "the lookup and enables the cache fast-path. "
-                "Use `offset` + `max_chars` to paginate oversized symbols."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Symbol name"},
-                    "file": {"type": "string", "description": "Optional absolute path; enables sticky-cache hit"},
-                    "offset": {"type": "integer", "description": "Byte offset into the body (for pagination; default 0)"},
-                    "max_chars": {"type": "integer", "description": "Max chars to return (default 8000); increase for large symbols"},
-                },
-                "required": ["name"],
-            },
-        ),
-        Tool(
-            name="read_range",
-            description=(
-                "Read a contiguous line range from any file. "
-                "Use when you know the target line numbers (e.g. from read_outline or a grep hit). "
-                "More efficient than reading the whole file for large files."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "file":       {"type": "string",  "description": "Absolute path to the file"},
-                    "start_line": {"type": "integer", "description": "First line to read (1-based, inclusive)"},
-                    "end_line":   {"type": "integer", "description": "Last line to read (1-based, inclusive)"},
-                },
-                "required": ["file", "start_line", "end_line"],
-            },
-        ),
-        Tool(
-            name="read_outline",
-            description=(
-                "List the top-level symbols (functions, classes, structs) of a file with their line numbers. "
-                "Use this before read_range or read_symbol to locate what you want without reading the whole file."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "file": {"type": "string", "description": "Absolute path to the file"},
-                },
-                "required": ["file"],
-            },
-        ),
-        Tool(
             name="symbol_callers",
             description=(
                 "List the call sites of a symbol (who calls it) from the chitta "
@@ -10952,7 +10901,7 @@ async def list_tools():
     ]
     if not _HAS_CODEX:
         _tools = [t for t in _tools if not t.name.startswith("codex_")]
-    if not _HAS_OPENCODE:
+    if not (_HAS_OPENCODE and _OPENCODE_TOOLS_ENABLED):
         _tools = [t for t in _tools if not t.name.startswith("opencode_")]
     _tools = [t for t in _tools if t.name not in HIDDEN_TOOLS]
     _tools.append(Tool(
