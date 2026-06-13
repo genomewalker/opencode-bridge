@@ -553,14 +553,10 @@ MAX_READ_SIZE = 10 * 1024 * 1024  # 10MB - above this, estimate lines from size
 
 # Backend inference: model/name prefix → backend
 # Order matters — check more specific prefixes first.
-# _OPENCODE_TOOLS_ENABLED: gates direct opencode_* tool calls (opencode_switch,
-# opencode_discuss, etc.). Keep False to stop other sessions from grabbing the
-# shared OpenCode process and interfering.
-# _OPENCODE_BACKEND_ENABLED: gates room participant dispatch via the opencode
-# backend (needed for ChatGPT-account models like gpt-5.5 that aren't on the
-# OpenAI API). Keep True so rooms can still route to gpt-5.5.
+# Gates direct opencode_* tool calls. Keep False to stop sessions grabbing the
+# shared OpenCode process. Room dispatch via opencode backend always works —
+# needed for ChatGPT-account models (gpt-5.5) not available on the OpenAI API.
 _OPENCODE_TOOLS_ENABLED: bool = False
-_OPENCODE_ENABLED: bool = True  # backend for room participants
 
 _BACKEND_RULES: list[tuple[tuple[str, ...], str]] = [
     # Anthropic → claude
@@ -9562,7 +9558,6 @@ def handle_advanced(arguments: dict) -> str:
 @server.list_tools()
 async def list_tools():
     _codex_default = _discover_codex_shorthands().get("gpt", "gpt-5.5")
-    _claude_default = _discover_claude_shorthands().get("opus", "claude-opus-4-8")
     _tools = [
         Tool(
             name="opencode_start",
@@ -9823,12 +9818,12 @@ async def list_tools():
                     },
                     "effort": {
                         "type": "string",
-                        "description": "Effort: low, medium, high, xhigh"
+                        "description": "Effort: low, medium, high, xhigh (default: xhigh)"
                     },
                     "sandbox": {
                         "type": "string",
                         "enum": ["read-only", "workspace-write", "danger-full-access"],
-                        "description": "Sandbox: read-only, workspace-write, danger-full-access"
+                        "description": "Sandbox mode (default: danger-full-access)"
                     }
                 },
                 "required": ["task"]
@@ -9926,7 +9921,7 @@ async def list_tools():
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "model": {"type": "string", "description": "New model (o3, o4-mini, gpt-4.1)"}
+                    "model": {"type": "string", "description": f"New model (e.g. {_codex_default}, o3, o4-mini)"}
                 },
                 "required": ["model"]
             }
@@ -11092,8 +11087,8 @@ async def call_tool(name: str, arguments: dict):
                 working_dir=arguments.get("working_dir"),
                 model=arguments.get("model"),
                 full_auto=arguments.get("full_auto", True),
-                effort=arguments.get("effort"),
-                sandbox=arguments.get("sandbox"),
+                effort=arguments.get("effort", "xhigh"),
+                sandbox=arguments.get("sandbox", "danger-full-access"),
             )
         elif name == "codex_review":
             result = await codex_bridge.review_code(
