@@ -577,9 +577,15 @@ def _normalize_participant_shorthands(plist: list) -> list:
     room_create has a richer normalizer (live model discovery); this is the
     minimal subset for tools like room_fork that take a participants override.
     """
-    shorthands = {"opus": "claude-opus-4-8", "sonnet": "claude-sonnet-4-6",
-                  "haiku": "claude-haiku-4-5", "fable5": "claude-fable-5",
-                  "fable": "claude-fable-5"}
+    shorthands = {
+        "opus":     "claude-opus-4-8",
+        "opus-4.8": "claude-opus-4-8",
+        "opus-4-8": "claude-opus-4-8",
+        "sonnet":   "claude-sonnet-4-6",
+        "haiku":    "claude-haiku-4-5",
+        "fable5":   "claude-fable-5",
+        "fable":    "claude-fable-5",
+    }
     out = []
     for p in plist or []:
         if isinstance(p, dict):
@@ -11076,25 +11082,15 @@ async def call_tool(name: str, arguments: dict):
             #   else → backend=opencode
             # Build claude shorthand map once — read CLAUDE.md for version-pinned IDs
             _EFFORT_VALUES = {"low", "medium", "high", "xhigh", "max"}
-            _CLAUDE_SHORTHANDS: dict = {}
-            try:
-                import re as _re
-                _cm = Path.home() / ".claude" / "CLAUDE.md"
-                if _cm.exists():
-                    for _mid in _re.findall(r'`(claude-[a-z0-9-]+)`', _cm.read_text()):
-                        if "opus" in _mid and "opus" not in _CLAUDE_SHORTHANDS:
-                            _CLAUDE_SHORTHANDS["opus"] = _mid
-                        elif "sonnet" in _mid and "sonnet" not in _CLAUDE_SHORTHANDS:
-                            _CLAUDE_SHORTHANDS["sonnet"] = _mid
-                        elif "haiku" in _mid and "haiku" not in _CLAUDE_SHORTHANDS:
-                            _CLAUDE_SHORTHANDS["haiku"] = _mid
-            except Exception:
-                pass
-            _CLAUDE_SHORTHANDS.setdefault("opus", "claude-opus-4-8")
-            _CLAUDE_SHORTHANDS.setdefault("sonnet", "claude-sonnet-4-6")
-            _CLAUDE_SHORTHANDS.setdefault("haiku", "claude-haiku-4-5")
-            _CLAUDE_SHORTHANDS.setdefault("fable5", "claude-fable-5")
-            _CLAUDE_SHORTHANDS.setdefault("fable", "claude-fable-5")
+            _CLAUDE_SHORTHANDS: dict = {
+                "opus":     "claude-opus-4-8",
+                "opus-4.8": "claude-opus-4-8",
+                "opus-4-8": "claude-opus-4-8",
+                "sonnet":   "claude-sonnet-4-6",
+                "haiku":    "claude-haiku-4-5",
+                "fable5":   "claude-fable-5",
+                "fable":    "claude-fable-5",
+            }
             normalized = []
             for p in participants:
                 if isinstance(p, dict):
