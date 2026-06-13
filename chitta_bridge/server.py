@@ -9509,8 +9509,8 @@ HIDDEN_TOOLS = {
     "local_discover", "local_health", "local_discuss",
     # Orchestration (complex, rarely needed)
     "multi_consult", "agent_chain", "delegate_codex", "parallel_agents",
-    # Rooms (multi-agent discussion)
-    "room_create", "room_run", "room_synthesize", "room_read", "room_challenge", "room_cost",
+    # Rooms (multi-agent discussion — lifecycle only; core tools promoted to visible)
+    "room_challenge", "room_cost",
     "room_inject", "room_fork", "room_add_participant", "room_set_preamble",
     "scheduler_list", "scheduler_run_now", "scheduler_pause", "scheduler_resume", "scheduler_history",
     "room_status", "room_suggest_participants",
@@ -9779,6 +9779,56 @@ async def list_tools():
                 "required": ["session_id"]
             }
         ),
+        # ── Intent-shaped tools (backend is an internal detail) ─────────────────
+        Tool(
+            name="discuss",
+            description=f"Ask a question or start a discussion. Routes to {_codex_default} by default. Use backend='opencode' for ChatGPT-account models.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "message":  {"type": "string",  "description": "Your message or question"},
+                    "files":    {"type": "array", "items": {"type": "string"}, "description": "File paths to attach"},
+                    "domain":   {"type": "string",  "description": "Domain hint (e.g. 'bioinformatics', 'security')"},
+                    "model":    {"type": "string",  "description": f"Model override (default: {_codex_default})"},
+                    "effort":   {"type": "string",  "description": "Effort: low, medium, high, xhigh (default: xhigh)"},
+                    "backend":  {"type": "string",  "description": "codex (default) or opencode"},
+                },
+                "required": ["message"],
+            },
+        ),
+        Tool(
+            name="review",
+            description="Review code for bugs, issues, or design problems. Routes to Codex by default.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "working_dir":   {"type": "string", "description": "Repo directory (default: current)"},
+                    "code_or_file":  {"type": "string", "description": "Code snippet or file path(s)"},
+                    "focus":         {"type": "string", "description": "What to focus on"},
+                    "mode":          {"type": "string", "enum": ["normal", "adversarial"], "description": "normal (default) or adversarial"},
+                    "base":          {"type": "string", "description": "Git ref to diff against (e.g. 'main')"},
+                    "effort":        {"type": "string", "description": "Effort (default: xhigh)"},
+                    "model":         {"type": "string", "description": f"Model override (default: {_codex_default})"},
+                    "backend":       {"type": "string", "description": "codex (default) or opencode"},
+                },
+            },
+        ),
+        Tool(
+            name="run",
+            description=f"Run a one-off task via {_codex_default} (full-auto, danger-full-access). For questions use discuss; for long background tasks use codex_rescue.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task":        {"type": "string",  "description": "Task or question"},
+                    "working_dir": {"type": "string",  "description": "Working directory (default: current)"},
+                    "model":       {"type": "string",  "description": f"Model override (default: {_codex_default})"},
+                    "effort":      {"type": "string",  "description": "Effort (default: xhigh)"},
+                    "sandbox":     {"type": "string",  "enum": ["read-only", "workspace-write", "danger-full-access"], "description": "Sandbox (default: danger-full-access)"},
+                },
+                "required": ["task"],
+            },
+        ),
+        # ── Backend-specific tools (kept for direct control) ─────────────────
         Tool(
             name="codex_discuss",
             description=f"Send a message to Codex ({_codex_default}). Use for coding tasks, questions, debugging.",
@@ -11015,6 +11065,49 @@ async def call_tool(name: str, arguments: dict):
         elif name == "opencode_health":
             health = bridge.health_check()
             result = f"Status: {health['status']}\nSessions: {health['sessions']}\nUptime: {health['uptime']}s"
+        # Intent-shaped tools — route internally
+        elif name == "discuss":
+            _backend = arguments.get("backend", "codex")
+            if _backend == "opencode" and _HAS_OPENCODE and _OPENCODE_TOOLS_ENABLED:
+                result = await bridge.send_message(
+                    message=arguments["message"],
+                    files=arguments.get("files"),
+                    domain_override=arguments.get("domain"),
+                )
+            else:
+                result = await codex_bridge.send_message(
+                    message=arguments["message"],
+                    images=arguments.get("files"),
+                )
+            _threading.Thread(target=distill_event, args=("checkpoint", result, {}), daemon=True).start()
+        elif name == "review":
+            _backend = arguments.get("backend", "codex")
+            if _backend == "opencode" and _HAS_OPENCODE and _OPENCODE_TOOLS_ENABLED:
+                result = await bridge.review_code(
+                    code_or_file=arguments.get("code_or_file", arguments.get("working_dir", ".")),
+                    focus=arguments.get("focus"),
+                )
+            else:
+                result = await codex_bridge.review_code(
+                    working_dir=arguments.get("working_dir"),
+                    model=arguments.get("model"),
+                    mode=arguments.get("mode", "normal"),
+                    focus=arguments.get("focus"),
+                    base=arguments.get("base"),
+                    effort=arguments.get("effort", "xhigh"),
+                    background=arguments.get("background", False),
+                    sandbox=arguments.get("sandbox"),
+                )
+            _threading.Thread(target=distill_event, args=("checkpoint", result, {}), daemon=True).start()
+        elif name == "run":
+            result = await codex_bridge.run_task(
+                task=arguments["task"],
+                working_dir=arguments.get("working_dir"),
+                model=arguments.get("model"),
+                full_auto=True,
+                effort=arguments.get("effort", "xhigh"),
+                sandbox=arguments.get("sandbox", "danger-full-access"),
+            )
         # Codex tools
         elif name == "codex_start":
             result = await codex_bridge.start_session(
