@@ -9883,13 +9883,22 @@ async def list_tools():
                         "type": "string",
                         "description": "Short label (defaults to first 120 chars of prompt).",
                     },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["quick", "deep"],
+                        "description": (
+                            "Preset: \"quick\" = rounds=1, adversarial=false (default, fast). "
+                            "\"deep\" = rounds=3, adversarial=true (full DRACO-style research). "
+                            "Explicit rounds/adversarial params override the preset."
+                        ),
+                    },
                     "rounds": {
                         "type": "integer",
-                        "description": "Number of independent sampling rounds per participant (sparse — no cross-contamination). More rounds = more answer-space coverage for the judge. (default: 1)",
+                        "description": "Number of independent sampling rounds per participant (sparse — no cross-contamination). More rounds = more answer-space coverage for the judge. Overrides mode preset. (default: 1)",
                     },
                     "adversarial": {
                         "type": "boolean",
-                        "description": "If true, synthesis produces majority + minority reading + decision bet. (default: false)",
+                        "description": "If true, synthesis produces majority + minority reading + decision bet. Overrides mode preset. (default: false)",
                     },
                 },
                 "required": ["prompt"],
@@ -11191,8 +11200,9 @@ async def call_tool(name: str, arguments: dict):
             _fuse_topic = arguments.get("topic") or _fuse_prompt[:120]
             _fuse_parts_raw = arguments.get("participants") or ["claude:opus:xhigh", "codex:gpt:xhigh"]
             _fuse_judge_raw = arguments.get("judge", "claude:opus:max")
-            _fuse_adversarial = arguments.get("adversarial", False)
-            _fuse_rounds = max(1, int(arguments.get("rounds", 1)))
+            _fuse_mode = arguments.get("mode", "quick")
+            _fuse_adversarial = arguments.get("adversarial", _fuse_mode == "deep")
+            _fuse_rounds = max(1, int(arguments.get("rounds", 3 if _fuse_mode == "deep" else 1)))
             if isinstance(_fuse_parts_raw, str):
                 _fuse_parts_raw = json.loads(_fuse_parts_raw)
             _fuse_norm = _normalize_participant_shorthands(_fuse_parts_raw)
