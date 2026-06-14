@@ -6805,6 +6805,7 @@ class DiscussionRoom:
     max_total_rounds: int = 6    # hard cap — run_rounds refuses past this; call room_fork to continue
     forked_from: str = ""        # parent room_id if this room was forked
     preamble: str = ""           # opt-in framing prepended to every participant's system prompt
+    participant_tools: list = field(default_factory=list)  # tools each participant may call; ["all"] = skip-permissions
     schema_version: int = PERSISTED_SCHEMA_VERSION
 
     def save(self, path: Path):
@@ -7074,7 +7075,8 @@ class RoomManager:
                      roles: Optional[dict] = None,
                      clean: bool = False,
                      verbatim_rounds: int = 2,
-                     preamble: str = "") -> str:
+                     preamble: str = "",
+                     participant_tools: Optional[list] = None) -> str:
         _sanitize_session_id(room_id)
         if room_id in self.rooms:
             # Auto-fork: summarize old room, create new room with UUID suffix
@@ -7092,7 +7094,8 @@ class RoomManager:
         expanded = _expand_paths(files or [])
         room = DiscussionRoom(id=room_id, topic=topic, participants=participants, files=expanded,
                               roles=roles or {}, clean=clean, verbatim_rounds=verbatim_rounds,
-                              preamble=preamble or "")
+                              preamble=preamble or "",
+                              participant_tools=participant_tools or [])
         room.messages.append({"name": "TOPIC", "content": topic, "ts": datetime.now().isoformat()})
         # Inject soul context if chittad is running (filter code symbols)
         if SoulClient.is_available():
@@ -8741,7 +8744,6 @@ class RoomManager:
     # ------------------------------------------------------------------
     # Backend dispatch + tool-use loop
     # ------------------------------------------------------------------
-
     async def _send_to_backend(self, participant: dict, message: str,
                                 system_prompt: Optional[str] = None,
                                 tools: Optional[list] = None,
@@ -8760,6 +8762,7 @@ class RoomManager:
                 full_prompt, files=files,
                 model=participant.get("model"),
                 effort=participant.get("effort"),
+                allowed_tools=participant.get("_allowed_tools"),
                 _usage_out=_usage,
             )
             if _usage:
@@ -8853,11 +8856,11 @@ class RoomManager:
                 "estimated": True,
             }
             return reply
-
     async def _run_claude_p(self, prompt: str, timeout: int = 300,
                              files: Optional[list[str]] = None,
                              model: Optional[str] = None,
                              effort: Optional[str] = None,
+                             allowed_tools: Optional[list] = None,
                              _usage_out: Optional[dict] = None) -> str:
         """Run `claude -p --output-format json` and return the response text.
 
@@ -8878,6 +8881,11 @@ class RoomManager:
                 cmd.extend(["--model", model])
             if effort:
                 cmd.extend(["--effort", effort])
+            if allowed_tools:
+                if "all" in allowed_tools:
+                    cmd.append("--allow-dangerously-skip-permissions")
+                else:
+                    cmd.extend(["--allowedTools", ",".join(allowed_tools)])
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdin=asyncio.subprocess.PIPE,
@@ -8940,6 +8948,8 @@ class RoomManager:
         name = participant["name"]
         soul = self._parse_soul(participant)
         participant["_room_id"] = room.id
+        if room.participant_tools and "_allowed_tools" not in participant:
+            participant["_allowed_tools"] = room.participant_tools
         turn_key = f"r{round_num}:{name}"
 
         # Skip already-poisoned participants — terminal state, no backend call needed.
@@ -9848,7 +9858,7 @@ async def list_tools():
                         "items": {"type": "string"},
                         "description": (
                             "'backend:model[:effort]' strings for each panel member. "
-                            f"Default: [\"claude:opus:xhigh\", \"codex:gpt:xhigh\"]"
+                            "Default: [\"claude:opus:xhigh\", \"codex:gpt:xhigh\"]"
                         ),
                     },
                     "judge": {
@@ -10268,6 +10278,17 @@ async def list_tools():
                     "preamble": {
                         "type": "string",
                         "description": "Opt-in framing prepended to every participant's system prompt — front-loads honest research context so a benign-but-sensitive domain is legible before the task, lowering false-positive safety flags. Pass a named preset (e.g. 'ancient-dna') or literal text. Lowers a base rate; does not guarantee a prompt clears. Not auto-applied by keyword."
+                    },
+                    "participant_tools": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Tools each participant may call during their turn. "
+                            "Pass [\"all\"] to grant access to all configured MCP tools (web_search, paper_fetch, chitta recall, etc.). "
+                            "Or pass specific tool names: [\"mcp__chitta-bridge__web_search\", \"mcp__chitta__recall\"]. "
+                            "Default: [] (no tools — text-only responses). "
+                            "Applies to claude backend; codex has tools natively via full-auto."
+                        )
                     }
                 },
                 "required": ["room_id", "topic", "participants"]
@@ -11167,7 +11188,8 @@ async def call_tool(name: str, arguments: dict):
             _judge_norm = _normalize_participant_shorthands([_fuse_judge_raw])
             _fuse_judge = _judge_norm[0] if _judge_norm else {"name": "Synthesizer", "backend": "claude"}
             _fuse_room_id = f"fusion-{uuid.uuid4().hex[:8]}"
-            await rooms.create(room_id=_fuse_room_id, topic=_fuse_topic, participants=_fuse_norm)
+            await rooms.create(room_id=_fuse_room_id, topic=_fuse_topic, participants=_fuse_norm,
+                               participant_tools=["all"])
             await rooms.run_rounds(room_id=_fuse_room_id, rounds=_fuse_rounds, sparse_topology=True)
             result = await rooms.synthesize(
                 room_id=_fuse_room_id, synthesizer=_fuse_judge, adversarial=_fuse_adversarial
@@ -11389,6 +11411,7 @@ async def call_tool(name: str, arguments: dict):
                     clean=bool(arguments.get("clean", False)),
                     verbatim_rounds=int(arguments.get("verbatim_rounds", 2)),
                     preamble=arguments.get("preamble", ""),
+                    participant_tools=arguments.get("participant_tools") or [],
                 )
         elif name == "room_set_preamble":
             rid = arguments.get("room_id", "")
