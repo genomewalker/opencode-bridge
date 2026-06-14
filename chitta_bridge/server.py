@@ -9828,6 +9828,48 @@ async def list_tools():
                 "required": ["task"],
             },
         ),
+        Tool(
+            name="fusion",
+            description=(
+                f"Dispatch a prompt to a panel of models in parallel (sparse topology — no cross-contamination), "
+                f"then synthesize a single fused answer with a judge model. "
+                f"Default panel: opus + {_codex_default}. "
+                f"Fusion rooms are ephemeral; their transcript is readable via room_read."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "The question or task to run through the panel.",
+                    },
+                    "participants": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "'backend:model[:effort]' strings for each panel member. "
+                            f"Default: [\"claude:opus:xhigh\", \"codex:gpt:xhigh\"]"
+                        ),
+                    },
+                    "judge": {
+                        "type": "string",
+                        "description": (
+                            "Model that synthesizes panel responses. "
+                            "Default: \"claude:fable:xhigh\""
+                        ),
+                    },
+                    "topic": {
+                        "type": "string",
+                        "description": "Short label (defaults to first 120 chars of prompt).",
+                    },
+                    "adversarial": {
+                        "type": "boolean",
+                        "description": "If true, synthesis produces majority + minority reading + decision bet. (default: false)",
+                    },
+                },
+                "required": ["prompt"],
+            },
+        ),
         # ── Backend-specific tools (kept for direct control) ─────────────────
         Tool(
             name="codex_discuss",
@@ -11108,6 +11150,25 @@ async def call_tool(name: str, arguments: dict):
                 effort=arguments.get("effort", "xhigh"),
                 sandbox=arguments.get("sandbox", "danger-full-access"),
             )
+        elif name == "fusion":
+            _fuse_prompt = arguments["prompt"]
+            _fuse_topic = arguments.get("topic") or _fuse_prompt[:120]
+            _fuse_parts_raw = arguments.get("participants") or ["claude:opus:xhigh", "codex:gpt:xhigh"]
+            _fuse_judge_raw = arguments.get("judge", "claude:fable:xhigh")
+            _fuse_adversarial = arguments.get("adversarial", False)
+            if isinstance(_fuse_parts_raw, str):
+                _fuse_parts_raw = json.loads(_fuse_parts_raw)
+            _fuse_norm = _normalize_participant_shorthands(_fuse_parts_raw)
+            _judge_norm = _normalize_participant_shorthands([_fuse_judge_raw])
+            _fuse_judge = _judge_norm[0] if _judge_norm else {"name": "Synthesizer", "backend": "claude"}
+            _fuse_room_id = f"fusion-{uuid.uuid4().hex[:8]}"
+            await rooms.create(room_id=_fuse_room_id, topic=_fuse_topic, participants=_fuse_norm)
+            await rooms.run_rounds(room_id=_fuse_room_id, rounds=1, sparse_topology=True)
+            result = await rooms.synthesize(
+                room_id=_fuse_room_id, synthesizer=_fuse_judge, adversarial=_fuse_adversarial
+            )
+            _threading.Thread(target=distill_event, args=("room_synth", result, {}), daemon=True).start()
+            result = f"[fusion:{_fuse_room_id}]\n{result}"
         # Codex tools
         elif name == "codex_start":
             result = await codex_bridge.start_session(
