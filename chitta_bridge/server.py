@@ -9855,7 +9855,7 @@ async def list_tools():
                         "type": "string",
                         "description": (
                             "Model that synthesizes panel responses. "
-                            "Default: \"claude:fable:xhigh\""
+                            "Default: \"claude:opus:max\""
                         ),
                     },
                     "topic": {
@@ -11154,7 +11154,7 @@ async def call_tool(name: str, arguments: dict):
             _fuse_prompt = arguments["prompt"]
             _fuse_topic = arguments.get("topic") or _fuse_prompt[:120]
             _fuse_parts_raw = arguments.get("participants") or ["claude:opus:xhigh", "codex:gpt:xhigh"]
-            _fuse_judge_raw = arguments.get("judge", "claude:fable:xhigh")
+            _fuse_judge_raw = arguments.get("judge", "claude:opus:max")
             _fuse_adversarial = arguments.get("adversarial", False)
             if isinstance(_fuse_parts_raw, str):
                 _fuse_parts_raw = json.loads(_fuse_parts_raw)
