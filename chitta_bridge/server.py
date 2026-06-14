@@ -9862,6 +9862,10 @@ async def list_tools():
                         "type": "string",
                         "description": "Short label (defaults to first 120 chars of prompt).",
                     },
+                    "rounds": {
+                        "type": "integer",
+                        "description": "Number of independent sampling rounds per participant (sparse — no cross-contamination). More rounds = more answer-space coverage for the judge. (default: 1)",
+                    },
                     "adversarial": {
                         "type": "boolean",
                         "description": "If true, synthesis produces majority + minority reading + decision bet. (default: false)",
@@ -11156,6 +11160,7 @@ async def call_tool(name: str, arguments: dict):
             _fuse_parts_raw = arguments.get("participants") or ["claude:opus:xhigh", "codex:gpt:xhigh"]
             _fuse_judge_raw = arguments.get("judge", "claude:opus:max")
             _fuse_adversarial = arguments.get("adversarial", False)
+            _fuse_rounds = max(1, int(arguments.get("rounds", 1)))
             if isinstance(_fuse_parts_raw, str):
                 _fuse_parts_raw = json.loads(_fuse_parts_raw)
             _fuse_norm = _normalize_participant_shorthands(_fuse_parts_raw)
@@ -11163,7 +11168,7 @@ async def call_tool(name: str, arguments: dict):
             _fuse_judge = _judge_norm[0] if _judge_norm else {"name": "Synthesizer", "backend": "claude"}
             _fuse_room_id = f"fusion-{uuid.uuid4().hex[:8]}"
             await rooms.create(room_id=_fuse_room_id, topic=_fuse_topic, participants=_fuse_norm)
-            await rooms.run_rounds(room_id=_fuse_room_id, rounds=1, sparse_topology=True)
+            await rooms.run_rounds(room_id=_fuse_room_id, rounds=_fuse_rounds, sparse_topology=True)
             result = await rooms.synthesize(
                 room_id=_fuse_room_id, synthesizer=_fuse_judge, adversarial=_fuse_adversarial
             )
