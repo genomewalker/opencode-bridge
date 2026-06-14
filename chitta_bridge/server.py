@@ -7562,6 +7562,17 @@ class RoomManager:
                 f"No preamble, no recap of what others said. Keep your response under {_wlim2} words."
             )
 
+        # Tool-use hint — injected when participant has MCP tools available (e.g. fusion).
+        # Tells the model to actively search/fetch rather than reply from priors.
+        if room.participant_tools:
+            system_prompt += (
+                "\n\n## Tools available — use them\n"
+                "You have access to web_search, web_fetch, paper_fetch, soul_recall, and other MCP tools. "
+                "Before answering, call web_search and/or paper_fetch to find primary sources. "
+                "Cite every factual claim with a URL, DOI, or arXiv ID you actually retrieved. "
+                "Responses without tool-backed citations will be marked [asserted] and down-weighted by the judge."
+            )
+
         # Inject epistemic role text (re-prepended every turn so it doesn't decay)
         role_key = room.roles.get(name)
         if role_key and role_key in ROLE_PROMPTS:
