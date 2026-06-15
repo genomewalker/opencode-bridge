@@ -9041,6 +9041,8 @@ class RoomManager:
 
         # Extract final response if wrapped in tags, otherwise use raw reply
         final = self._extract_final_response(reply) or reply
+        if not final.strip():
+            final = "[error: empty response from backend]"
 
         # Three-state turn model:
         #   success       → committed with turn_key (normal path below)
