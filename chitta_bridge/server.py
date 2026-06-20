@@ -10286,8 +10286,10 @@ async def list_tools():
                         "type": "array",
                         "items": {"type": "string"},
                         "description": (
-                            "Absolute paths to files to include as context. "
-                            "Each file is read and prepended to the preamble as a fenced code block. "
+                            "Absolute paths to files or directories to include as context. "
+                            "Directories are walked recursively (skips .git, __pycache__, node_modules, "
+                            "binaries, etc.; 100KB per file / 600KB total budget). "
+                            "Each file is prepended to the preamble as a fenced code block. "
                             "Use for codebase review, diffs, or any file-grounded analysis."
                         ),
                     },
@@ -11719,18 +11721,57 @@ async def call_tool(name: str, arguments: dict):
             _judge_norm = _normalize_participant_shorthands([_fuse_judge_raw])
             _fuse_judge = _judge_norm[0] if _judge_norm else {"name": "Synthesizer", "backend": "claude"}
             _fuse_room_id = f"fusion-{uuid.uuid4().hex[:8]}"
-            # Build preamble from files + explicit preamble text
+            # Build preamble from files/dirs + explicit preamble text
+            _SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv",
+                          "dist", "build", "target", ".tox", ".mypy_cache", ".ruff_cache"}
+            _SKIP_EXTS = {".pyc", ".pyo", ".so", ".o", ".a", ".dylib", ".dll",
+                          ".exe", ".bin", ".pkl", ".npy", ".npz", ".h5", ".hdf5",
+                          ".parquet", ".db", ".sqlite", ".lock", ".png", ".jpg",
+                          ".jpeg", ".gif", ".pdf", ".zip", ".tar", ".gz", ".bz2"}
+            _MAX_FILE_BYTES = 100_000
+            _MAX_TOTAL_BYTES = 600_000
+
+            def _collect_paths(root: str) -> list:
+                collected = []
+                for dirpath, dirnames, filenames in os.walk(root):
+                    dirnames[:] = [d for d in sorted(dirnames) if d not in _SKIP_DIRS]
+                    for fn in sorted(filenames):
+                        if os.path.splitext(fn)[1].lower() in _SKIP_EXTS:
+                            continue
+                        collected.append(os.path.join(dirpath, fn))
+                return collected
+
             _fuse_preamble_parts = []
+            _total_bytes = 0
+            _file_count = 0
+            _skipped = []
             for _fpath in (arguments.get("files") or []):
-                try:
-                    with open(_fpath) as _fh:
-                        _fcontent = _fh.read()
-                    _ext = os.path.splitext(_fpath)[1].lstrip(".")
-                    _fuse_preamble_parts.append(
-                        f"### {os.path.basename(_fpath)}\n```{_ext}\n{_fcontent}\n```"
-                    )
-                except Exception as _fe:
-                    _fuse_preamble_parts.append(f"### {_fpath}\n(could not read: {_fe})")
+                paths = _collect_paths(_fpath) if os.path.isdir(_fpath) else [_fpath]
+                for _fp in paths:
+                    if _total_bytes >= _MAX_TOTAL_BYTES:
+                        _skipped.append(_fp)
+                        continue
+                    try:
+                        _fsize = os.path.getsize(_fp)
+                        if _fsize > _MAX_FILE_BYTES:
+                            _skipped.append(f"{_fp} ({_fsize:,}B > limit)")
+                            continue
+                        with open(_fp, errors="replace") as _fh:
+                            _fcontent = _fh.read()
+                        _ext = os.path.splitext(_fp)[1].lstrip(".")
+                        _rel = os.path.relpath(_fp, arguments.get("files", [_fp])[0]) if os.path.isdir(arguments.get("files", [_fp])[0]) else os.path.basename(_fp)
+                        _fuse_preamble_parts.append(
+                            f"### {_rel}\n```{_ext}\n{_fcontent}\n```"
+                        )
+                        _total_bytes += len(_fcontent)
+                        _file_count += 1
+                    except Exception as _fe:
+                        _fuse_preamble_parts.append(f"### {_fp}\n(could not read: {_fe})")
+            if _skipped:
+                _fuse_preamble_parts.append(
+                    f"### [skipped — size/budget limit]\n" +
+                    "\n".join(f"- {s}" for s in _skipped)
+                )
             if arguments.get("preamble"):
                 _fuse_preamble_parts.append(arguments["preamble"])
             _fuse_preamble = "\n\n".join(_fuse_preamble_parts)
