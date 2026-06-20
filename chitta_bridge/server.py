@@ -10282,6 +10282,23 @@ async def list_tools():
                         "type": "boolean",
                         "description": "If true, synthesis produces majority + minority reading + decision bet. Overrides mode preset. (default: false)",
                     },
+                    "files": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Absolute paths to files to include as context. "
+                            "Each file is read and prepended to the preamble as a fenced code block. "
+                            "Use for codebase review, diffs, or any file-grounded analysis."
+                        ),
+                    },
+                    "preamble": {
+                        "type": "string",
+                        "description": (
+                            "Free-text framing prepended to every participant's system prompt. "
+                            "Appended after any file content from the 'files' parameter. "
+                            "Use to set domain context, constraints, or review focus."
+                        ),
+                    },
                 },
                 "required": ["prompt"],
             },
@@ -11702,8 +11719,23 @@ async def call_tool(name: str, arguments: dict):
             _judge_norm = _normalize_participant_shorthands([_fuse_judge_raw])
             _fuse_judge = _judge_norm[0] if _judge_norm else {"name": "Synthesizer", "backend": "claude"}
             _fuse_room_id = f"fusion-{uuid.uuid4().hex[:8]}"
+            # Build preamble from files + explicit preamble text
+            _fuse_preamble_parts = []
+            for _fpath in (arguments.get("files") or []):
+                try:
+                    with open(_fpath) as _fh:
+                        _fcontent = _fh.read()
+                    _ext = os.path.splitext(_fpath)[1].lstrip(".")
+                    _fuse_preamble_parts.append(
+                        f"### {os.path.basename(_fpath)}\n```{_ext}\n{_fcontent}\n```"
+                    )
+                except Exception as _fe:
+                    _fuse_preamble_parts.append(f"### {_fpath}\n(could not read: {_fe})")
+            if arguments.get("preamble"):
+                _fuse_preamble_parts.append(arguments["preamble"])
+            _fuse_preamble = "\n\n".join(_fuse_preamble_parts)
             await rooms.create(room_id=_fuse_room_id, topic=_fuse_topic, participants=_fuse_norm,
-                               participant_tools=["all"])
+                               participant_tools=["all"], preamble=_fuse_preamble)
             await rooms.run_rounds(room_id=_fuse_room_id, rounds=_fuse_rounds, sparse_topology=True)
             result = await rooms.synthesize(
                 room_id=_fuse_room_id, synthesizer=_fuse_judge, adversarial=_fuse_adversarial
