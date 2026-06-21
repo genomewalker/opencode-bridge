@@ -11769,7 +11769,7 @@ async def call_tool(name: str, arguments: dict):
                         _fuse_preamble_parts.append(f"### {_fp}\n(could not read: {_fe})")
             if _skipped:
                 _fuse_preamble_parts.append(
-                    f"### [skipped — size/budget limit]\n" +
+                    "### [skipped — size/budget limit]\n" +
                     "\n".join(f"- {s}" for s in _skipped)
                 )
             if arguments.get("preamble"):
