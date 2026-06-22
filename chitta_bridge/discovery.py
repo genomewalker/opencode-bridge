@@ -7,6 +7,7 @@ from typing import Optional
 __all__ = [
     "_discover_claude_shorthands",
     "_discover_codex_shorthands",
+    "_discover_local_endpoints",
     "_normalize_participant_shorthands",
     "_infer_backend",
 ]
@@ -118,6 +119,23 @@ def _discover_codex_shorthands() -> "dict[str, str]":
     return _CODEX_MODEL_CACHE
 
 
+def _discover_local_endpoints() -> list[tuple[str, str]]:
+    """Return (model_hint, base_url) pairs from ~/.chitta-bridge/endpoints/ollama-server-*.url files."""
+    import glob as _glob
+    import os
+    _dir = os.environ.get("CHITTA_BRIDGE_URL_DIR", str(Path.home() / ".chitta-bridge" / "endpoints"))
+    results = []
+    for path in _glob.glob(f"{_dir}/ollama-server-*.url"):
+        try:
+            url = Path(path).read_text().strip()
+            if url:
+                hint = Path(path).stem.removeprefix("ollama-server-")
+                results.append((hint, url))
+        except OSError:
+            pass
+    return results
+
+
 def _normalize_participant_shorthands(plist: list) -> list:
     """Accept 'backend:model[:effort]' shorthand strings alongside participant dicts."""
     claude_sh = _discover_claude_shorthands()
@@ -130,12 +148,30 @@ def _normalize_participant_shorthands(plist: list) -> list:
         s = str(p)
         parts = s.split(":")
         if parts[0] in ("codex", "claude", "local") and len(parts) > 1:
+            backend = parts[0]
+            if backend == "local":
+                # local:model:tag[:effort] — model may contain colons (e.g. gemma4:26b)
+                # effort is the last segment only if it matches a known effort keyword
+                _EFFORT_KEYS = {"low", "medium", "high", "xhigh", "max"}
+                rest = parts[1:]
+                effort = rest[-1].lower() if len(rest) > 1 and rest[-1].lower() in _EFFORT_KEYS else None
+                model = ":".join(rest[:-1] if effort else rest)
+                d = {"name": s, "backend": "local", "model": model}
+                if effort:
+                    d["effort"] = effort
+                # Resolve base_url from cached endpoint files if available
+                for hint, url in _discover_local_endpoints():
+                    if hint == model or model.startswith(hint):
+                        d["base_url"] = url
+                        break
+                out.append(d)
+                continue
             model = parts[1]
-            if parts[0] == "claude":
+            if backend == "claude":
                 model = claude_sh.get(model.lower(), model)
-            elif parts[0] == "codex":
+            elif backend == "codex":
                 model = codex_sh.get(model.lower(), model)
-            d = {"name": s, "backend": parts[0], "model": model}
+            d = {"name": s, "backend": backend, "model": model}
             if len(parts) > 2:
                 d["effort"] = parts[2].lower()
             out.append(d)
