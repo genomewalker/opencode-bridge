@@ -6,7 +6,6 @@ the full MCP server dependency tree.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import stat as _stat_mod
