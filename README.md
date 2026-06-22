@@ -1,6 +1,6 @@
 # Chitta Bridge
 
-MCP server for multi-model AI discussions — works with **Claude Code** and **Codex**. Connect to any AI backend: cloud providers, agentic CLIs, and local GPU models.
+MCP server for multi-model AI discussions — works with **Claude Code** and **Codex CLI**. Connect to any AI backend: cloud agentic CLIs and local GPU models.
 
 ## Quick Start
 
@@ -16,15 +16,12 @@ Skills (Codex): `/review`, `/rescue`, `/room`, `/soul` — plus all `mcp__chitta
 
 ## Features
 
-- **Multiple backends**: OpenCode, Codex CLI, and local GPU models (Ollama/vLLM)
+- **Multiple backends**: Codex CLI and local GPU models (Ollama/vLLM)
 - **Continuous sessions**: Conversation history persists across messages
 - **Session warmup**: background ping captures session ID — subsequent calls skip cold start
-- **Multiple models**: OpenCode (GPT-5.x, Claude, Gemini) + Codex (o3, o4-mini, gpt-4.1)
-- **Agent support**: plan, build, explore, general agents (OpenCode)
 - **Agentic execution**: Full-auto mode with sandboxed file operations (Codex)
 - **Variant control**: Set reasoning effort (minimal to max)
 - **File/image attachment**: Share code files and images for context
-- **Session continuity**: Conversations continue across tool calls
 - **Discussion rooms**: async multi-agent roundtables — any mix of backends respond in parallel, see the full thread, synthesize into one answer
 
 ## Installation
@@ -76,29 +73,6 @@ cd cc-soul
 ./scripts/shared-stack.sh install all
 ```
 
-## OpenCode Backend
-
-| Tool | Description |
-|------|-------------|
-| `opencode_start` | Start a new session (auto-warms up, captures session ID) |
-| `opencode_discuss` | Send a message |
-| `opencode_plan` | Start planning discussion |
-| `opencode_brainstorm` | Open-ended brainstorming |
-| `opencode_review` | Review code |
-| `opencode_ping` | Check if model is reachable |
-| `opencode_models` | List available models |
-| `opencode_agents` | List available agents |
-| `opencode_model` | Change session model |
-| `opencode_agent` | Change session agent |
-| `opencode_variant` | Change reasoning effort |
-| `opencode_config` | Show current configuration |
-| `opencode_configure` | Set defaults (persisted) |
-| `opencode_history` | Show conversation history |
-| `opencode_sessions` | List all sessions |
-| `opencode_switch` | Switch to another session |
-| `opencode_end` | End current session |
-| `opencode_health` | Server health check |
-
 ## Discussion Rooms
 
 Async multi-agent roundtable with **agent souls** — participants get persistent identity, memory, tools, and structured challenge rounds.
@@ -111,7 +85,6 @@ room_create(
     topic="What's the best way to design a cache invalidation strategy?",
     participants='[
         {"name":"Codex","backend":"codex","session_id":"codex-1"},
-        {"name":"Gemini","backend":"opencode","session_id":"gemini-1"},
         {"name":"Llama","backend":"local","model":"qwen2.5:32b","base_url":"http://gpunode:11434/v1"}
     ]'
 )
@@ -253,7 +226,7 @@ Tools available to soul-powered room participants via mediated XML tool calling.
 
 ### Synthesis
 
-After running a room, distill the full discussion into a single answer. Any backend can act as synthesizer — Claude (default), local GPU model, OpenCode, or Codex.
+After running a room, distill the full discussion into a single answer. Any backend can act as synthesizer — Claude (default), local GPU model, or Codex.
 
 ```python
 room_synthesize(room_id="my-room")
@@ -304,7 +277,6 @@ local_start(session_id="llm2", model="qwen3:30b-a3b", endpoint="http://gpunode01
 | `CHITTA_BRIDGE_GPU_NODES` | _unset_ | Comma-separated nodes to probe for Ollama (`node1,node2`). |
 | `OLLAMA_BIN` | `$(command -v ollama)` | Path to the `ollama` binary used by the slurm script. |
 | `OLLAMA_MODELS` | `~/.ollama/models` | Where Ollama stores pulled models. |
-| `CODEX_ALLOW_FAST` | _unset_ | Set to `1` to allow Codex Fast variants (refused by default). |
 
 Run `chitta-bridge-doctor` to verify the install: it checks CLI presence, the URL directory, persisted session/job JSON integrity, and any unknown `effort`/`sandbox` values in saved state.
 
@@ -441,16 +413,6 @@ This installs to `~/.codex/plugins/cache/local/chitta-bridge/local/` and enables
 
 ## Available Models
 
-### OpenCode
-
-| Provider | Models |
-|----------|--------|
-| openai | gpt-5.2-codex, gpt-5.1-codex-max, gpt-5.1-codex-mini |
-| github-copilot | claude-opus-4.5, claude-sonnet-4.5, gpt-5, gemini-2.5-pro |
-| opencode | gpt-5-nano (free), glm-4.7-free, grok-code |
-
-Run `opencode models` to see all available models.
-
 ### Codex
 
 | Model | Description |
@@ -459,16 +421,15 @@ Run `opencode models` to see all available models.
 | o4-mini | Faster, lower cost |
 | gpt-4.1 | Alternative option |
 
+### Local (Ollama / vLLM)
+
+Any model available at your Ollama or vLLM endpoint. Run `local_models()` to list what's available on a node.
+
 ## Configuration
 
 ### Environment variables
 
 ```bash
-# OpenCode
-export OPENCODE_MODEL="openai/gpt-5.2-codex"
-export OPENCODE_AGENT="plan"
-export OPENCODE_VARIANT="medium"
-
 # Codex
 export CODEX_MODEL="o3"
 export CODEX_SANDBOX="workspace-write"
@@ -479,19 +440,10 @@ export CODEX_SANDBOX="workspace-write"
 `~/.chitta-bridge/config.json`:
 ```json
 {
-  "model": "openai/gpt-5.2-codex",
-  "agent": "plan",
-  "variant": "medium",
   "codex_model": "o3",
   "codex_sandbox": "workspace-write"
 }
 ```
-
-### OpenCode Variants (reasoning effort)
-
-`minimal` -> `low` -> `medium` -> `high` -> `xhigh` -> `max`
-
-Higher variants use more reasoning tokens for complex tasks.
 
 ### Codex Sandbox Modes
 
@@ -507,7 +459,6 @@ The `full_auto` option (default: true) enables low-friction execution with `work
 
 - Python 3.10+
 - [Claude Code](https://claude.ai/download) or [Codex CLI](https://github.com/openai/codex) (or both)
-- [OpenCode CLI](https://opencode.ai) for `opencode_*` tools
 - Ollama or vLLM on a GPU node for `local_*` tools
 
 ## License
