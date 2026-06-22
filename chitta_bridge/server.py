@@ -21,24 +21,13 @@ import os
 import re
 import sys
 import json
-import hashlib
-import stat as _stat_mod
 import signal as _signal
 import asyncio
-import shutil
 import socket
-import tempfile
 import uuid
 import threading as _threading
-import glob as _glob
-import html as _html
-import urllib.request
-import urllib.error
-import urllib.parse
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Any
-from dataclasses import dataclass, field, asdict, fields as dc_fields
 
 from mcp.server import Server, InitializationOptions
 from mcp.server.stdio import stdio_server
@@ -71,6 +60,7 @@ except Exception:
 from chitta_bridge import __version__
 
 # --- extracted modules (re-exported for backward compat) ---
+# ruff: noqa: F405  -- star-import facade; symbols come from extracted modules
 from chitta_bridge.io_utils import *  # noqa: F401,F403
 from chitta_bridge.cost import *  # noqa: F401,F403
 from chitta_bridge.models import *  # noqa: F401,F403
@@ -89,6 +79,22 @@ from chitta_bridge.ingest import *  # noqa: F401,F403
 from chitta_bridge.orchestrator import *  # noqa: F401,F403
 from chitta_bridge.rooms import *  # noqa: F401,F403
 from chitta_bridge.registry import REGISTRY, register
+# Explicit imports so ruff can resolve star-import symbols used in this file
+from chitta_bridge.config import CLAUDE_BIN, CODEX_BIN, DEFAULT_CODEX_MODEL, find_codex
+from chitta_bridge.discovery import _discover_claude_shorthands, _discover_codex_shorthands, _infer_backend, _normalize_participant_shorthands
+from chitta_bridge.symbols import _apply_file_patch, _apply_symbol_delete, _apply_symbol_edit, _apply_symbol_insert_child, _apply_symbol_move, _apply_symbol_patch, _apply_symbol_rename, _apply_symbol_rename_project, _locate_symbol
+from chitta_bridge.code_intel import _cache_get_fresh, _make_handle, _read_outline, _read_range
+from chitta_bridge.ingest import chitta_ingest, _doc_ingest, distill_event
+from chitta_bridge.prompts import _expand_paths
+from chitta_bridge.io_utils import _content_hash
+from chitta_bridge.soul import SoulClient
+from chitta_bridge.backends.codex import CodexBridge
+from chitta_bridge.backends.local import GpuNodeDiscovery, LocalModelBridge
+from chitta_bridge.search.web import WebSearch
+from chitta_bridge.search.lit import LitSearch
+from chitta_bridge.reflib import RefLib
+from chitta_bridge.orchestrator import Orchestrator
+from chitta_bridge.rooms import RoomManager, _resolve_preamble, ROOM_PREAMBLES, _ULTRACODE_KEYWORDS
 
 
 _SAFE_ID_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")
@@ -4087,7 +4093,6 @@ async def _run_http_mode(mcp_port: int = 7681, dashboard_port: int = 7680) -> No
     )
 
     # Evict stale bridge on MCP port if needed
-    import socket
     for port, label in ((mcp_port, "MCP"), (dashboard_port, "dashboard")):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         in_use = sock.connect_ex(("127.0.0.1", port)) == 0
