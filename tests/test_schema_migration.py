@@ -4,14 +4,13 @@ import json
 
 import pytest
 
-from chitta_bridge.server import (
+from chitta_bridge.models import (
     CodexJob,
     CodexSession,
-    DiscussionRoom,
     PERSISTED_SCHEMA_VERSION,
-    Session,
     _migrate_persisted,
 )
+from chitta_bridge.rooms import DiscussionRoom
 
 
 class TestMigrateHelper:
@@ -30,35 +29,6 @@ class TestMigrateHelper:
         data = {"id": "x", "schema_version": future}
         out = _migrate_persisted(data, "session")
         assert out["schema_version"] == future
-
-
-class TestSessionRoundTrip:
-    def test_v0_loads_and_stamps(self, tmp_path):
-        path = tmp_path / "s.json"
-        path.write_text(json.dumps({
-            "id": "abc", "model": "gpt-5.4", "agent": "build",
-        }))
-        s = Session.load(path)
-        assert s.id == "abc"
-        assert s.schema_version == PERSISTED_SCHEMA_VERSION
-
-    def test_save_includes_version(self, tmp_path):
-        s = Session(id="abc", model="m", agent="build")
-        path = tmp_path / "s.json"
-        s.save(path)
-        data = json.loads(path.read_text())
-        assert data["schema_version"] == PERSISTED_SCHEMA_VERSION
-
-    def test_round_trip_preserves_fields(self, tmp_path):
-        s = Session(id="abc", model="m", agent="build", variant="default")
-        s.add_message("user", "hi")
-        path = tmp_path / "s.json"
-        s.save(path)
-        loaded = Session.load(path)
-        assert loaded.id == s.id
-        assert loaded.model == s.model
-        assert len(loaded.messages) == 1
-        assert loaded.messages[0].content == "hi"
 
 
 class TestCodexSessionRoundTrip:

@@ -44,7 +44,7 @@ class TestSoulToolRegistry:
 
     def test_soul_remember_is_write_capable(self):
         """soul_remember must NOT appear in _READER_TOOLS (read-only set)."""
-        from chitta_bridge.server import _READER_TOOLS
+        from chitta_bridge.rooms import _READER_TOOLS
         assert "soul_remember" not in _READER_TOOLS, (
             "soul_remember is write-capable and must not appear in _READER_TOOLS"
         )
