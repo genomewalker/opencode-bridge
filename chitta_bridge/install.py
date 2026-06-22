@@ -207,14 +207,17 @@ def _enable_codex_config() -> bool:
         return False
 
     plugin_key = f'{PLUGIN_NAME}@{MARKETPLACE}'
+    cb_path = _chitta_bridge_path()
     features = data.get("features", {})
     plugins = data.get("plugins", {})
+    mcp_servers = data.get("mcp_servers", {})
 
     need_features = features.get("plugins") is not True
     has_features_table = isinstance(features, dict) and "features" in _top_level_tables(stripped)
     need_plugin_entry = plugin_key not in plugins
+    need_mcp_entry = "chitta-bridge" not in mcp_servers
 
-    if not need_features and not need_plugin_entry:
+    if not need_features and not need_plugin_entry and not need_mcp_entry:
         # Already enabled and registered; make sure there's no stale block.
         if raw != stripped:
             config.write_text(stripped.rstrip() + "\n")
@@ -225,7 +228,7 @@ def _enable_codex_config() -> bool:
             "  Codex: [features] table already exists without plugins=true; "
             "please add 'plugins = true' manually."
         )
-        if need_plugin_entry:
+        if need_plugin_entry or need_mcp_entry:
             return False
         need_features = False
 
@@ -235,6 +238,10 @@ def _enable_codex_config() -> bool:
     if need_plugin_entry:
         block_lines.append(f'[plugins."{plugin_key}"]')
         block_lines.append("enabled = true")
+    if need_mcp_entry:
+        block_lines.append("[mcp_servers.chitta-bridge]")
+        block_lines.append(f'command = "{cb_path}"')
+        block_lines.append("args = []")
     block_lines.append(_MANAGED_END)
 
     base = stripped.rstrip()
