@@ -46,7 +46,7 @@ def _discover_claude_shorthands() -> "dict[str, str]":
         "opus-4.8": "claude-opus-4-8",
         "opus-4-8": "claude-opus-4-8",
         "sonnet":   "claude-sonnet-4-6",
-        "haiku":    "claude-haiku-4-5",
+        "haiku":    "claude-haiku-4-5-20251001",
         "fable":    "claude-fable-5",
         "fable5":   "claude-fable-5",
     }
@@ -80,8 +80,10 @@ def _discover_claude_shorthands() -> "dict[str, str]":
                 out[f"{family}-{dot_ver}"] = mid
                 out[f"{family}-{ver}"]     = mid
         if "fable" in out:
-            ver_num = out["fable"].rsplit("-", 1)[-1]
-            out[f"fable{ver_num}"] = out["fable"]
+            # Extract major version only (e.g. "5" from "claude-fable-5" or "claude-fable-5-20260101")
+            m2 = re.search(r"claude-fable-(\d+)", out["fable"])
+            if m2:
+                out[f"fable{m2.group(1)}"] = out["fable"]
         _CLAUDE_MODEL_CACHE = out if out else _FALLBACK
     except Exception:
         _CLAUDE_MODEL_CACHE = _FALLBACK
@@ -167,6 +169,8 @@ def _normalize_participant_shorthands(plist: list) -> list:
                 out.append(d)
                 continue
             model = parts[1]
+            if not model:
+                raise ValueError(f"Empty model in shorthand: {s!r}")
             if backend == "claude":
                 model = claude_sh.get(model.lower(), model)
             elif backend == "codex":
