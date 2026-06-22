@@ -80,7 +80,7 @@ class WebSearch:
             "Accept": "text/plain" if jina else "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
             **({"Cache-Control": "no-cache", "Pragma": "no-cache"} if not jina else {}),
-            **({} if jina else {"Accept-Encoding": "gzip, deflate, br"}),
+            **({} if jina else {"Accept-Encoding": "gzip"}),
         }
         try:
             req = urllib.request.Request(url, headers=headers)
@@ -249,10 +249,12 @@ class WebSearch:
                 req = urllib.request.Request(api, headers=cls._HEADERS)
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     body = resp.read().decode("utf-8", errors="replace")
-                title = re.search(r"<title>([^<]+)</title>", body)
-                authors = re.findall(r"<name>([^<]+)</name>", body)
-                summary = re.search(r"<summary>(.*?)</summary>", body, re.DOTALL)
-                published = re.search(r"<published>([^<]+)</published>", body)
+                entry = re.search(r"<entry>(.*?)</entry>", body, re.DOTALL)
+                scope = entry.group(1) if entry else body
+                title = re.search(r"<title>([^<]+)</title>", scope)
+                authors = re.findall(r"<name>([^<]+)</name>", scope)
+                summary = re.search(r"<summary>(.*?)</summary>", scope, re.DOTALL)
+                published = re.search(r"<published>([^<]+)</published>", scope)
                 lines = [
                     f"# {_html.unescape(title.group(1).strip()) if title else arxiv_id}",
                     f"**Authors:** {'; '.join(authors)}",

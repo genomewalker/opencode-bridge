@@ -350,7 +350,7 @@ class RoomManager:
                 old_room_id=room_id, new_room_id=new_id,
                 topic=topic, participants=participants, clean=clean, verbatim_rounds=verbatim_rounds,
             )
-            return f"⚠ Room '{room_id}' exists — auto-forked to '{new_id}'.\n{fork_result}"
+            return f"[room_id: {new_id}]\n⚠ Room '{room_id}' exists — auto-forked to '{new_id}'.\n{fork_result}"
         if roles:
             valid = set(ROLE_PROMPTS)
             for pname, role in roles.items():
@@ -390,7 +390,7 @@ class RoomManager:
             f" ⚠️ Same-model participants: {', '.join(collision_strs)} — convergence may reflect shared priors."
             if collision_strs else ""
         )
-        return f"Room '{room_id}' created with {len(participants)} participants: {names}{soul_tag}{role_tag}{diversity_warn}"
+        return f"[room_id: {room_id}]\nRoom '{room_id}' created with {len(participants)} participants: {names}{soul_tag}{role_tag}{diversity_warn}"
 
     async def add_participant(self, room_id: str, participant: dict) -> str:
         if room_id not in self.rooms:

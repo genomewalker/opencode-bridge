@@ -2080,7 +2080,7 @@ async def call_tool(name: str, arguments: dict):
                 rid = arguments.get("room_id")
                 result = await rooms.add_participant(room_id=rid, participant=p) if rid else "Error: 'room_id' is required"
         elif name == "room_run":
-            rid = arguments["room_id"]
+            rid = arguments.get("room_id", "")
             # Ensure room is loaded from disk (survives process restart)
             if rid not in rooms.rooms:
                 rooms._try_load_room(rid)
