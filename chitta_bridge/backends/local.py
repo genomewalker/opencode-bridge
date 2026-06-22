@@ -232,6 +232,8 @@ class LocalModelBridge:
 
     def start_session(self, session_id: str, model: str, endpoint: str) -> str:
         _sanitize_session_id(session_id)
+        if not endpoint.startswith(("http://", "https://")):
+            return f"Error: endpoint must be an http/https URL, got {endpoint!r}"
         if session_id in self.sessions:
             return f"Session '{session_id}' already exists."
         s = LocalSession(id=session_id, endpoint=endpoint.rstrip("/"), model=model)

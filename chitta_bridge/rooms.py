@@ -595,7 +595,7 @@ class RoomManager:
             else:
                 inferred = "claude"
             synth = {"name": "Synthesizer", "backend": inferred,
-                     "model": "claude-opus-4-7" if inferred == "claude" else None}
+                     "model": "claude-opus-4-8" if inferred == "claude" else None}
         synth_name = synth.get("name", "Synthesizer")
         backend = synth.get("backend", "claude")
         sid = synth.get("session_id")

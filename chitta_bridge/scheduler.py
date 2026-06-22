@@ -261,6 +261,14 @@ class StateStore:
             """).fetchall()
         return [dict(r) for r in rows]
 
+    def count_running(self, job_id: str) -> int:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM job_runs WHERE job_id=? AND status='running'",
+                (job_id,),
+            ).fetchone()
+        return row[0] if row else 0
+
     def get_running_slurm(self) -> list[dict]:
         with self._conn() as conn:
             rows = conn.execute("""
@@ -692,6 +700,10 @@ class SchedulerService:
                         continue
                     run_id = str(uuid.uuid4())
                     idem_key = f"{job_id}:{scheduled_ts:.0f}"
+                    cond = cfg.conditions
+                    if cond.skip_if_running and self.db.count_running(job_id) >= cond.max_concurrent:
+                        log.info("scheduler: skipping %s — %d instance(s) already running", job_id, cond.max_concurrent)
+                        continue
                     if self.db.create_run(
                         run_id, job_id, cfg.executor.type, scheduled_ts, idem_key
                     ):

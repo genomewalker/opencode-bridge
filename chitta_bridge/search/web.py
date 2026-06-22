@@ -66,6 +66,8 @@ class WebSearch:
 
     @classmethod
     def fetch_page(cls, url: str, max_chars: int = 12000, timeout: int = 15) -> str:
+        if not url.startswith(("https://", "http://")):
+            return f"(fetch rejected: only http/https URLs are allowed, got {url[:80]!r})"
         # ── Academic URL router (bypasses Cloudflare on preprint servers) ──
         academic = cls._academic_fetch(url, timeout=timeout)
         if academic:
@@ -101,12 +103,10 @@ class WebSearch:
     def _curl_fetch(cls, url: str, max_chars: int = 12000, timeout: int = 30) -> str:
         """curl -sL fallback for Cloudflare-protected pages and direct PDF URLs."""
         import subprocess
-        import hashlib
+        import tempfile
 
-        tmp_dir = "/projects/caeg/scratch/kbd606/tmp"
-        os.makedirs(tmp_dir, exist_ok=True)
-        url_hash = hashlib.md5(url.encode()).hexdigest()[:12]
-        tmp_path = os.path.join(tmp_dir, f"curl_fetch_{url_hash}")
+        fd, tmp_path = tempfile.mkstemp(prefix="curl_fetch_", suffix=".tmp")
+        os.close(fd)
 
         try:
             result = subprocess.run(
@@ -115,6 +115,10 @@ class WebSearch:
                 capture_output=True, text=True, timeout=timeout,
             )
         except (subprocess.TimeoutExpired, FileNotFoundError):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
             return "(curl fallback failed — binary not found or timed out)"
 
         parts = result.stdout.strip().rsplit("\n", 1)

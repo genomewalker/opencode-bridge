@@ -12,6 +12,7 @@ _MODEL_RATES: dict[str, tuple[float, float]] = {
     "claude-opus-4-7":    (15.0, 75.0),
     "claude-sonnet-4-6":  (3.0,  15.0),
     "claude-haiku-4-5":   (0.8,   4.0),
+    "claude-fable-5":     (3.0,  15.0),
 }
 
 
