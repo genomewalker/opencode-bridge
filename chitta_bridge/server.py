@@ -126,6 +126,28 @@ server = Server("chitta-bridge")
 # list[TextContent], applying the same truncation the legacy chain does.
 _REGISTRY_CODEX_DEFAULT = _discover_codex_shorthands().get("gpt", "gpt-5.5")
 
+
+def _display_name_for(shorthand: str) -> str:
+    """Derive a short display name from a backend:model[:effort] shorthand.
+    "claude:opus:high" → "Opus", "codex:gpt-5.5" → "GPT-5.5", "local:llama" → "Llama"
+    Used by conductor_fusion so 'sees' entries match participant names naturally.
+    """
+    parts = shorthand.split(":")
+    if parts[0] not in ("claude", "codex", "local") or len(parts) < 2:
+        return shorthand
+    model = parts[1]
+    if parts[0] == "claude":
+        fam = model.lower()
+        if fam.startswith("claude-"):
+            fam = fam[7:]
+        return fam.split("-")[0].capitalize()
+    if parts[0] == "codex":
+        if model.lower().startswith("gpt"):
+            return "GPT" + model[3:] if len(model) > 3 else "GPT"
+        return model[0].upper() + model[1:]
+    return model.split("-")[0].capitalize()
+
+
 _NO_TRUNCATE = {"codex_history", "local_history", "pdf_read", "paper_fetch",
                 "lit_search_arxiv", "lit_search_biorxiv", "lit_search_europepmc",
                 "lit_search_openalex", "reflib_export"}
@@ -2215,7 +2237,8 @@ async def call_tool(name: str, arguments: dict):
             _cf_room_id = f"conductor-{uuid.uuid4().hex[:8]}"
 
             # Compile workflow into participants, preambles, and visibility matrix.
-            # Agent shorthands are normalized; duplicate base names get #N suffixes.
+            # Display names ("Opus", "GPT-5.5") are derived so sees entries match naturally.
+            # Explicit "name" in each step takes priority over the derived name.
             _cf_name_counts: dict[str, int] = {}
             _cf_participants = []
             _cf_preambles: dict[str, str] = {}
@@ -2224,7 +2247,8 @@ async def call_tool(name: str, arguments: dict):
                 _agent_raw = _step.get("agent", "claude:sonnet")
                 _norm = _normalize_participant_shorthands([_agent_raw])
                 _p = _norm[0] if _norm else {"name": _agent_raw, "backend": "claude"}
-                _base_name = _p["name"]
+                _base_name = _step.get("name") or _display_name_for(_agent_raw)
+                _p["_agent_raw"] = _agent_raw
                 _cf_name_counts[_base_name] = _cf_name_counts.get(_base_name, 0) + 1
                 _cnt = _cf_name_counts[_base_name]
                 _p["name"] = f"{_base_name}#{_cnt}" if _cnt > 1 else _base_name
@@ -2232,6 +2256,24 @@ async def call_tool(name: str, arguments: dict):
                 _cf_preambles[_p["name"]] = _step.get("subtask", "")
                 _sees = _step.get("sees", "all")
                 _cf_vis_per_step.append({_p["name"]: _sees})
+            # Build case-insensitive lookup so sees entries match regardless of form
+            # ("Opus", "opus", "claude:opus", "claude:opus:high" all resolve correctly).
+            _cf_name_lookup: dict[str, str] = {}
+            for _p in _cf_participants:
+                _nm = _p["name"]
+                _cf_name_lookup[_nm.lower()] = _nm
+                _cf_name_lookup.setdefault(_nm.split("#")[0].lower(), _nm)
+                _raw = _p.pop("_agent_raw", "")
+                if _raw:
+                    _cf_name_lookup[_raw.lower()] = _nm
+                    _raw_parts = _raw.split(":")
+                    if len(_raw_parts) > 1:
+                        _cf_name_lookup.setdefault(_raw_parts[1].lower(), _nm)
+            def _resolve_sees_cf(_s):
+                if not isinstance(_s, list):
+                    return _s
+                return [_cf_name_lookup.get(_e.lower(), _e) for _e in _s]
+            _cf_vis_per_step = [{k: _resolve_sees_cf(v) for k, v in d.items()} for d in _cf_vis_per_step]
             # Apply same visibility to all rounds
             _cf_visibility: dict[int, dict] = {
                 r: {k: v for d in _cf_vis_per_step for k, v in d.items()}

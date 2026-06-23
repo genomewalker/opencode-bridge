@@ -283,15 +283,17 @@ class TestConductorFusionCompilation:
     """Test the workflow→preambles+visibility compilation logic, extracted inline."""
 
     def _compile(self, workflow, rounds=1):
-        from chitta_bridge.server import _normalize_participant_shorthands
+        from chitta_bridge.server import _normalize_participant_shorthands, _display_name_for
         name_counts = {}
         participants = []
         preambles = {}
         vis_per_step = []
         for step in workflow:
-            norm = _normalize_participant_shorthands([step.get("agent", "claude:sonnet")])
-            p = norm[0] if norm else {"name": step["agent"], "backend": "claude"}
-            base = p["name"]
+            agent_raw = step.get("agent", "claude:sonnet")
+            norm = _normalize_participant_shorthands([agent_raw])
+            p = norm[0] if norm else {"name": agent_raw, "backend": "claude"}
+            base = step.get("name") or _display_name_for(agent_raw)
+            p["_agent_raw"] = agent_raw
             name_counts[base] = name_counts.get(base, 0) + 1
             cnt = name_counts[base]
             p["name"] = f"{base}#{cnt}" if cnt > 1 else base
@@ -299,6 +301,24 @@ class TestConductorFusionCompilation:
             preambles[p["name"]] = step.get("subtask", "")
             sees = step.get("sees", "all")
             vis_per_step.append({p["name"]: sees})
+        name_lookup: dict[str, str] = {}
+        for p in participants:
+            nm = p["name"]
+            name_lookup[nm.lower()] = nm
+            name_lookup.setdefault(nm.split("#")[0].lower(), nm)
+            raw = p.pop("_agent_raw", "")
+            if raw:
+                name_lookup[raw.lower()] = nm
+                raw_parts = raw.split(":")
+                if len(raw_parts) > 1:
+                    name_lookup.setdefault(raw_parts[1].lower(), nm)
+
+        def _resolve(s):
+            if not isinstance(s, list):
+                return s
+            return [name_lookup.get(e.lower(), e) for e in s]
+
+        vis_per_step = [{k: _resolve(v) for k, v in d.items()} for d in vis_per_step]
         visibility = {r: {k: v for d in vis_per_step for k, v in d.items()}
                       for r in range(1, rounds + 1)}
         return participants, preambles, visibility

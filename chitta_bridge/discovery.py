@@ -98,7 +98,9 @@ def _discover_codex_shorthands() -> "dict[str, str]":
     global _CODEX_MODEL_CACHE
     if _CODEX_MODEL_CACHE is not None:
         return _CODEX_MODEL_CACHE
-    _FALLBACK: "dict[str, str]" = {"gpt": "gpt-5.5"}
+    _FALLBACK: "dict[str, str]" = {
+        "gpt": "gpt-5.5", "gpt-5.5": "gpt-5.5", "gpt5.5": "gpt-5.5", "gpt5": "gpt-5.5",
+    }
     try:
         cfg_path = Path.home() / ".codex" / "config.toml"
         if not cfg_path.exists():
@@ -111,10 +113,11 @@ def _discover_codex_shorthands() -> "dict[str, str]":
         with open(cfg_path, "rb") as fh:
             cfg = _toml.load(fh)
         default_model = cfg.get("model", "gpt-5.5")
-        out: "dict[str, str]" = {"gpt": default_model}
-        # slug alias: "gpt5.5" → "gpt-5.5"
+        out: "dict[str, str]" = {"gpt": default_model, default_model: default_model}
+        # slug aliases: "gpt55" and "gpt5.5" → model
         slug = default_model.replace("-", "").replace(".", "")
         out[slug] = default_model
+        out[default_model.replace("-", "")] = default_model  # "gpt5.5"
         _CODEX_MODEL_CACHE = out
     except Exception:
         _CODEX_MODEL_CACHE = _FALLBACK
