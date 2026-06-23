@@ -2573,7 +2573,7 @@ class RoomManager:
             m = re.search(r"\b([01](?:\.\d+)?)\b", reply)
             return float(m.group(1)) if m else 0.0
         except Exception:
-            return 0.0
+            return None
 
     def _extract_claims(self, messages: list[dict]) -> list[str]:
         """Extract substantive claims from recent messages for challenge rounds."""
@@ -2962,13 +2962,16 @@ class RoomManager:
                     if loop_idx < rounds - 1:
                         if adaptive_stop:
                             score = await self._score_convergence(round_contents)
-                            # Dual-track: streak only advances when ledger-delta also agrees
-                            _both = score >= adaptive_threshold and converged
+                            # Dual-track: streak only advances when ledger-delta also agrees.
+                            # score=None means scorer errored — fail-open (no streak advance) but
+                            # log ERR so operators can distinguish from genuine low convergence.
+                            _both = score is not None and score >= adaptive_threshold and converged
                             _conv_streak = _conv_streak + 1 if _both else 0
+                            _score_label = "ERR" if score is None else f"{score:.2f}"
                             room.messages.append({
                                 "name": "MODERATOR",
                                 "content": (
-                                    f"[Adaptive] convergence={score:.2f} ledger_converged={converged} "
+                                    f"[Adaptive] convergence={_score_label} ledger_converged={converged} "
                                     f"streak={_conv_streak}/{adaptive_k}"
                                 ),
                                 "ts": datetime.now().isoformat(),

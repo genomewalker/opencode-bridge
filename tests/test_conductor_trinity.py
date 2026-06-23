@@ -195,6 +195,26 @@ class TestDualTrackStop:
                     "ts": _ts(), "turn_key": f"r{round_num}:{participant['name']}"}
         return _r
 
+    def test_scorer_error_logs_err_and_does_not_advance_streak(self):
+        """score=None (scorer crash) → MODERATOR logs ERR, streak stays 0."""
+        room = DiscussionRoom(id="err-test", topic="t",
+                              participants=[{"name": "A", "backend": "claude"}],
+                              max_total_rounds=10, verbatim_rounds=0)
+        self.rm.rooms[room.id] = room
+
+        with (patch.object(self.rm, "_participant_respond", side_effect=self._fake_respond("x")),
+              patch.object(self.rm, "_score_convergence", new=AsyncMock(return_value=None)),
+              patch.object(self.rm, "_round_converged", return_value=(True, [])),
+              patch.object(self.rm, "_save_room", return_value=None)):
+            asyncio.run(self.rm.run_rounds(room.id, rounds=3,
+                                           adaptive_stop=True, adaptive_threshold=0.85, adaptive_k=2))
+
+        adaptive_msgs = [m["content"] for m in room.messages
+                         if m["name"] == "MODERATOR" and "[Adaptive]" in m["content"]]
+        assert all("convergence=ERR" in m for m in adaptive_msgs)
+        assert all("streak=0/" in m for m in adaptive_msgs)
+        assert len([m for m in room.messages if m.get("name") == "A"]) == 3  # all rounds ran
+
     def test_dual_track_requires_both_signals(self):
         """High haiku score alone (converged=False from ledger) should NOT stop early — streak never advances."""
         room = DiscussionRoom(id="dual-test", topic="t",
