@@ -627,7 +627,7 @@ async def list_tools():
                     },
                     "preamble": {"type": "string", "description": "Shared preamble prepended to all agents."},
                 },
-                "required": ["workflow"],
+                "required": [],
             },
         ),
         Tool(
