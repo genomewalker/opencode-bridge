@@ -614,7 +614,7 @@ async def list_tools():
                             "Duplicate base names get auto-numbered (Opus#1, Opus#2). "
                             "Omit workflow entirely to use the default TRINITY panel: "
                             "claude:opus:xhigh (Thinker, blind) + codex:gpt-5.5 (Worker, sees Opus) "
-                            "+ claude:sonnet (Verifier, sees all)."
+                            "+ claude:opus:high (Verifier, sees all)."
                         ),
                     },
                     "topic": {"type": "string", "description": "Short label for the room."},
@@ -2197,11 +2197,14 @@ async def call_tool(name: str, arguments: dict):
             _cf_judge = (_normalize_participant_shorthands([_cf_judge_raw]) or [{}])[0]
             _cf_room_id = f"conductor-{uuid.uuid4().hex[:8]}"
             # Default panel when workflow is empty: TRINITY (Thinker / Worker / Verifier)
+            # Opus:xhigh proposes blind (strongest independent reasoning caps the chain);
+            # GPT-5.5 extends (backend diversity in the Worker slot breaks Opus echo chamber);
+            # Opus:high verifies with strong critical reasoning over both.
             if not _cf_workflow:
                 _cf_workflow = [
-                    {"agent": "claude:opus:xhigh", "subtask": "Thinker: propose a complete answer independently.", "sees": "none"},
-                    {"agent": "codex:gpt-5.5",     "subtask": "Worker: build on or extend what the Thinker proposes.", "sees": ["Opus"]},
-                    {"agent": "claude:sonnet",      "subtask": "Verifier: critique both above responses. Cite at least 2 specific issues or confirmations.", "sees": ["Opus", "GPT-5.5"]},
+                    {"agent": "claude:opus:xhigh",  "subtask": "Thinker: propose a complete answer independently.", "sees": "none"},
+                    {"agent": "codex:gpt-5.5",      "subtask": "Worker: build on or extend what the Thinker proposes.", "sees": ["Opus"]},
+                    {"agent": "claude:opus:high",   "subtask": "Verifier: critique both above responses. Cite at least 2 specific issues or confirmations.", "sees": ["Opus", "GPT-5.5"]},
                 ]
 
             # Compile workflow into participants, preambles, and visibility matrix.
