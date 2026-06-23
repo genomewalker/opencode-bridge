@@ -271,7 +271,7 @@ HIDDEN_TOOLS = {
     "multi_consult", "agent_chain", "delegate_codex", "parallel_agents",
     # Rooms (multi-agent discussion — lifecycle only; core tools promoted to visible)
     "room_challenge", "room_cost",
-    "room_inject", "room_fork", "room_add_participant", "room_set_preamble",
+    "room_inject", "room_fork", "room_add_participant", "room_set_preamble", "room_set_visibility",
     "scheduler_list", "scheduler_run_now", "scheduler_pause", "scheduler_resume", "scheduler_history",
     "room_status", "room_suggest_participants",
     # Status/health
@@ -565,6 +565,62 @@ async def list_tools():
                     "preamble": {"type": "string", "description": "Framing prepended to all participant prompts."},
                 },
                 "required": ["prompt"],
+            },
+        ),
+        Tool(
+            name="conductor_fusion",
+            description=(
+                "Conductor-style orchestration (arXiv:2512.04388): assign each agent a different subtask "
+                "and explicit visibility over peers, then synthesize. Each workflow step specifies which "
+                "agent runs, what sub-question it answers, and which other agents it can see. "
+                "Compiles to preambles + visibility matrix automatically — no manual room setup needed. "
+                "Use for complex tasks that benefit from information asymmetry: Thinker proposes, "
+                "Workers execute on different angles, Verifiers check without cross-contamination."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "workflow": {
+                        "type": "string",
+                        "description": (
+                            'JSON array of steps: [{"agent": "claude:opus:xhigh", '
+                            '"subtask": "Propose the solution.", "sees": ["AgentA"]}]. '
+                            "'agent' uses backend:model[:effort] shorthands (same as fusion). "
+                            "'subtask' is injected as this agent's preamble. "
+                            "'sees' is a list of agent names, or 'all'/'none'. "
+                            "Duplicate base names get auto-numbered (Opus#1, Opus#2)."
+                        ),
+                    },
+                    "topic": {"type": "string", "description": "Short label for the room."},
+                    "judge": {"type": "string", "description": "Model for final synthesis. Default: 'claude:opus:max'."},
+                    "rounds": {"type": "integer", "description": "Discussion rounds per step (default: 1)."},
+                    "adversarial": {"type": "boolean", "description": "Adversarial synthesis (default: false)."},
+                    "files": {
+                        "type": "array", "items": {"type": "string"},
+                        "description": "File/directory paths to attach as shared context.",
+                    },
+                    "preamble": {"type": "string", "description": "Shared preamble prepended to all agents."},
+                },
+                "required": ["workflow"],
+            },
+        ),
+        Tool(
+            name="room_set_visibility",
+            description=(
+                "Update the per-round visibility matrix on an existing room. "
+                "Use to change what participants see mid-run without recreating the room. "
+                "Keys are round numbers (integers), values map participant name to 'all', 'none', or [names]."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "room_id": {"type": "string"},
+                    "visibility": {
+                        "type": "string",
+                        "description": 'JSON object: {"1": {"Alice": "none", "Bob": ["Alice"]}, "2": {"Alice": "all"}}.'
+                    },
+                },
+                "required": ["room_id", "visibility"],
             },
         ),
         # ── Backend-specific tools (kept for direct control) ─────────────────
@@ -2145,6 +2201,101 @@ async def call_tool(name: str, arguments: dict):
                 f"## Cross-Room Synthesis by {_df_judge.get('name', _df_judge_raw)}\n\n"
                 f"{_df_reply}"
             )
+        elif name == "conductor_fusion":
+            _cf_workflow_raw = arguments.get("workflow", "[]")
+            if isinstance(_cf_workflow_raw, str):
+                _cf_workflow = json.loads(_cf_workflow_raw)
+            else:
+                _cf_workflow = _cf_workflow_raw
+            _cf_topic     = arguments.get("topic") or "Conductor task"
+            _cf_judge_raw = arguments.get("judge", "claude:opus:max")
+            _cf_rounds    = max(1, int(arguments.get("rounds", 1)))
+            _cf_adversarial = bool(arguments.get("adversarial", False))
+            _cf_judge = (_normalize_participant_shorthands([_cf_judge_raw]) or [{}])[0]
+            _cf_room_id = f"conductor-{uuid.uuid4().hex[:8]}"
+
+            # Compile workflow into participants, preambles, and visibility matrix.
+            # Agent shorthands are normalized; duplicate base names get #N suffixes.
+            _cf_name_counts: dict[str, int] = {}
+            _cf_participants = []
+            _cf_preambles: dict[str, str] = {}
+            _cf_vis_per_step: list[dict] = []  # [{name: sees}] per step
+            for _step in _cf_workflow:
+                _agent_raw = _step.get("agent", "claude:sonnet")
+                _norm = _normalize_participant_shorthands([_agent_raw])
+                _p = _norm[0] if _norm else {"name": _agent_raw, "backend": "claude"}
+                _base_name = _p["name"]
+                _cf_name_counts[_base_name] = _cf_name_counts.get(_base_name, 0) + 1
+                _cnt = _cf_name_counts[_base_name]
+                _p["name"] = f"{_base_name}#{_cnt}" if _cnt > 1 else _base_name
+                _cf_participants.append(_p)
+                _cf_preambles[_p["name"]] = _step.get("subtask", "")
+                _sees = _step.get("sees", "all")
+                _cf_vis_per_step.append({_p["name"]: _sees})
+            # Apply same visibility to all rounds
+            _cf_visibility: dict[int, dict] = {
+                r: {k: v for d in _cf_vis_per_step for k, v in d.items()}
+                for r in range(1, _cf_rounds + 1)
+            }
+            # Shared file preamble
+            _cf_preamble_parts: list[str] = []
+            _cf_total = 0
+            for _fpath in (arguments.get("files") or []):
+                _paths = []
+                if os.path.isdir(_fpath):
+                    for _dp, _dns, _fns in os.walk(_fpath):
+                        _dns[:] = [d for d in sorted(_dns) if d not in _SKIP_DIRS]
+                        for _fn in sorted(_fns):
+                            if os.path.splitext(_fn)[1].lower() not in _SKIP_EXTS:
+                                _paths.append(os.path.join(_dp, _fn))
+                else:
+                    _paths = [_fpath]
+                for _fp in _paths:
+                    if _cf_total >= _MAX_TOTAL_BYTES:
+                        break
+                    try:
+                        if os.path.getsize(_fp) > _MAX_FILE_BYTES:
+                            continue
+                        with open(_fp, errors="replace") as _fh:
+                            _fc = _fh.read()
+                        _ext = os.path.splitext(_fp)[1].lstrip(".")
+                        _cf_preamble_parts.append(f"### {os.path.basename(_fp)}\n```{_ext}\n{_fc}\n```")
+                        _cf_total += len(_fc)
+                    except Exception:
+                        pass
+            if arguments.get("preamble"):
+                _cf_preamble_parts.append(arguments["preamble"])
+            _cf_shared_preamble = "\n\n".join(_cf_preamble_parts)
+            await rooms.create(
+                room_id=_cf_room_id, topic=_cf_topic,
+                participants=_cf_participants,
+                preamble=_cf_shared_preamble,
+                preambles=_cf_preambles,
+                visibility=_cf_visibility,
+                participant_tools=["all"],
+            )
+            await rooms.run_rounds(_cf_room_id, rounds=_cf_rounds)
+            result = await rooms.synthesize(
+                _cf_room_id, synthesizer=_cf_judge, adversarial=_cf_adversarial,
+            )
+            _threading.Thread(target=distill_event, args=("room_synth", result, {}), daemon=True).start()
+            result = f"[conductor_fusion:{_cf_room_id}]\n{result}"
+
+        elif name == "room_set_visibility":
+            _rv_id = arguments.get("room_id", "")
+            if _rv_id not in rooms.rooms:
+                rooms._try_load_room(_rv_id)
+            if _rv_id not in rooms.rooms:
+                result = f"Room '{_rv_id}' not found."
+            else:
+                _rv_raw = arguments.get("visibility", "{}")
+                _rv_parsed = json.loads(_rv_raw) if isinstance(_rv_raw, str) else _rv_raw
+                # Normalise string keys to int
+                _rv_norm = {int(k): v for k, v in _rv_parsed.items()}
+                rooms.rooms[_rv_id].visibility = _rv_norm
+                rooms._save_room(_rv_id)
+                result = f"Visibility matrix updated on '{_rv_id}': {_rv_norm}"
+
         # Codex tools
         elif name == "codex_start":
             result = await codex_bridge.start_session(

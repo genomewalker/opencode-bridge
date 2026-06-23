@@ -237,6 +237,7 @@ class TestAdaptiveStop:
         with (patch.object(self.rm, "_participant_respond",
                            side_effect=self._fake_respond("converged answer")),
               patch.object(self.rm, "_score_convergence", new=AsyncMock(return_value=0.95)),
+              patch.object(self.rm, "_round_converged", return_value=(True, [])),
               patch.object(self.rm, "_save_room", return_value=None)):
             asyncio.run(self.rm.run_rounds(room.id, rounds=5, adaptive_stop=True,
                                            adaptive_threshold=0.85, adaptive_k=2))
@@ -260,6 +261,7 @@ class TestAdaptiveStop:
         with (patch.object(self.rm, "_participant_respond",
                            side_effect=self._fake_respond("answer")),
               patch.object(self.rm, "_score_convergence", side_effect=score_fn),
+              patch.object(self.rm, "_round_converged", return_value=(True, [])),
               patch.object(self.rm, "_save_room", return_value=None)):
             asyncio.run(self.rm.run_rounds(room.id, rounds=10, adaptive_stop=True,
                                            adaptive_threshold=0.85, adaptive_k=2))

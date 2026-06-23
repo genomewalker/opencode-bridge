@@ -2950,25 +2950,33 @@ class RoomManager:
                     if compress_target >= 1:
                         await self._compress_round(room, compress_target)
 
-                # Stop-early: halt when ledger stops moving and no disagreement.
-                # Only substantive (non-poison) responses count toward convergence.
+                # Convergence gate: ledger-delta (deterministic) + optional haiku score.
+                # When adaptive_stop=True, BOTH must agree before stopping — prevents
+                # false-early-stop from rephrased agreement (high cosine, zero new claims)
+                # and from low-effort one-liners (high haiku score, empty ledger).
                 if good_responses:
                     round_contents = [r.get("content", "") for r in good_responses]
                     prior_keys = {c[:50].lower() for c in room.claim_ledger}
                     converged, new_claims = self._round_converged(round_contents, prior_keys)
                     room.claim_ledger.extend(new_claims)
-                    if adaptive_stop and loop_idx < rounds - 1:
-                        score = await self._score_convergence(round_contents)
-                        _conv_streak = _conv_streak + 1 if score >= adaptive_threshold else 0
-                        room.messages.append({
-                            "name": "MODERATOR",
-                            "content": f"[Adaptive] convergence={score:.2f} streak={_conv_streak}/{adaptive_k}",
-                            "ts": datetime.now().isoformat(),
-                        })
-                        if _conv_streak >= adaptive_k:
+                    if loop_idx < rounds - 1:
+                        if adaptive_stop:
+                            score = await self._score_convergence(round_contents)
+                            # Dual-track: streak only advances when ledger-delta also agrees
+                            _both = score >= adaptive_threshold and converged
+                            _conv_streak = _conv_streak + 1 if _both else 0
+                            room.messages.append({
+                                "name": "MODERATOR",
+                                "content": (
+                                    f"[Adaptive] convergence={score:.2f} ledger_converged={converged} "
+                                    f"streak={_conv_streak}/{adaptive_k}"
+                                ),
+                                "ts": datetime.now().isoformat(),
+                            })
+                            if _conv_streak >= adaptive_k:
+                                break
+                        elif stop_early and converged:
                             break
-                    elif stop_early and loop_idx < rounds - 1 and converged:
-                        break
                 elif (stop_early or adaptive_stop) and not new_responses:
                     # No new content at all — treat as converged to avoid spinning
                     break
