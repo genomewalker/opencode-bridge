@@ -607,10 +607,14 @@ async def list_tools():
                         "description": (
                             'JSON array of steps: [{"agent": "claude:opus:xhigh", '
                             '"subtask": "Propose the solution.", "sees": ["AgentA"]}]. '
-                            "'agent' uses backend:model[:effort] shorthands (same as fusion). "
+                            "'agent' uses backend:model[:effort] shorthands (same as fusion); "
+                            "default per step: claude:opus:xhigh. "
                             "'subtask' is injected as this agent's preamble. "
                             "'sees' is a list of agent names, or 'all'/'none'. "
-                            "Duplicate base names get auto-numbered (Opus#1, Opus#2)."
+                            "Duplicate base names get auto-numbered (Opus#1, Opus#2). "
+                            "Omit workflow entirely to use the default TRINITY panel: "
+                            "claude:opus:xhigh (Thinker, blind) + codex:gpt-5.5 (Worker, sees Opus) "
+                            "+ claude:sonnet (Verifier, sees all)."
                         ),
                     },
                     "topic": {"type": "string", "description": "Short label for the room."},
@@ -2192,6 +2196,13 @@ async def call_tool(name: str, arguments: dict):
             _cf_adversarial = bool(arguments.get("adversarial", False))
             _cf_judge = (_normalize_participant_shorthands([_cf_judge_raw]) or [{}])[0]
             _cf_room_id = f"conductor-{uuid.uuid4().hex[:8]}"
+            # Default panel when workflow is empty: TRINITY (Thinker / Worker / Verifier)
+            if not _cf_workflow:
+                _cf_workflow = [
+                    {"agent": "claude:opus:xhigh", "subtask": "Thinker: propose a complete answer independently.", "sees": "none"},
+                    {"agent": "codex:gpt-5.5",     "subtask": "Worker: build on or extend what the Thinker proposes.", "sees": ["Opus"]},
+                    {"agent": "claude:sonnet",      "subtask": "Verifier: critique both above responses. Cite at least 2 specific issues or confirmations.", "sees": ["Opus", "GPT-5.5"]},
+                ]
 
             # Compile workflow into participants, preambles, and visibility matrix.
             # Display names ("Opus", "GPT-5.5") are derived so sees entries match naturally.
@@ -2201,7 +2212,7 @@ async def call_tool(name: str, arguments: dict):
             _cf_preambles: dict[str, str] = {}
             _cf_vis_per_step: list[dict] = []  # [{name: sees}] per step
             for _step in _cf_workflow:
-                _agent_raw = _step.get("agent", "claude:sonnet")
+                _agent_raw = _step.get("agent", "claude:opus:xhigh")
                 _norm = _normalize_participant_shorthands([_agent_raw])
                 _p = _norm[0] if _norm else {"name": _agent_raw, "backend": "claude"}
                 _base_name = _step.get("name") or _display_name_for(_agent_raw)
