@@ -1994,8 +1994,8 @@ async def call_tool(name: str, arguments: dict):
                           ".exe", ".bin", ".pkl", ".npy", ".npz", ".h5", ".hdf5",
                           ".parquet", ".db", ".sqlite", ".lock", ".png", ".jpg",
                           ".jpeg", ".gif", ".pdf", ".zip", ".tar", ".gz", ".bz2"}
-            _MAX_FILE_BYTES = 100_000
-            _MAX_TOTAL_BYTES = 600_000
+            _MAX_FILE_BYTES = 200_000
+            _MAX_TOTAL_BYTES = 1_200_000
 
             def _collect_paths(root: str) -> list:
                 collected = []
@@ -2131,6 +2131,7 @@ async def call_tool(name: str, arguments: dict):
             # Collect file preamble (same logic as fusion)
             _df_preamble_parts = []
             _df_total = 0
+            _df_skipped: list[str] = []
             for _fpath in (arguments.get("files") or []):
                 _paths = []
                 if os.path.isdir(_fpath):
@@ -2143,9 +2144,12 @@ async def call_tool(name: str, arguments: dict):
                     _paths = [_fpath]
                 for _fp in _paths:
                     if _df_total >= _MAX_TOTAL_BYTES:
-                        break
+                        _df_skipped.append(f"{os.path.basename(_fp)} (budget exhausted)")
+                        continue
                     try:
-                        if os.path.getsize(_fp) > _MAX_FILE_BYTES:
+                        _fsize = os.path.getsize(_fp)
+                        if _fsize > _MAX_FILE_BYTES:
+                            _df_skipped.append(f"{os.path.basename(_fp)} ({_fsize // 1024}KB > {_MAX_FILE_BYTES // 1024}KB limit)")
                             continue
                         with open(_fp, errors="replace") as _fh:
                             _fc = _fh.read()
@@ -2154,6 +2158,11 @@ async def call_tool(name: str, arguments: dict):
                         _df_total += len(_fc)
                     except Exception:
                         pass
+            if _df_skipped:
+                _df_preamble_parts.append(
+                    "[file-context] " + str(len(_df_skipped)) + " file(s) omitted (too large): "
+                    + ", ".join(_df_skipped)
+                )
             if arguments.get("preamble"):
                 _df_preamble_parts.append(arguments["preamble"])
             _df_preamble = "\n\n".join(_df_preamble_parts)
@@ -2282,6 +2291,9 @@ async def call_tool(name: str, arguments: dict):
             # Shared file preamble
             _cf_preamble_parts: list[str] = []
             _cf_total = 0
+            _cf_skipped: list[str] = []
+            _CF_MAX_FILE  = 200_000   # 200 KB per file
+            _CF_MAX_TOTAL = 1_200_000  # 1.2 MB total
             for _fpath in (arguments.get("files") or []):
                 _paths = []
                 if os.path.isdir(_fpath):
@@ -2293,10 +2305,13 @@ async def call_tool(name: str, arguments: dict):
                 else:
                     _paths = [_fpath]
                 for _fp in _paths:
-                    if _cf_total >= _MAX_TOTAL_BYTES:
-                        break
+                    if _cf_total >= _CF_MAX_TOTAL:
+                        _cf_skipped.append(f"{os.path.basename(_fp)} (budget exhausted)")
+                        continue
                     try:
-                        if os.path.getsize(_fp) > _MAX_FILE_BYTES:
+                        _fsize = os.path.getsize(_fp)
+                        if _fsize > _CF_MAX_FILE:
+                            _cf_skipped.append(f"{os.path.basename(_fp)} ({_fsize // 1024}KB > {_CF_MAX_FILE // 1024}KB limit)")
                             continue
                         with open(_fp, errors="replace") as _fh:
                             _fc = _fh.read()
@@ -2305,6 +2320,11 @@ async def call_tool(name: str, arguments: dict):
                         _cf_total += len(_fc)
                     except Exception:
                         pass
+            if _cf_skipped:
+                _cf_preamble_parts.append(
+                    f"[file-context] {len(_cf_skipped)} file(s) omitted (too large for inline context): "
+                    + ", ".join(_cf_skipped)
+                )
             if arguments.get("preamble"):
                 _cf_preamble_parts.append(arguments["preamble"])
             _cf_shared_preamble = "\n\n".join(_cf_preamble_parts)
