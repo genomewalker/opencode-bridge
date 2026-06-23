@@ -524,6 +524,49 @@ async def list_tools():
                 "required": ["prompt"],
             },
         ),
+        Tool(
+            name="dual_fusion",
+            description=(
+                "Run the same prompt through BOTH a sparse room (independent sampling, no cross-talk) "
+                "AND a dense room (full debate, participants see each other), then cross-synthesize with "
+                "a judge model. Produces three categories: double-confirmed claims (highest confidence), "
+                "sparse-only insights (lost to debate pressure), and dense-only refinements (emerged from challenge). "
+                "Default panel: opus + gpt. Default judge: claude:opus:max."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "The question or task."},
+                    "participants": {
+                        "type": "array", "items": {"type": "string"},
+                        "description": "'backend:model[:effort]' strings. Default: [\"claude:opus:xhigh\", \"codex:gpt:xhigh\"]",
+                    },
+                    "judge": {
+                        "type": "string",
+                        "description": "Model for cross-synthesis. Default: \"claude:opus:max\"",
+                    },
+                    "dense_rounds": {
+                        "type": "integer",
+                        "description": "Rounds in the dense (debate) room (default: 2).",
+                    },
+                    "challenge": {
+                        "type": "boolean",
+                        "description": "Enable challenge rounds in the dense room (default: false).",
+                    },
+                    "adversarial": {
+                        "type": "boolean",
+                        "description": "Include majority/minority split in final synthesis (default: false).",
+                    },
+                    "topic": {"type": "string", "description": "Short label."},
+                    "files": {
+                        "type": "array", "items": {"type": "string"},
+                        "description": "File/directory paths to include as context (same budget as fusion).",
+                    },
+                    "preamble": {"type": "string", "description": "Framing prepended to all participant prompts."},
+                },
+                "required": ["prompt"],
+            },
+        ),
         # ── Backend-specific tools (kept for direct control) ─────────────────
         Tool(
             name="codex_discuss",
@@ -1927,6 +1970,117 @@ async def call_tool(name: str, arguments: dict):
             )
             _threading.Thread(target=distill_event, args=("room_synth", result, {}), daemon=True).start()
             result = f"[fusion:{_fuse_room_id}]\n{result}"
+        elif name == "dual_fusion":
+            _df_prompt    = arguments["prompt"]
+            _df_topic     = arguments.get("topic") or _df_prompt[:120]
+            _df_parts_raw = arguments.get("participants") or ["claude:opus:xhigh", "codex:gpt:xhigh"]
+            _df_judge_raw = arguments.get("judge", "claude:opus:max")
+            _df_dense_rounds = max(1, int(arguments.get("dense_rounds", 2)))
+            _df_challenge = bool(arguments.get("challenge", False))
+            _df_adversarial = bool(arguments.get("adversarial", False))
+            if isinstance(_df_parts_raw, str):
+                _df_parts_raw = json.loads(_df_parts_raw)
+            _df_norm  = _normalize_participant_shorthands(_df_parts_raw)
+            _df_judge = (_normalize_participant_shorthands([_df_judge_raw]) or [{}])[0]
+            _df_base  = f"dual-{uuid.uuid4().hex[:8]}"
+            _df_sparse_id = f"{_df_base}-sparse"
+            _df_dense_id  = f"{_df_base}-dense"
+
+            # Collect file preamble (same logic as fusion)
+            _df_preamble_parts = []
+            _df_total = 0
+            for _fpath in (arguments.get("files") or []):
+                _paths = []
+                if os.path.isdir(_fpath):
+                    for _dp, _dns, _fns in os.walk(_fpath):
+                        _dns[:] = [d for d in sorted(_dns) if d not in _SKIP_DIRS]
+                        for _fn in sorted(_fns):
+                            if os.path.splitext(_fn)[1].lower() not in _SKIP_EXTS:
+                                _paths.append(os.path.join(_dp, _fn))
+                else:
+                    _paths = [_fpath]
+                for _fp in _paths:
+                    if _df_total >= _MAX_TOTAL_BYTES:
+                        break
+                    try:
+                        if os.path.getsize(_fp) > _MAX_FILE_BYTES:
+                            continue
+                        with open(_fp, errors="replace") as _fh:
+                            _fc = _fh.read()
+                        _ext = os.path.splitext(_fp)[1].lstrip(".")
+                        _df_preamble_parts.append(f"### {os.path.basename(_fp)}\n```{_ext}\n{_fc}\n```")
+                        _df_total += len(_fc)
+                    except Exception:
+                        pass
+            if arguments.get("preamble"):
+                _df_preamble_parts.append(arguments["preamble"])
+            _df_preamble = "\n\n".join(_df_preamble_parts)
+
+            # Create both rooms, run in parallel
+            await rooms.create(room_id=_df_sparse_id, topic=_df_topic,
+                               participants=_df_norm, participant_tools=["all"], preamble=_df_preamble)
+            await rooms.create(room_id=_df_dense_id,  topic=_df_topic,
+                               participants=_df_norm, participant_tools=["all"], preamble=_df_preamble)
+            await asyncio.gather(
+                rooms.run_rounds(_df_sparse_id, rounds=1, sparse_topology=True),
+                rooms.run_rounds(_df_dense_id,  rounds=_df_dense_rounds, challenge=_df_challenge),
+            )
+
+            # Build combined transcript for cross-synthesis
+            _sparse_room = rooms.rooms[_df_sparse_id]
+            _dense_room  = rooms.rooms[_df_dense_id]
+            _sparse_tx   = rooms._build_annotated_transcript(_sparse_room)
+            _dense_tx    = rooms._build_annotated_transcript(_dense_room)
+            _adversarial_block = (
+                "\nAfter completing the five sections, add:\n"
+                "### Minority reading\nThe strongest alternative conclusion a reasonable reader could "
+                "reach from the combined evidence.\n"
+                "### Decision bet\nThe single most critical unverified assumption both rooms share.\n"
+            ) if _df_adversarial else ""
+            _df_synth_prompt = (
+                f"You are a cross-room synthesizer. Two rooms ran the same prompt with the same participants "
+                f"but different topologies.\n\n"
+                f"**SPARSE ROOM** (`{_df_sparse_id}`) — independent sampling, no cross-talk:\n"
+                f"Participants answered without seeing each other. Positions are statistically independent.\n\n"
+                f"{_sparse_tx}\n\n"
+                f"---\n\n"
+                f"**DENSE ROOM** (`{_df_dense_id}`) — full debate topology, {_df_dense_rounds} round(s):\n"
+                f"Participants read each other's responses and could challenge, refine, or concede.\n\n"
+                f"{_dense_tx}\n\n"
+                f"---\n\n"
+                f"## Cross-Room Synthesis\n\n"
+                f"### 1. Double-confirmed claims\n"
+                f"Claims present in BOTH rooms — independently reached AND debate-tested. "
+                f"Highest epistemic weight. Distinguish grounded (cited) from asserted.\n\n"
+                f"### 2. Sparse-only insights\n"
+                f"Positions from the sparse room that debate pressure crowded out or drove to premature consensus. "
+                f"What did cross-talk lose?\n\n"
+                f"### 3. Dense-only refinements\n"
+                f"Claims sharpened or discovered through challenge that neither participant would have reached alone. "
+                f"What did debate add?\n\n"
+                f"### 4. Final integrated answer\n"
+                f"The strongest single answer drawing on all three categories.\n\n"
+                f"### 5. Open questions\n"
+                f"What remains unresolved across both rooms?"
+                f"{_adversarial_block}"
+            )
+            _df_backend = _df_judge.get("backend", "claude")
+            try:
+                if _df_backend == "claude":
+                    _df_reply = await rooms._run_claude_p(_df_synth_prompt, model=_df_judge.get("model"))
+                elif _df_backend == "codex":
+                    _df_reply = await codex_bridge.run_task(_df_synth_prompt)
+                else:
+                    _df_reply = f"[error: unknown judge backend {_df_backend!r}]"
+            except Exception as _dfe:
+                _df_reply = f"[cross-synthesis error: {_dfe}]"
+            _threading.Thread(target=distill_event, args=("room_synth", _df_reply, {}), daemon=True).start()
+            result = (
+                f"[dual_fusion:{_df_base}]\n"
+                f"Sparse room: {_df_sparse_id} · Dense room: {_df_dense_id}\n\n"
+                f"## Cross-Room Synthesis by {_df_judge.get('name', _df_judge_raw)}\n\n"
+                f"{_df_reply}"
+            )
         # Codex tools
         elif name == "codex_start":
             result = await codex_bridge.start_session(
