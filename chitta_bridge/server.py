@@ -1979,65 +1979,31 @@ async def call_tool(name: str, arguments: dict):
                     {**_base, "name": f"{_base['name']}#{i + 1}"} for i in range(max(1, _n))
                 ]
 
+            # Build preamble: file manifest (agents read on demand) + explicit preamble text
+            _fuse_preamble_parts: list[str] = []
             if arguments.get("min_quality") and _fuse_norm:
                 _weak = [p["name"] for p in _fuse_norm
                          if not any(s in p.get("model", "").lower() for s in _STRONG_PROPOSERS)]
                 if _weak:
-                    _fuse_preamble_parts.insert(0,
+                    _fuse_preamble_parts.append(
                         f"[MODERATOR] Weak proposers detected: {', '.join(_weak)}. "
                         "Consider self_moa=true or substituting stronger models."
                     )
-            # Build preamble from files/dirs + explicit preamble text
-            _SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv",
-                          "dist", "build", "target", ".tox", ".mypy_cache", ".ruff_cache"}
-            _SKIP_EXTS = {".pyc", ".pyo", ".so", ".o", ".a", ".dylib", ".dll",
-                          ".exe", ".bin", ".pkl", ".npy", ".npz", ".h5", ".hdf5",
-                          ".parquet", ".db", ".sqlite", ".lock", ".png", ".jpg",
-                          ".jpeg", ".gif", ".pdf", ".zip", ".tar", ".gz", ".bz2"}
-            _MAX_FILE_BYTES = 200_000
-            _MAX_TOTAL_BYTES = 1_200_000
-
-            def _collect_paths(root: str) -> list:
-                collected = []
-                for dirpath, dirnames, filenames in os.walk(root):
-                    dirnames[:] = [d for d in sorted(dirnames) if d not in _SKIP_DIRS]
-                    for fn in sorted(filenames):
-                        if os.path.splitext(fn)[1].lower() in _SKIP_EXTS:
-                            continue
-                        collected.append(os.path.join(dirpath, fn))
-                return collected
-
-            _fuse_preamble_parts = []
-            _total_bytes = 0
-            _file_count = 0
-            _skipped = []
-            for _fpath in (arguments.get("files") or []):
-                paths = _collect_paths(_fpath) if os.path.isdir(_fpath) else [_fpath]
-                for _fp in paths:
-                    if _total_bytes >= _MAX_TOTAL_BYTES:
-                        _skipped.append(_fp)
-                        continue
-                    try:
-                        _fsize = os.path.getsize(_fp)
-                        if _fsize > _MAX_FILE_BYTES:
-                            _skipped.append(f"{_fp} ({_fsize:,}B > limit)")
-                            continue
-                        with open(_fp, errors="replace") as _fh:
-                            _fcontent = _fh.read()
-                        _ext = os.path.splitext(_fp)[1].lstrip(".")
-                        _rel = os.path.relpath(_fp, arguments.get("files", [_fp])[0]) if os.path.isdir(arguments.get("files", [_fp])[0]) else os.path.basename(_fp)
-                        _fuse_preamble_parts.append(
-                            f"### {_rel}\n```{_ext}\n{_fcontent}\n```"
-                        )
-                        _total_bytes += len(_fcontent)
-                        _file_count += 1
-                    except Exception as _fe:
-                        _fuse_preamble_parts.append(f"### {_fp}\n(could not read: {_fe})")
-            if _skipped:
-                _fuse_preamble_parts.append(
-                    "### [skipped — size/budget limit]\n" +
-                    "\n".join(f"- {s}" for s in _skipped)
-                )
+            _file_paths = arguments.get("files") or []
+            if _file_paths:
+                _manifest_lines: list[str] = []
+                for _fp in _file_paths:
+                    _afp = os.path.abspath(_fp)
+                    if os.path.isdir(_afp):
+                        _manifest_lines.append(f"- {_afp}/")
+                    elif os.path.exists(_afp):
+                        _manifest_lines.append(f"- {_afp}")
+                if _manifest_lines:
+                    _fuse_preamble_parts.append(
+                        "## Files available for reading\n"
+                        "Use read_file, sqz_read_file, find, or ls to read these paths on demand:\n\n"
+                        + "\n".join(_manifest_lines)
+                    )
             if arguments.get("preamble"):
                 _fuse_preamble_parts.append(arguments["preamble"])
             _fuse_preamble = "\n\n".join(_fuse_preamble_parts)
@@ -2128,41 +2094,23 @@ async def call_tool(name: str, arguments: dict):
             _df_sparse_id = f"{_df_base}-sparse"
             _df_dense_id  = f"{_df_base}-dense"
 
-            # Collect file preamble (same logic as fusion)
-            _df_preamble_parts = []
-            _df_total = 0
-            _df_skipped: list[str] = []
-            for _fpath in (arguments.get("files") or []):
-                _paths = []
-                if os.path.isdir(_fpath):
-                    for _dp, _dns, _fns in os.walk(_fpath):
-                        _dns[:] = [d for d in sorted(_dns) if d not in _SKIP_DIRS]
-                        for _fn in sorted(_fns):
-                            if os.path.splitext(_fn)[1].lower() not in _SKIP_EXTS:
-                                _paths.append(os.path.join(_dp, _fn))
-                else:
-                    _paths = [_fpath]
-                for _fp in _paths:
-                    if _df_total >= _MAX_TOTAL_BYTES:
-                        _df_skipped.append(f"{os.path.basename(_fp)} (budget exhausted)")
-                        continue
-                    try:
-                        _fsize = os.path.getsize(_fp)
-                        if _fsize > _MAX_FILE_BYTES:
-                            _df_skipped.append(f"{os.path.basename(_fp)} ({_fsize // 1024}KB > {_MAX_FILE_BYTES // 1024}KB limit)")
-                            continue
-                        with open(_fp, errors="replace") as _fh:
-                            _fc = _fh.read()
-                        _ext = os.path.splitext(_fp)[1].lstrip(".")
-                        _df_preamble_parts.append(f"### {os.path.basename(_fp)}\n```{_ext}\n{_fc}\n```")
-                        _df_total += len(_fc)
-                    except Exception:
-                        pass
-            if _df_skipped:
-                _df_preamble_parts.append(
-                    "[file-context] " + str(len(_df_skipped)) + " file(s) omitted (too large): "
-                    + ", ".join(_df_skipped)
-                )
+            # File manifest — agents read on demand via tools
+            _df_preamble_parts: list[str] = []
+            _df_file_paths = arguments.get("files") or []
+            if _df_file_paths:
+                _df_manifest: list[str] = []
+                for _fp in _df_file_paths:
+                    _afp = os.path.abspath(_fp)
+                    if os.path.isdir(_afp):
+                        _df_manifest.append(f"- {_afp}/")
+                    elif os.path.exists(_afp):
+                        _df_manifest.append(f"- {_afp}")
+                if _df_manifest:
+                    _df_preamble_parts.append(
+                        "## Files available for reading\n"
+                        "Use read_file, sqz_read_file, find, or ls to read these paths on demand:\n\n"
+                        + "\n".join(_df_manifest)
+                    )
             if arguments.get("preamble"):
                 _df_preamble_parts.append(arguments["preamble"])
             _df_preamble = "\n\n".join(_df_preamble_parts)
@@ -2288,43 +2236,23 @@ async def call_tool(name: str, arguments: dict):
                 r: {k: v for d in _cf_vis_per_step for k, v in d.items()}
                 for r in range(1, _cf_rounds + 1)
             }
-            # Shared file preamble
+            # Shared preamble: file manifest (agents read on demand) + explicit preamble text
             _cf_preamble_parts: list[str] = []
-            _cf_total = 0
-            _cf_skipped: list[str] = []
-            _CF_MAX_FILE  = 200_000   # 200 KB per file
-            _CF_MAX_TOTAL = 1_200_000  # 1.2 MB total
-            for _fpath in (arguments.get("files") or []):
-                _paths = []
-                if os.path.isdir(_fpath):
-                    for _dp, _dns, _fns in os.walk(_fpath):
-                        _dns[:] = [d for d in sorted(_dns) if d not in _SKIP_DIRS]
-                        for _fn in sorted(_fns):
-                            if os.path.splitext(_fn)[1].lower() not in _SKIP_EXTS:
-                                _paths.append(os.path.join(_dp, _fn))
-                else:
-                    _paths = [_fpath]
-                for _fp in _paths:
-                    if _cf_total >= _CF_MAX_TOTAL:
-                        _cf_skipped.append(f"{os.path.basename(_fp)} (budget exhausted)")
-                        continue
-                    try:
-                        _fsize = os.path.getsize(_fp)
-                        if _fsize > _CF_MAX_FILE:
-                            _cf_skipped.append(f"{os.path.basename(_fp)} ({_fsize // 1024}KB > {_CF_MAX_FILE // 1024}KB limit)")
-                            continue
-                        with open(_fp, errors="replace") as _fh:
-                            _fc = _fh.read()
-                        _ext = os.path.splitext(_fp)[1].lstrip(".")
-                        _cf_preamble_parts.append(f"### {os.path.basename(_fp)}\n```{_ext}\n{_fc}\n```")
-                        _cf_total += len(_fc)
-                    except Exception:
-                        pass
-            if _cf_skipped:
-                _cf_preamble_parts.append(
-                    f"[file-context] {len(_cf_skipped)} file(s) omitted (too large for inline context): "
-                    + ", ".join(_cf_skipped)
-                )
+            _cf_file_paths = arguments.get("files") or []
+            if _cf_file_paths:
+                _cf_manifest: list[str] = []
+                for _fp in _cf_file_paths:
+                    _afp = os.path.abspath(_fp)
+                    if os.path.isdir(_afp):
+                        _cf_manifest.append(f"- {_afp}/")
+                    elif os.path.exists(_afp):
+                        _cf_manifest.append(f"- {_afp}")
+                if _cf_manifest:
+                    _cf_preamble_parts.append(
+                        "## Files available for reading\n"
+                        "Use read_file, sqz_read_file, find, or ls to read these paths on demand:\n\n"
+                        + "\n".join(_cf_manifest)
+                    )
             if arguments.get("preamble"):
                 _cf_preamble_parts.append(arguments["preamble"])
             _cf_shared_preamble = "\n\n".join(_cf_preamble_parts)
