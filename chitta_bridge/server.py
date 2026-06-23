@@ -1963,6 +1963,32 @@ async def call_tool(name: str, arguments: dict):
             if arguments.get("preamble"):
                 _fuse_preamble_parts.append(arguments["preamble"])
             _fuse_preamble = "\n\n".join(_fuse_preamble_parts)
+            # Soul routing memory: recall historical performance for this topic
+            # and reorder proposers by descending citation score.
+            if SoulClient.is_available() and not arguments.get("self_moa"):
+                _routing_mem = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: SoulClient.hybrid_recall(
+                        f"[routing-memory] {_fuse_topic[:80]}", limit=10,
+                    ),
+                )
+                if _routing_mem and len(_routing_mem.strip()) > 20:
+                    import re as _re
+                    # Extract model→citation_score pairs from memory text
+                    _scores: dict[str, float] = {}
+                    for _line in _routing_mem.splitlines():
+                        _m = _re.search(r'model:([\w.:-]+).*citation_score:([0-9.]+)', _line)
+                        if _m:
+                            _scores[_m.group(1)] = float(_m.group(2))
+                    if _scores:
+                        _fuse_norm.sort(
+                            key=lambda p: _scores.get(p.get("model", ""), 0.0),
+                            reverse=True,
+                        )
+                        _fuse_preamble_parts.insert(0,
+                            f"[MODERATOR] Participant order optimised by soul routing memory "
+                            f"({len(_scores)} prior runs). Top model: {_fuse_norm[0].get('model','?')}.")
+                        _fuse_preamble = "\n\n".join(_fuse_preamble_parts)
             await rooms.create(room_id=_fuse_room_id, topic=_fuse_topic, participants=_fuse_norm,
                                participant_tools=["all"], preamble=_fuse_preamble)
             await rooms.run_rounds(
@@ -1977,6 +2003,36 @@ async def call_tool(name: str, arguments: dict):
                 cross_attend=bool(arguments.get("cross_attend")),
             )
             _threading.Thread(target=distill_event, args=("room_synth", result, {}), daemon=True).start()
+            # Soul routing memory: persist per-participant citation scores for future recall.
+            if SoulClient.is_available():
+                _fuse_room = rooms.rooms.get(_fuse_room_id)
+                if _fuse_room:
+                    _part_scores: dict[str, list[float]] = {}
+                    for _msg in _fuse_room.messages:
+                        _pname = _msg.get("name", "")
+                        if _pname in {p["name"] for p in _fuse_norm}:
+                            _cs = _msg.get("citation_score", 0)
+                            _part_scores.setdefault(_pname, []).append(_cs)
+                    _majority, _minority, _ = rooms._detect_plurality(_fuse_room)
+                    _minority_names = {m["name"] for m in _minority}
+                    _n_rounds = rooms._committed_rounds(_fuse_room)
+                    for _p in _fuse_norm:
+                        _pn = _p["name"]
+                        _avg_cit = sum(_part_scores.get(_pn, [0])) / max(1, len(_part_scores.get(_pn, [1])))
+                        _mem_content = (
+                            f"[routing-memory] topic:{_fuse_topic[:60]} "
+                            f"participant:{_pn} model:{_p.get('model','?')} "
+                            f"backend:{_p.get('backend','?')} "
+                            f"citation_score:{_avg_cit:.2f} "
+                            f"was_minority:{_pn in _minority_names} "
+                            f"round_count:{_n_rounds}"
+                        )
+                        await asyncio.get_event_loop().run_in_executor(
+                            None,
+                            lambda c=_mem_content: SoulClient.remember(
+                                c, "signal", "routing-memory,fusion,bridge",
+                            ),
+                        )
             result = f"[fusion:{_fuse_room_id}]\n{result}"
         elif name == "dual_fusion":
             _df_prompt    = arguments["prompt"]
