@@ -436,19 +436,20 @@ class RoomManager:
             lines.append("")
         return "\n".join(lines)
 
+    _TRANSCRIPT_SYSTEM = {"TOPIC", "CONTEXT", "MODERATOR"}
+
+    def _tag_for(self, msg: dict) -> str:
+        if msg["name"] in self._TRANSCRIPT_SYSTEM:
+            return ""
+        score = msg.get("citation_score", 0)
+        return f" [grounded:{score} citations]" if score > 0 else " [asserted: no citations]"
+
     def _build_annotated_transcript(self, room: "DiscussionRoom") -> str:
         """Transcript with per-message grounding tags (grounded:N citations / asserted)."""
-        _system = {"TOPIC", "CONTEXT", "MODERATOR"}
         lines = [f"# Discussion Room: {room.id}", f"**Topic:** {room.topic}", ""]
         for msg in room.messages:
             ts = msg["ts"][11:19]
-            name = msg["name"]
-            if name not in _system:
-                score = msg.get("citation_score", 0)
-                tag = f" [grounded:{score} citations]" if score > 0 else " [asserted: no citations]"
-            else:
-                tag = ""
-            lines.append(f"**[{ts}] {name}:**{tag}")
+            lines.append(f"**[{ts}] {msg['name']}:**{self._tag_for(msg)}")
             lines.append(msg["content"])
             lines.append("")
         return "\n".join(lines)
@@ -521,7 +522,8 @@ class RoomManager:
         return result + div_suffix
 
     async def synthesize(self, room_id: str, synthesizer: Optional[dict] = None,
-                         adversarial: bool = False, verify_citations: bool = False) -> str:
+                         adversarial: bool = False, verify_citations: bool = False,
+                         minority_filter: bool = False, cross_attend: bool = False) -> str:
         """Run a final synthesis pass over the full transcript — distills all responses into one answer.
 
         adversarial=True: produces both a majority reading and a strongest-minority reading,
@@ -529,6 +531,10 @@ class RoomManager:
         If a coherent minority reading cannot be constructed, the discussion is genuinely converged.
         verify_citations=True: instructs the synthesizer to fetch and verify each cited source before
         including it in the synthesis — flags unverifiable or misquoted references.
+        minority_filter=True: show the judge only dissenting traces + a compressed majority summary,
+        reducing input tokens while preserving synthesis quality (SOTA: arXiv:2605.29116).
+        cross_attend=True: judge first notes what is unique to each proposal before synthesizing
+        (Attention-MoA prompt variant; SOTA: arXiv:2601.16596).
         """
         if room_id not in self.rooms:
             self._try_load_room(room_id)
@@ -536,19 +542,41 @@ class RoomManager:
             return f"Room '{room_id}' not found."
         room = self.rooms[room_id]
 
-        transcript = self._build_annotated_transcript(room)
+        if minority_filter:
+            _, min_msgs, maj_summary = self._detect_plurality(room)
+            if min_msgs:
+                lines = [f"# Discussion Room: {room.id}", f"**Topic:** {room.topic}", "",
+                         "## Majority position (summarized)", maj_summary, "",
+                         "## Dissenting traces (full)", ""]
+                for msg in min_msgs:
+                    ts = msg["ts"][11:19]
+                    lines.append(f"**[{ts}] {msg['name']}:**{self._tag_for(msg)}")
+                    lines.append(msg["content"])
+                    lines.append("")
+                transcript = "\n".join(lines)
+            else:
+                transcript = self._build_annotated_transcript(room)
+        else:
+            transcript = self._build_annotated_transcript(room)
         verify_block = (
             "\n\n**Citation verification required**: Before finalizing your synthesis, "
             "fetch and verify each URL, arXiv ID, or DOI cited in the transcript. "
             "For each: confirm the source exists and supports the claimed point. "
             "Flag any citation that is unverifiable, misquoted, or does not support the claim."
         ) if verify_citations else ""
+        cross_attend_block = (
+            "## Cross-Attention Pass (complete this FIRST, before synthesizing)\n"
+            "For EACH proposal above, in one sentence state what is UNIQUE to it "
+            "that no other proposal contains. Then proceed to the synthesis.\n\n"
+        ) if cross_attend else ""
+
         if adversarial:
             prompt = (
                 f"You are a neutral synthesizer reviewing a multi-agent discussion.\n"
                 f"Messages tagged [grounded:N citations] cite verifiable sources; "
                 f"[asserted: no citations] are claims without external evidence — weight accordingly.\n\n"
                 f"{transcript}\n\n"
+                f"{cross_attend_block}"
                 f"## Adversarial Dual Synthesis Task\n"
                 f"Produce TWO competing readings of this discussion, then a decision bet:\n\n"
                 f"### 1. Majority Reading\n"
@@ -573,6 +601,7 @@ class RoomManager:
                 f"Messages tagged [grounded:N citations] cite verifiable sources; "
                 f"[asserted: no citations] are claims without external evidence — weight accordingly.\n\n"
                 f"{transcript}\n\n"
+                f"{cross_attend_block}"
                 f"## Synthesis Task\n"
                 f"Resolve any contradictions between participants, then distill the discussion into a single, coherent answer:\n"
                 f"1. **Core consensus** — what all participants agreed on\n"
@@ -2378,6 +2407,59 @@ class RoomManager:
     # Challenge round support
     # ------------------------------------------------------------------
 
+    def _detect_plurality(self, room: "DiscussionRoom") -> tuple[list[dict], list[dict], str]:
+        """Cluster participant messages by sentence-shingle Jaccard; return (majority_msgs, minority_msgs, majority_summary).
+        Falls back to (all_msgs, [], "") when N < 3 or all messages converge.
+        # ceiling: lexical shingles, not semantic; upgrade: embed responses
+        """
+        _skip = {"TOPIC", "CONTEXT", "MODERATOR", "SUMMARY"}
+        msgs = [m for m in room.messages if m["name"] not in _skip and not m.get("poison")]
+        if len(msgs) < 3:
+            return msgs, [], ""
+
+        def _shingles(text: str) -> set:
+            return {s.strip()[:40] for s in text.lower().split(".") if len(s.strip()) > 15}
+
+        shingle_sets = [_shingles(m["content"]) for m in msgs]
+        clusters: list[list[int]] = []
+        for i, si in enumerate(shingle_sets):
+            placed = False
+            for cluster in clusters:
+                rep = shingle_sets[cluster[0]]
+                u = len(si | rep)
+                if u and len(si & rep) / u >= 0.5:
+                    cluster.append(i)
+                    placed = True
+                    break
+            if not placed:
+                clusters.append([i])
+
+        majority_cluster = max(clusters, key=len)
+        majority_idx = set(majority_cluster)
+        majority_msgs = [msgs[i] for i in majority_cluster]
+        minority_msgs = [msgs[i] for i in range(len(msgs)) if i not in majority_idx]
+        majority_summary = "\n".join(
+            f"[{msgs[i]['name']}] {msgs[i]['content'][:200]}" for i in majority_cluster
+        )
+        return majority_msgs, minority_msgs, majority_summary
+
+    async def _score_convergence(self, round_contents: list[str]) -> float:
+        """Ask haiku to score response convergence on [0,1]. Fail-open (returns 0.0) on error.
+        # ceiling: claude-only; upgrade: route through active backend
+        """
+        formatted = "\n\n".join(f"[{i + 1}] {c[:500]}" for i, c in enumerate(round_contents))
+        prompt = (
+            "Rate convergence of these responses: 0.0 = completely divergent, "
+            "1.0 = fully converged. Return ONLY a float, nothing else.\n\n"
+            f"{formatted}"
+        )
+        try:
+            reply = await self._run_claude_p(prompt, model="claude-haiku-4-5-20251001", timeout=60)
+            m = re.search(r"\b([01](?:\.\d+)?)\b", reply)
+            return float(m.group(1)) if m else 0.0
+        except Exception:
+            return 0.0
+
     def _extract_claims(self, messages: list[dict]) -> list[str]:
         """Extract substantive claims from recent messages for challenge rounds."""
         claims = []
@@ -2557,7 +2639,9 @@ class RoomManager:
         return converged, []
     async def run_rounds(self, room_id: str, rounds: int = 2,
                           challenge: bool = False, blind_first_round: bool = False,
-                          sparse_topology: bool = False, stop_early: bool = False) -> str:
+                          sparse_topology: bool = False, stop_early: bool = False,
+                          adaptive_stop: bool = False, adaptive_threshold: float = 0.85,
+                          adaptive_k: int = 2) -> str:
         """Run N rounds of async discussion — all participants respond in parallel each round.
 
         blind_first_round: round 1 is blind (participants don't see each other's prior outputs).
@@ -2606,6 +2690,7 @@ class RoomManager:
             # with already-committed turn_keys (r1:name, r2:name, etc.).
             # Includes compressed (SUMMARY) rounds so round numbers are never reused.
             round_start = self._committed_rounds(room) + 1
+            _conv_streak = 0
 
             for loop_idx, round_num in enumerate(range(round_start, round_start + rounds)):
                 # Inject challenge prompt between rounds if enabled
@@ -2729,9 +2814,19 @@ class RoomManager:
                     prior_keys = {c[:50].lower() for c in room.claim_ledger}
                     converged, new_claims = self._round_converged(round_contents, prior_keys)
                     room.claim_ledger.extend(new_claims)
-                    if stop_early and loop_idx < rounds - 1 and converged:
+                    if adaptive_stop and loop_idx < rounds - 1:
+                        score = await self._score_convergence(round_contents)
+                        _conv_streak = _conv_streak + 1 if score >= adaptive_threshold else 0
+                        room.messages.append({
+                            "name": "MODERATOR",
+                            "content": f"[Adaptive] convergence={score:.2f} streak={_conv_streak}/{adaptive_k}",
+                            "ts": datetime.now().isoformat(),
+                        })
+                        if _conv_streak >= adaptive_k:
+                            break
+                    elif stop_early and loop_idx < rounds - 1 and converged:
                         break
-                elif stop_early and not new_responses:
+                elif (stop_early or adaptive_stop) and not new_responses:
                     # No new content at all — treat as converged to avoid spinning
                     break
 

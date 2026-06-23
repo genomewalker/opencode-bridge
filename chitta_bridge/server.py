@@ -470,6 +470,56 @@ async def list_tools():
                             "Use to set domain context, constraints, or review focus."
                         ),
                     },
+                    "minority_filter": {
+                        "type": "boolean",
+                        "description": (
+                            "Show the judge only dissenting traces + a compressed majority summary "
+                            "instead of the full transcript. Reduces input tokens; same synthesis quality "
+                            "(SOTA: arXiv:2605.29116). Requires ≥3 participants to be effective; "
+                            "pairs well with self_moa. Default: false."
+                        ),
+                    },
+                    "cross_attend": {
+                        "type": "boolean",
+                        "description": (
+                            "Ask the judge to first note what is unique to each proposal before synthesizing "
+                            "(Attention-MoA prompt variant; SOTA: arXiv:2601.16596, +2.59pp AlpacaEval 2.0). Default: false."
+                        ),
+                    },
+                    "adaptive_stop": {
+                        "type": "boolean",
+                        "description": (
+                            "Use a haiku convergence score per round to stop early instead of the keyword heuristic. "
+                            "Stops when score ≥ adaptive_threshold for adaptive_k consecutive rounds. Default: false."
+                        ),
+                    },
+                    "adaptive_threshold": {
+                        "type": "number",
+                        "description": "Convergence score threshold for adaptive_stop (default: 0.85).",
+                    },
+                    "adaptive_k": {
+                        "type": "integer",
+                        "description": "Consecutive rounds above threshold before adaptive_stop triggers (default: 2).",
+                    },
+                    "min_quality": {
+                        "type": "boolean",
+                        "description": (
+                            "Warn via MODERATOR message if any panel model is a known-weak proposer. "
+                            "Does not block execution. Default: false."
+                        ),
+                    },
+                    "self_moa": {
+                        "type": "boolean",
+                        "description": (
+                            "Replace the panel with N repeated samples of the strongest participant "
+                            "(Self-MoA). Cheaper than heterogeneous panels and often better when "
+                            "one model is clearly strongest (SOTA: arXiv:2502.00674). Default: false."
+                        ),
+                    },
+                    "self_moa_n": {
+                        "type": "integer",
+                        "description": "Number of Self-MoA copies (default: number of participants).",
+                    },
                 },
                 "required": ["prompt"],
             },
@@ -1786,6 +1836,28 @@ async def call_tool(name: str, arguments: dict):
             _judge_norm = _normalize_participant_shorthands([_fuse_judge_raw])
             _fuse_judge = _judge_norm[0] if _judge_norm else {"name": "Synthesizer", "backend": "claude"}
             _fuse_room_id = f"fusion-{uuid.uuid4().hex[:8]}"
+
+            # ceiling: static allowlist; upgrade: pull from a scored registry
+            _STRONG_PROPOSERS = {"opus", "gpt", "sonnet", "gemini", "o3", "o4", "llama"}
+
+            if arguments.get("self_moa") and _fuse_norm:
+                _base = next(
+                    (p for p in _fuse_norm if any(s in p.get("model", "").lower() for s in _STRONG_PROPOSERS)),
+                    _fuse_norm[0],
+                )
+                _n = int(arguments.get("self_moa_n") or len(_fuse_norm))
+                _fuse_norm = [
+                    {**_base, "name": f"{_base['name']}#{i + 1}"} for i in range(max(1, _n))
+                ]
+
+            if arguments.get("min_quality") and _fuse_norm:
+                _weak = [p["name"] for p in _fuse_norm
+                         if not any(s in p.get("model", "").lower() for s in _STRONG_PROPOSERS)]
+                if _weak:
+                    _fuse_preamble_parts.insert(0,
+                        f"[MODERATOR] Weak proposers detected: {', '.join(_weak)}. "
+                        "Consider self_moa=true or substituting stronger models."
+                    )
             # Build preamble from files/dirs + explicit preamble text
             _SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv",
                           "dist", "build", "target", ".tox", ".mypy_cache", ".ruff_cache"}
@@ -1842,9 +1914,16 @@ async def call_tool(name: str, arguments: dict):
             _fuse_preamble = "\n\n".join(_fuse_preamble_parts)
             await rooms.create(room_id=_fuse_room_id, topic=_fuse_topic, participants=_fuse_norm,
                                participant_tools=["all"], preamble=_fuse_preamble)
-            await rooms.run_rounds(room_id=_fuse_room_id, rounds=_fuse_rounds, sparse_topology=True)
+            await rooms.run_rounds(
+                room_id=_fuse_room_id, rounds=_fuse_rounds, sparse_topology=True,
+                adaptive_stop=bool(arguments.get("adaptive_stop")),
+                adaptive_threshold=float(arguments.get("adaptive_threshold", 0.85)),
+                adaptive_k=int(arguments.get("adaptive_k", 2)),
+            )
             result = await rooms.synthesize(
-                room_id=_fuse_room_id, synthesizer=_fuse_judge, adversarial=_fuse_adversarial
+                room_id=_fuse_room_id, synthesizer=_fuse_judge, adversarial=_fuse_adversarial,
+                minority_filter=bool(arguments.get("minority_filter")),
+                cross_attend=bool(arguments.get("cross_attend")),
             )
             _threading.Thread(target=distill_event, args=("room_synth", result, {}), daemon=True).start()
             result = f"[fusion:{_fuse_room_id}]\n{result}"
