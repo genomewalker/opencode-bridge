@@ -2765,7 +2765,14 @@ class RoomManager:
             the synthesizer is the only node that sees the full transcript.
         stop_early: after each round, check if disagreement has resolved (no challenge language
             + citations present). If so, stop before exhausting all rounds.
+        adaptive_stop and stop_early are mutually exclusive — pass only one.
         """
+        if adaptive_stop and stop_early:
+            raise ValueError(
+                "adaptive_stop and stop_early are mutually exclusive: "
+                "adaptive_stop requires a streak of k converged rounds (dual-track), "
+                "stop_early halts on the first converged round. Pass only one."
+            )
         if room_id not in self.rooms:
             self._try_load_room(room_id)
         if room_id not in self.rooms:

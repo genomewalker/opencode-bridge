@@ -195,6 +195,15 @@ class TestDualTrackStop:
                     "ts": _ts(), "turn_key": f"r{round_num}:{participant['name']}"}
         return _r
 
+    def test_adaptive_stop_and_stop_early_together_raise(self):
+        room = DiscussionRoom(id="conflict-test", topic="t",
+                              participants=[{"name": "A", "backend": "claude"}])
+        self.rm.rooms[room.id] = room
+        import pytest as _pytest
+        with _pytest.raises(ValueError, match="mutually exclusive"):
+            asyncio.run(self.rm.run_rounds(room.id, rounds=2,
+                                           adaptive_stop=True, stop_early=True))
+
     def test_scorer_error_logs_err_and_does_not_advance_streak(self):
         """score=None (scorer crash) → MODERATOR logs ERR, streak stays 0."""
         room = DiscussionRoom(id="err-test", topic="t",
