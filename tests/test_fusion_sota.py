@@ -219,7 +219,7 @@ class TestAdaptiveStop:
         self.rm = _make_room_manager(self.tmp)
 
     def _fake_respond(self, content: str):
-        async def _respond(room, participant, round_num, blind=False):
+        async def _respond(room, participant, round_num, blind=False, visible_names=None):
             return {
                 "name": participant["name"],
                 "content": content,

@@ -71,6 +71,8 @@ class DiscussionRoom:
     max_total_rounds: int = 6    # hard cap — run_rounds refuses past this; call room_fork to continue
     forked_from: str = ""        # parent room_id if this room was forked
     preamble: str = ""           # opt-in framing prepended to every participant's system prompt
+    preambles: dict = field(default_factory=dict)  # {participant_name: str} — per-participant preamble override
+    visibility: dict = field(default_factory=dict)  # {round: {name: "all"|"none"|[names]}} — Conductor-style per-step access matrix
     participant_tools: list = field(default_factory=list)  # tools each participant may call; ["all"] = skip-permissions
     schema_version: int = PERSISTED_SCHEMA_VERSION
 
@@ -140,6 +142,36 @@ ROLE_PROMPTS: dict[str, str] = {
     ),
 }
 
+
+ROLE_PRESETS: dict[str, dict] = {
+    "thinker": {
+        "prompt": (
+            "Your epistemic role is **Thinker** (TRINITY framework). "
+            "Propose the problem structure, hypotheses, and solution approaches. "
+            "You have full context visibility. Your output becomes the substrate Workers act on. "
+            "Be generative, not evaluative."
+        ),
+        "visibility_scope": "all",
+    },
+    "worker": {
+        "prompt": (
+            "Your epistemic role is **Worker** (TRINITY framework). "
+            "Execute on the Thinker's proposals. Implement, compute, or draft concretely. "
+            "You see only Thinker outputs and system context — not other Workers — to prevent anchoring. "
+            "Cite sources and file:line for every factual claim."
+        ),
+        "visibility_scope": ["role:thinker"],
+    },
+    "verifier": {
+        "prompt": (
+            "Your epistemic role is **Verifier** (TRINITY framework). "
+            "Independently verify Worker outputs. Check citations, test claims, identify gaps. "
+            "You see all participants except other Verifiers (to prevent cascade agreement). "
+            "REQUIRED: Include ≥2 citations (URL, DOI, or file:line) or your response is flagged unverified."
+        ),
+        "visibility_scope": "all_except_role:verifier",
+    },
+}
 
 # Quarantine tool partitions — readers may not act; actors may not browse untrusted content
 _READER_TOOLS = frozenset({
@@ -313,6 +345,7 @@ class RoomManager:
         )
         fork_files = list(old_room.files) if old_room else []
         fork_roles = dict(old_room.roles) if old_room else {}
+        fork_preambles = dict(old_room.preambles) if (old_room and getattr(old_room, "preambles", None)) else {}
         # Validate participant shape before creating anything — failing later
         # (e.g. on a string participant) would orphan a half-saved room.
         bad = [p for p in fork_participants if not (isinstance(p, dict) and p.get("name"))]
@@ -323,6 +356,7 @@ class RoomManager:
         new_room = DiscussionRoom(
             id=new_room_id, topic=fork_topic, participants=fork_participants,
             files=fork_files, roles=fork_roles, clean=clean, verbatim_rounds=verbatim_rounds,
+            preambles=fork_preambles,
             forked_from=old_room_id,
         )
         new_room.messages.append({"name": "TOPIC", "content": fork_topic, "ts": datetime.now().isoformat()})
@@ -341,6 +375,8 @@ class RoomManager:
                      clean: bool = False,
                      verbatim_rounds: int = 2,
                      preamble: str = "",
+                     preambles: Optional[dict] = None,
+                     visibility: Optional[dict] = None,
                      participant_tools: Optional[list] = None) -> str:
         _sanitize_session_id(room_id)
         if room_id in self.rooms:
@@ -352,7 +388,7 @@ class RoomManager:
             )
             return f"[room_id: {new_id}]\n⚠ Room '{room_id}' exists — auto-forked to '{new_id}'.\n{fork_result}"
         if roles:
-            valid = set(ROLE_PROMPTS)
+            valid = set(ROLE_PROMPTS) | set(ROLE_PRESETS)
             for pname, role in roles.items():
                 if role not in valid:
                     return f"Invalid role '{role}' for '{pname}'. Valid: {sorted(valid)}"
@@ -360,6 +396,8 @@ class RoomManager:
         room = DiscussionRoom(id=room_id, topic=topic, participants=participants, files=expanded,
                               roles=roles or {}, clean=clean, verbatim_rounds=verbatim_rounds,
                               preamble=preamble or "",
+                              preambles=preambles or {},
+                              visibility=visibility or {},
                               participant_tools=participant_tools or [])
         room.messages.append({"name": "TOPIC", "content": topic, "ts": datetime.now().isoformat()})
         # Inject soul context if chittad is running (filter code symbols)
@@ -700,7 +738,7 @@ class RoomManager:
             challenge_bias=raw.get("challenge_bias", 0.5),
         )
 
-    def _build_thread_context(self, room: DiscussionRoom, participant: dict, blind: bool = False) -> tuple[str, str]:
+    def _build_thread_context(self, room: DiscussionRoom, participant: dict, blind: bool = False, visible_names=None) -> tuple[str, str]:
         """Build (system_prompt, user_message) for a participant.
 
         If the participant has a soul, the system prompt contains their identity,
@@ -726,8 +764,9 @@ class RoomManager:
         for msg in visible_msgs:
             if msg["name"] == "TOPIC":
                 continue
-            if blind and msg["name"] not in _system_names:
-                continue
+            if msg["name"] not in _system_names:
+                if blind or (visible_names is not None and msg["name"] not in visible_names):
+                    continue
             transcript_parts.append(f"**{msg['name']}:** {msg['content']}")
             transcript_parts.append("")
         transcript = "\n".join(transcript_parts)
@@ -864,12 +903,17 @@ class RoomManager:
 
         # Inject epistemic role text (re-prepended every turn so it doesn't decay)
         role_key = room.roles.get(name)
-        if role_key and role_key in ROLE_PROMPTS:
-            system_prompt = system_prompt + f"\n\n## Your Epistemic Role\n{ROLE_PROMPTS[role_key]}"
+        if role_key:
+            _role_prompt = ROLE_PROMPTS.get(role_key) or (ROLE_PRESETS.get(role_key) or {}).get("prompt")
+            if _role_prompt:
+                system_prompt = system_prompt + f"\n\n## Your Epistemic Role\n{_role_prompt}"
 
         # Opt-in framing preamble — leads the whole payload (system prompt is sent
         # first) so a benign-but-sensitive domain is legible before the task.
-        _pre = _resolve_preamble(getattr(room, "preamble", ""))
+        # Per-participant preamble overrides the room-level preamble.
+        _preambles = getattr(room, "preambles", {})
+        _pre_text = _preambles.get(name) if name in _preambles else getattr(room, "preamble", "")
+        _pre = _resolve_preamble(_pre_text)
         if _pre:
             system_prompt = f"## Research context\n{_pre}\n\n{system_prompt}"
 
@@ -2227,8 +2271,55 @@ class RoomManager:
                     await asyncio.wait_for(proc.wait(), timeout=2)
                 except Exception:
                     pass
+    def _resolve_vis(self, room, name, round_num, sparse_topology, blind_first_round, loop_idx):
+        """Return None=see-all, frozenset()=blind, frozenset({names})=partial visibility.
+
+        Priority: (1) explicit per-round visibility matrix, (2) role preset visibility_scope,
+        (3) sparse_topology / blind_first_round flags (backward compat).
+        """
+        # 1. Explicit per-round matrix (highest priority)
+        vis_matrix = getattr(room, "visibility", {})
+        if vis_matrix:
+            round_vis = vis_matrix.get(round_num) or vis_matrix.get(str(round_num), {})
+            if round_vis and name in round_vis:
+                v = round_vis[name]
+                if v == "all":
+                    return None
+                if v == "none":
+                    return frozenset()
+                if isinstance(v, list):
+                    return frozenset(v)
+        # 2. Role preset visibility_scope (TRINITY Thinker/Worker/Verifier)
+        role_key = room.roles.get(name)
+        if role_key and role_key in ROLE_PRESETS:
+            scope = ROLE_PRESETS[role_key].get("visibility_scope")
+            if scope == "none":
+                return frozenset()
+            elif isinstance(scope, list):
+                resolved: set[str] = set()
+                for s in scope:
+                    if s.startswith("role:"):
+                        match_role = s[5:]
+                        resolved |= {p["name"] for p in room.participants
+                                     if room.roles.get(p["name"]) == match_role}
+                    else:
+                        resolved.add(s)
+                return frozenset(resolved) if resolved else None
+            elif isinstance(scope, str) and scope.startswith("all_except_role:"):
+                exclude_role = scope[len("all_except_role:"):]
+                excluded = {p["name"] for p in room.participants
+                            if room.roles.get(p["name"]) == exclude_role and p["name"] != name}
+                if excluded:
+                    all_names = frozenset(p["name"] for p in room.participants)
+                    return all_names - excluded
+        # 3. Flags (backward compat)
+        if sparse_topology or (blind_first_round and loop_idx == 0):
+            return frozenset()
+        return None
+
     async def _participant_respond(self, room: DiscussionRoom, participant: dict,
-                                    round_num: int = 1, blind: bool = False) -> dict:
+                                    round_num: int = 1, blind: bool = False,
+                                    visible_names=None) -> dict:
         """Get one participant's response with optional tool-use loop."""
         name = participant["name"]
         soul = self._parse_soul(participant)
@@ -2274,7 +2365,7 @@ class RoomManager:
                         "ts": datetime.now().isoformat(), "dispatch_id": str(uuid.uuid4()),
                         "turn_key": turn_key}
 
-        system_prompt, user_msg = self._build_thread_context(room, participant, blind=blind)
+        system_prompt, user_msg = self._build_thread_context(room, participant, blind=blind, visible_names=visible_names)
         max_tool_turns = soul.max_tool_turns if soul and soul.tools else 0
         realm = soul.realm if soul else None
         allowed_tools = set(soul.tools) if soul else set()
@@ -2317,6 +2408,30 @@ class RoomManager:
         final = self._extract_final_response(reply) or reply
         if not final.strip():
             final = "[error: empty response from backend]"
+
+        # Verifier citation enforcement (TRINITY-style: ≥2 citations required per turn)
+        _CIT_RETRY_KEY = f"{name}_cit"
+        if room.roles.get(name) == "verifier" and not final.startswith("[error:"):
+            if self._score_citations(final) < 2:
+                _cit_retries = room.retry_counts.get(_CIT_RETRY_KEY, 0)
+                if _cit_retries < 2:
+                    room.retry_counts[_CIT_RETRY_KEY] = _cit_retries + 1
+                    _retry_prompt = (
+                        f"{user_msg}\n\n"
+                        f"[MODERATOR → {name}] Your Verifier response has insufficient citations "
+                        f"({self._score_citations(final)} found, ≥2 required). "
+                        f"Revise with at least 2 cited sources (URL, DOI, or file:line). "
+                        f"This is retry {_cit_retries + 1}/2."
+                    )
+                    try:
+                        _retry_reply = await self._send_to_backend(participant, _retry_prompt, system_prompt)
+                        _retry_final = self._extract_final_response(_retry_reply) or _retry_reply
+                        if _retry_final.strip() and not _retry_final.startswith("[error:"):
+                            final = _retry_final
+                    except Exception:
+                        pass
+                else:
+                    room.claim_ledger.append(f"[UNVERIFIED:{name}:r{round_num}] {final[:120]}")
 
         # Three-state turn model:
         #   success       → committed with turn_key (normal path below)
@@ -2751,9 +2866,13 @@ class RoomManager:
                         self._save_room(room_id)
                         break
 
-                is_blind = sparse_topology or (blind_first_round and loop_idx == 0)
-                coros = [self._participant_respond(room, p, round_num=round_num, blind=is_blind)
-                         for p in active]
+                coros = []
+                for p in active:
+                    _vis = self._resolve_vis(room, p["name"], round_num, sparse_topology, blind_first_round, loop_idx)
+                    _blind = _vis is not None and len(_vis) == 0
+                    _vnames = _vis if (_vis is not None and len(_vis) > 0) else None
+                    coros.append(self._participant_respond(room, p, round_num=round_num,
+                                                           blind=_blind, visible_names=_vnames))
                 responses = await asyncio.gather(*coros)
 
                 # Idempotent append: skip any turn already committed (retry-safe)
@@ -2798,6 +2917,30 @@ class RoomManager:
                             ),
                             "ts": datetime.now().isoformat(),
                         })
+
+                # Adaptive role reassignment: if N_eff drops below 1.5 after round 1,
+                # reassign the lowest-citation non-verifier to verifier role to force
+                # structural adversarial pressure (emergent specialization detection).
+                if loop_idx > 0 and good_responses:
+                    _div = self._compute_diversity(room)
+                    if _div["N_eff"] is not None and _div["N_eff"] < 1.5:
+                        _non_verifiers = [
+                            r for r in good_responses
+                            if room.roles.get(r["name"]) != "verifier"
+                        ]
+                        if _non_verifiers:
+                            _weakest = min(_non_verifiers, key=lambda r: r.get("citation_score", 0))
+                            _wname = _weakest["name"]
+                            room.roles[_wname] = "verifier"
+                            room.messages.append({
+                                "name": "MODERATOR",
+                                "content": (
+                                    f"[Adaptive Role] N_eff={_div['N_eff']:.1f} — "
+                                    f"{_wname} reassigned to **verifier** role to restore "
+                                    f"adversarial pressure. Future turns will enforce citation threshold."
+                                ),
+                                "ts": datetime.now().isoformat(),
+                            })
 
                 self._save_room(room_id)
 

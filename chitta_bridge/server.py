@@ -953,6 +953,14 @@ async def list_tools():
                         "type": "string",
                         "description": "Opt-in framing prepended to every participant's system prompt — front-loads honest research context so a benign-but-sensitive domain is legible before the task, lowering false-positive safety flags. Pass a named preset (e.g. 'ancient-dna') or literal text. Lowers a base rate; does not guarantee a prompt clears. Not auto-applied by keyword."
                     },
+                    "preambles": {
+                        "type": "string",
+                        "description": "JSON object: {participant_name: preamble_text}. Per-participant preamble overrides the shared preamble for that agent — enables Conductor-style per-agent framing, subtask context injection, or role-specific research context."
+                    },
+                    "visibility": {
+                        "type": "string",
+                        "description": "JSON object: {round_num: {participant_name: 'all'|'none'|[names]}}. Per-round per-participant access matrix (Conductor arXiv:2512.04388 access_list). 'all'=see everyone, 'none'=blind, [names]=see only listed participants. Round keys are integers. Falls back to sparse_topology/blind_first_round when absent."
+                    },
                     "participant_tools": {
                         "type": "array",
                         "items": {"type": "string"},
@@ -2283,6 +2291,8 @@ async def call_tool(name: str, arguments: dict):
                     clean=bool(arguments.get("clean", False)),
                     verbatim_rounds=int(arguments.get("verbatim_rounds", 2)),
                     preamble=arguments.get("preamble", ""),
+                    preambles=(json.loads(arguments["preambles"]) if isinstance(arguments.get("preambles"), str) else arguments.get("preambles") or {}),
+                    visibility=(json.loads(arguments["visibility"]) if isinstance(arguments.get("visibility"), str) else arguments.get("visibility") or {}),
                     participant_tools=arguments.get("participant_tools") or [],
                 )
         elif name == "room_set_preamble":
