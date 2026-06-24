@@ -2396,6 +2396,9 @@ class RoomManager:
                 tool_req["tool"], tool_req["args"], realm=realm,
                 participant_name=name,
             )
+            if not hasattr(room, "_last_tool_calls"):
+                room._last_tool_calls = {}
+            room._last_tool_calls.setdefault(name, []).append(tool_req["tool"])
 
             # Inject result and re-prompt
             user_msg = (
@@ -2488,11 +2491,12 @@ class RoomManager:
         _audit_id = uuid.uuid4().hex
         _sys_sha = hashlib.sha256((system_prompt or "").encode()).hexdigest()
         _usr_sha = hashlib.sha256((user_msg or "").encode()).hexdigest()
-        _tool_calls: list = []
-        # Unsourced flagging: factual markers present but no tool calls made.
-        _unsourced = False
-        if not _tool_calls and re.search(r'[/\\][a-zA-Z]|:\d{3,}|server\.py|\bline\s+\d+', final):
-            _unsourced = True
+        _tool_calls: list = getattr(room, "_last_tool_calls", {}).get(name, [])
+        # Unsourced: response contains file/line markers but no tool calls were made this turn.
+        _unsourced = bool(
+            not _tool_calls
+            and re.search(r'[/\\][a-zA-Z]|:\d{3,}|server\.py|\bline\s+\d+', final)
+        )
         _append_room_audit(
             rooms_dir=self.rooms_dir,
             room_id=room.id,
@@ -2558,8 +2562,8 @@ class RoomManager:
         )
         return majority_msgs, minority_msgs, majority_summary
 
-    async def _score_convergence(self, round_contents: list[str]) -> float:
-        """Ask haiku to score response convergence on [0,1]. Fail-open (returns 0.0) on error.
+    async def _score_convergence(self, round_contents: list[str]) -> "float | None":
+        """Ask haiku to score response convergence on [0,1]. Returns None on error (no streak advance).
         # ceiling: claude-only; upgrade: route through active backend
         """
         formatted = "\n\n".join(f"[{i + 1}] {c[:500]}" for i, c in enumerate(round_contents))
@@ -2570,8 +2574,10 @@ class RoomManager:
         )
         try:
             reply = await self._run_claude_p(prompt, model="claude-haiku-4-5-20251001", timeout=60)
-            m = re.search(r"\b([01](?:\.\d+)?)\b", reply)
-            return float(m.group(1)) if m else 0.0
+            m = re.search(r"(\d+(?:\.\d+)?)", reply)
+            if not m:
+                return None
+            return min(1.0, max(0.0, float(m.group(1))))
         except Exception:
             return None
 
@@ -2605,7 +2611,14 @@ class RoomManager:
         return claims[:5]
 
     _CITATION_RE = re.compile(
-        r'https?://\S+|arxiv\.org/\S+|doi\.org/\S+|\[\d+\]|\([\w\s]+et al\.?,?\s*\d{4}\)',
+        r'https?://\S+'                            # full URL
+        r'|10\.\d{4,}/\S+'                        # bare DOI (10.xxxx/...)
+        r'|\barxiv:\d{4}\.\d{4,}\b'               # arxiv:2303.17651
+        r'|\[\d+\](?!\s*\w)'                      # [1] only when not followed by text (not list items)
+        r'|\([\w\s]+et al\.?,?\s*\d{4}\)'         # (Author et al., 2024)
+        r'|(?<!\w)[\w./][\w./\-]*\.(?:py|rs|cpp|ts|js|go|rb|sh):\d+'  # file:line (server.py:42)
+        r'|#\d{7,}'                                # soul memory IDs (#5539996225400471579)
+        r'|\bmem:\w{6,}\b',                        # mem:abc123 shorthand
         re.IGNORECASE,
     )
     _DISAGREE_RE = re.compile(
@@ -2756,8 +2769,12 @@ class RoomManager:
                           challenge: bool = False, blind_first_round: bool = False,
                           sparse_topology: bool = False, stop_early: bool = False,
                           adaptive_stop: bool = False, adaptive_threshold: float = 0.85,
-                          adaptive_k: int = 2) -> str:
-        """Run N rounds of async discussion — all participants respond in parallel each round.
+                          adaptive_k: int = 2, sequential: bool = False) -> str:
+        """Run N rounds of async discussion.
+
+        sequential=True: dispatch participants one at a time in active-list order, committing
+            each response before the next agent runs. Required for conductor-style workflows
+            where later agents must read earlier agents' current-round output.
 
         blind_first_round: round 1 is blind (participants don't see each other's prior outputs).
         sparse_topology: ALL rounds are blind — participants never see each other, only the
@@ -2873,23 +2890,36 @@ class RoomManager:
                         self._save_room(room_id)
                         break
 
-                coros = []
-                for p in active:
-                    _vis = self._resolve_vis(room, p["name"], round_num, sparse_topology, blind_first_round, loop_idx)
-                    _blind = _vis is not None and len(_vis) == 0
-                    _vnames = _vis if (_vis is not None and len(_vis) > 0) else None
-                    coros.append(self._participant_respond(room, p, round_num=round_num,
-                                                           blind=_blind, visible_names=_vnames))
-                responses = await asyncio.gather(*coros)
-
-                # Idempotent append: skip any turn already committed (retry-safe)
                 existing_turn_keys = {m.get("turn_key") for m in room.messages}
                 new_responses = []
-                for resp in responses:
-                    if resp.get("turn_key") not in existing_turn_keys:
-                        resp["citation_score"] = self._score_citations(resp.get("content", ""))
-                        room.messages.append(resp)
-                        new_responses.append(resp)
+
+                if sequential:
+                    # Commit each response before the next agent runs so later agents
+                    # read current-round peers rather than prior-round messages.
+                    for p in active:
+                        _vis = self._resolve_vis(room, p["name"], round_num, sparse_topology, blind_first_round, loop_idx)
+                        _blind = _vis is not None and len(_vis) == 0
+                        _vnames = _vis if (_vis is not None and len(_vis) > 0) else None
+                        resp = await self._participant_respond(room, p, round_num=round_num,
+                                                               blind=_blind, visible_names=_vnames)
+                        if resp.get("turn_key") not in existing_turn_keys:
+                            resp["citation_score"] = self._score_citations(resp.get("content", ""))
+                            room.messages.append(resp)
+                            existing_turn_keys.add(resp["turn_key"])
+                            new_responses.append(resp)
+                else:
+                    coros = []
+                    for p in active:
+                        _vis = self._resolve_vis(room, p["name"], round_num, sparse_topology, blind_first_round, loop_idx)
+                        _blind = _vis is not None and len(_vis) == 0
+                        _vnames = _vis if (_vis is not None and len(_vis) > 0) else None
+                        coros.append(self._participant_respond(room, p, round_num=round_num,
+                                                               blind=_blind, visible_names=_vnames))
+                    for resp in await asyncio.gather(*coros):
+                        if resp.get("turn_key") not in existing_turn_keys:
+                            resp["citation_score"] = self._score_citations(resp.get("content", ""))
+                            room.messages.append(resp)
+                            new_responses.append(resp)
 
                 # Reconcile turn_counts from committed messages (single source of truth)
                 room.turn_counts = {}
@@ -2966,7 +2996,7 @@ class RoomManager:
                     prior_keys = {c[:50].lower() for c in room.claim_ledger}
                     converged, new_claims = self._round_converged(round_contents, prior_keys)
                     room.claim_ledger.extend(new_claims)
-                    if loop_idx < rounds - 1:
+                    if adaptive_stop or stop_early:
                         if adaptive_stop:
                             score = await self._score_convergence(round_contents)
                             # Dual-track: streak only advances when ledger-delta also agrees.
