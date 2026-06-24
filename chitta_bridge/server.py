@@ -25,6 +25,7 @@ import signal as _signal
 import asyncio
 import socket
 import uuid
+import copy as _copy
 import threading as _threading
 from datetime import datetime
 from pathlib import Path
@@ -2168,11 +2169,13 @@ async def call_tool(name: str, arguments: dict):
                 _df_preamble_parts.append(arguments["preamble"])
             _df_preamble = "\n\n".join(_df_preamble_parts)
 
-            # Create both rooms, run in parallel
+            # Deep-copy per room — _participant_respond mutates dicts in-place
+            # (session_id, _room_id, _allowed_tools) and the same list must not bleed
+            # between the sparse and dense runs.
             await rooms.create(room_id=_df_sparse_id, topic=_df_topic,
-                               participants=_df_norm, participant_tools=["all"], preamble=_df_preamble)
+                               participants=_copy.deepcopy(_df_norm), participant_tools=["all"], preamble=_df_preamble)
             await rooms.create(room_id=_df_dense_id,  topic=_df_topic,
-                               participants=_df_norm, participant_tools=["all"], preamble=_df_preamble)
+                               participants=_copy.deepcopy(_df_norm), participant_tools=["all"], preamble=_df_preamble)
             await asyncio.gather(
                 rooms.run_rounds(_df_sparse_id, rounds=1, sparse_topology=True),
                 rooms.run_rounds(_df_dense_id,  rounds=_df_dense_rounds, challenge=_df_challenge),
@@ -2219,9 +2222,21 @@ async def call_tool(name: str, arguments: dict):
             _df_backend = _df_judge.get("backend", "claude")
             try:
                 if _df_backend == "claude":
-                    _df_reply = await rooms._run_claude_p(_df_synth_prompt, model=_df_judge.get("model"))
+                    _df_reply = await rooms._run_claude_p(
+                        _df_synth_prompt,
+                        model=_df_judge.get("model"),
+                        effort=_df_judge.get("effort"),
+                    )
                 elif _df_backend == "codex":
-                    _df_reply = await codex_bridge.run_task(_df_synth_prompt)
+                    _df_reply = await codex_bridge.run_task(
+                        _df_synth_prompt,
+                        model=_df_judge.get("model"),
+                        effort=_df_judge.get("effort"),
+                    )
+                elif _df_backend == "local":
+                    _df_reply = await rooms.synthesize(
+                        _df_sparse_id, synthesizer=_df_judge,
+                    )
                 else:
                     _df_reply = f"[error: unknown judge backend {_df_backend!r}]"
             except Exception as _dfe:
@@ -2599,8 +2614,19 @@ async def call_tool(name: str, arguments: dict):
             else:
                 if isinstance(p, str):
                     p = json.loads(p)
+                # Normalize shorthand strings; validate/inject backend for dicts
+                if isinstance(p, str):
+                    _p_norm = _normalize_participant_shorthands([p])
+                    p = _p_norm[0] if _p_norm else p
+                elif isinstance(p, dict) and not p.get("backend"):
+                    try:
+                        p["backend"] = _infer_backend(p.get("name", ""), p.get("model"))
+                    except ValueError as _be:
+                        result = f"Error resolving backend for '{p.get('name','?')}': {_be}"
+                        p = None
                 rid = arguments.get("room_id")
-                result = await rooms.add_participant(room_id=rid, participant=p) if rid else "Error: 'room_id' is required"
+                if p is not None:
+                    result = await rooms.add_participant(room_id=rid, participant=p) if rid else "Error: 'room_id' is required"
         elif name == "room_run":
             rid = arguments.get("room_id", "")
             # Ensure room is loaded from disk (survives process restart)

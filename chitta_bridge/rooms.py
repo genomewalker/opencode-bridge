@@ -2099,7 +2099,10 @@ class RoomManager:
         name = participant["name"]
         backend = participant.get("backend") or participant.get("type")
         if not backend:
-            backend = _infer_backend(name, participant.get("model"))
+            try:
+                backend = _infer_backend(name, participant.get("model"))
+            except ValueError as _e:
+                return f"[error: cannot infer backend for '{name}': {_e}]"
         sid = participant.get("session_id")
 
         if backend == "claude":

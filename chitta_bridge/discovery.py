@@ -165,6 +165,13 @@ def _normalize_participant_shorthands(plist: list) -> list:
     out = []
     for p in plist or []:
         if isinstance(p, dict):
+            if not p.get("backend"):
+                try:
+                    p = dict(p)  # don't mutate caller's dict
+                    p["backend"] = _infer_backend(p.get("name", ""), p.get("model"))
+                except ValueError:
+                    p = dict(p)
+                    p.setdefault("backend", "claude")
             out.append(p)
             continue
         s = str(p)
