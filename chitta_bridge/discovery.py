@@ -91,9 +91,11 @@ def _discover_claude_shorthands() -> "dict[str, str]":
 
 
 def _discover_codex_shorthands() -> "dict[str, str]":
-    """Read ~/.codex/config.toml and build GPT model shorthands.
+    """Build shorthand map from ~/.codex/models_cache.json + config.toml default.
 
-    Exposes 'gpt' → default model from config. Falls back to gpt-5.5.
+    Reads all available model slugs from codex's own cache (kept fresh by the CLI)
+    and generates alias keys so users can write e.g. 'codex:gpt5.4mini'.
+    Falls back to gpt-5.5 if the cache is absent.
     """
     global _CODEX_MODEL_CACHE
     if _CODEX_MODEL_CACHE is not None:
@@ -102,23 +104,38 @@ def _discover_codex_shorthands() -> "dict[str, str]":
         "gpt": "gpt-5.5", "gpt-5.5": "gpt-5.5", "gpt5.5": "gpt-5.5", "gpt5": "gpt-5.5",
     }
     try:
+        import json as _json
+        # Default from config.toml
+        default_model = "gpt-5.5"
         cfg_path = Path.home() / ".codex" / "config.toml"
-        if not cfg_path.exists():
-            _CODEX_MODEL_CACHE = _FALLBACK
-            return _CODEX_MODEL_CACHE
-        try:
-            import tomllib as _toml
-        except ImportError:
-            import tomli as _toml  # type: ignore
-        with open(cfg_path, "rb") as fh:
-            cfg = _toml.load(fh)
-        default_model = cfg.get("model", "gpt-5.5")
-        out: "dict[str, str]" = {"gpt": default_model, default_model: default_model}
-        # slug aliases: "gpt55" and "gpt5.5" → model
-        slug = default_model.replace("-", "").replace(".", "")
-        out[slug] = default_model
-        out[default_model.replace("-", "")] = default_model  # "gpt5.5"
-        _CODEX_MODEL_CACHE = out
+        if cfg_path.exists():
+            try:
+                import tomllib as _toml
+            except ImportError:
+                import tomli as _toml  # type: ignore
+            with open(cfg_path, "rb") as fh:
+                default_model = _toml.load(fh).get("model", "gpt-5.5")
+        out: "dict[str, str]" = {"gpt": default_model}
+        # Read all models from codex's own cache
+        cache_path = Path.home() / ".codex" / "models_cache.json"
+        if cache_path.exists():
+            models = _json.loads(cache_path.read_text()).get("models", [])
+            for m in models:
+                slug = m.get("slug", "")
+                if not slug or m.get("visibility") == "hidden":
+                    continue
+                out[slug] = slug  # exact key
+                out[slug.replace("-", "")] = slug      # "gpt54mini"
+                m2 = re.match(r"gpt-(.+)", slug)
+                if m2:
+                    out["gpt" + m2.group(1).replace("-", ".")] = slug  # "gpt5.4mini" → "gpt5.4.mini" — acceptable alias
+                    out["gpt" + m2.group(1).replace("-", "")] = slug   # "gpt54mini"
+        else:
+            # No cache — fall back to single alias set for default model
+            out[default_model] = default_model
+            out[default_model.replace("-", "").replace(".", "")] = default_model
+            out[default_model.replace("-", "")] = default_model
+        _CODEX_MODEL_CACHE = out if out else _FALLBACK
     except Exception:
         _CODEX_MODEL_CACHE = _FALLBACK
     return _CODEX_MODEL_CACHE

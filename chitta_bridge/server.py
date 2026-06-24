@@ -153,6 +153,43 @@ _NO_TRUNCATE = {"codex_history", "local_history", "pdf_read", "paper_fetch",
                 "lit_search_openalex", "reflib_export"}
 
 
+def _handle_list_models() -> list:
+    """Return a text listing of all Claude and Codex models with their shorthand aliases."""
+    from .discovery import _discover_claude_shorthands, _discover_codex_shorthands
+    lines: list[str] = ["## Available models\n"]
+
+    # Claude
+    claude_sh = _discover_claude_shorthands()
+    # invert: model_id → [aliases]
+    _inv: "dict[str, list[str]]" = {}
+    for alias, mid in claude_sh.items():
+        _inv.setdefault(mid, []).append(alias)
+    lines.append("### Claude  (backend: `claude`)")
+    for mid in sorted(set(claude_sh.values())):
+        aliases = sorted(_inv.get(mid, []))
+        lines.append(f"  {mid}")
+        lines.append(f"    aliases: {', '.join(aliases)}")
+        lines.append(f"    shorthand examples: claude:{aliases[0]}, claude:{aliases[0]}:high, claude:{aliases[0]}:xhigh")
+
+    lines.append("")
+
+    # Codex
+    codex_sh = _discover_codex_shorthands()
+    _inv2: "dict[str, list[str]]" = {}
+    for alias, mid in codex_sh.items():
+        _inv2.setdefault(mid, []).append(alias)
+    lines.append("### Codex  (backend: `codex`)")
+    for mid in sorted(set(codex_sh.values())):
+        aliases = sorted(_inv2.get(mid, []))
+        lines.append(f"  {mid}")
+        lines.append(f"    aliases: {', '.join(aliases)}")
+        lines.append(f"    shorthand examples: codex:{aliases[0]}, codex:{aliases[0]}:high")
+
+    lines.append("\n_Effort levels: low · medium · high · xhigh · max_")
+    lines.append("_Specify as `backend:alias:effort`, e.g. `claude:opus:xhigh` or `codex:gpt5.5:high`_")
+    return "\n".join(lines)
+
+
 def _finalize(name: str, result: str) -> list:
     _max_chars = 12_000
     if name not in _NO_TRUNCATE and isinstance(result, str) and len(result) > _max_chars:
@@ -1876,6 +1913,16 @@ async def list_tools():
         _tools = [t for t in _tools if not t.name.startswith("codex_")]
     _tools = [t for t in _tools if t.name not in HIDDEN_TOOLS]
     _tools.append(Tool(
+        name="list_models",
+        description=(
+            "List all available Claude and Codex models with their shorthand aliases. "
+            "Discovers Claude models dynamically from the Anthropic API and Codex models "
+            "from ~/.codex/models_cache.json. Use before conductor_fusion or fusion to see "
+            "which model shorthands are valid."
+        ),
+        inputSchema={"type": "object", "properties": {}, "required": []},
+    ))
+    _tools.append(Tool(
         name="advanced",
         description=(
             "Gateway to hidden chitta-bridge tools (session lifecycle, orchestration, rooms, local models). "
@@ -1912,7 +1959,9 @@ async def call_tool(name: str, arguments: dict):
         if name in REGISTRY:
             return await REGISTRY[name].handler(arguments)
         # existing if/elif chain continues below as fallback
-        if name == "advanced":
+        if name == "list_models":
+            result = _handle_list_models()
+        elif name == "advanced":
             # List mode
             if "tool" not in arguments:
                 result = handle_advanced(arguments)
