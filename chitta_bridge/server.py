@@ -2327,6 +2327,15 @@ async def call_tool(name: str, arguments: dict):
                     _cf_roles[_p["name"]] = _explicit_role
                 elif re.search(r'\bverif', _step.get("subtask", ""), re.IGNORECASE):
                     _cf_roles[_p["name"]] = "verifier"
+            # Build DAG: depends defaults to sees (same scheduling as visibility) unless step has explicit "depends"
+            _cf_dag: dict[str, list[str]] = {}
+            for _step, _p in zip(_cf_workflow, _cf_participants):
+                _dep_raw = _step.get("depends", _step.get("sees", []))
+                if isinstance(_dep_raw, str):
+                    _deps = [] if _dep_raw.lower() in ("none", "all", "") else [_dep_raw]
+                else:
+                    _deps = list(_dep_raw)
+                _cf_dag[_p["name"]] = [_cf_name_lookup.get(d.lower(), d) for d in _deps]
             await rooms.create(
                 room_id=_cf_room_id, topic=_cf_topic,
                 participants=_cf_participants,
@@ -2335,8 +2344,9 @@ async def call_tool(name: str, arguments: dict):
                 visibility=_cf_visibility,
                 roles=_cf_roles or None,
                 participant_tools=["all"],
+                dag=_cf_dag,
             )
-            await rooms.run_rounds(_cf_room_id, rounds=_cf_rounds, sequential=True)
+            await rooms.run_rounds(_cf_room_id, rounds=_cf_rounds)
             result = await rooms.synthesize(
                 _cf_room_id, synthesizer=_cf_judge, adversarial=_cf_adversarial,
             )

@@ -74,6 +74,7 @@ class DiscussionRoom:
     preambles: dict = field(default_factory=dict)  # {participant_name: str} — per-participant preamble override
     visibility: dict = field(default_factory=dict)  # {round: {name: "all"|"none"|[names]}} — Conductor-style per-step access matrix
     participant_tools: list = field(default_factory=list)  # tools each participant may call; ["all"] = skip-permissions
+    dag: dict = field(default_factory=dict)  # {node_name: [dep_names]} — DAG scheduling; empty = parallel gather
     schema_version: int = PERSISTED_SCHEMA_VERSION
 
     def save(self, path: Path):
@@ -377,7 +378,8 @@ class RoomManager:
                      preamble: str = "",
                      preambles: Optional[dict] = None,
                      visibility: Optional[dict] = None,
-                     participant_tools: Optional[list] = None) -> str:
+                     participant_tools: Optional[list] = None,
+                     dag: Optional[dict] = None) -> str:
         _sanitize_session_id(room_id)
         if room_id in self.rooms:
             # Auto-fork: summarize old room, create new room with UUID suffix
@@ -398,7 +400,8 @@ class RoomManager:
                               preamble=preamble or "",
                               preambles=preambles or {},
                               visibility=visibility or {},
-                              participant_tools=participant_tools or [])
+                              participant_tools=participant_tools or [],
+                              dag=dag or {})
         room.messages.append({"name": "TOPIC", "content": topic, "ts": datetime.now().isoformat()})
         # Inject soul context if chittad is running (filter code symbols)
         if SoulClient.is_available():
@@ -2317,6 +2320,47 @@ class RoomManager:
             return frozenset()
         return None
 
+    async def _dag_dispatch(self, room, active, round_num, sparse_topology, blind_first_round, loop_idx):
+        """Dispatch participants in DAG order: parallel within a dependency tier, serial commit."""
+        dag = room.dag
+        existing_turn_keys = {m.get("turn_key") for m in room.messages}
+        committed: set[str] = set()
+        new_responses: list[dict] = []
+        active_names = {p["name"] for p in active}
+        remaining = list(active)
+
+        while remaining:
+            ready = [
+                p for p in remaining
+                if all(d not in active_names or d in committed for d in dag.get(p["name"], []))
+            ]
+            if not ready:
+                # Cycle or bug — dispatch first remaining to avoid deadlock
+                ready = remaining[:1]
+
+            coros = []
+            for p in ready:
+                _vis = self._resolve_vis(room, p["name"], round_num, sparse_topology, blind_first_round, loop_idx)
+                _blind = _vis is not None and len(_vis) == 0
+                _vnames = _vis if (_vis is not None and len(_vis) > 0) else None
+                coros.append(self._participant_respond(room, p, round_num=round_num,
+                                                       blind=_blind, visible_names=_vnames))
+            results = await asyncio.gather(*coros, return_exceptions=True)
+
+            for p, resp in zip(ready, results):
+                if isinstance(resp, Exception):
+                    committed.add(p["name"])
+                    continue
+                if resp.get("turn_key") not in existing_turn_keys:
+                    resp["citation_score"] = self._score_citations(resp.get("content", ""))
+                    room.messages.append(resp)
+                    existing_turn_keys.add(resp["turn_key"])
+                    new_responses.append(resp)
+                committed.add(p["name"])
+            remaining = [p for p in remaining if p["name"] not in committed]
+
+        return new_responses
+
     async def _participant_respond(self, room: DiscussionRoom, participant: dict,
                                     round_num: int = 1, blind: bool = False,
                                     visible_names=None) -> dict:
@@ -2893,7 +2937,11 @@ class RoomManager:
                 existing_turn_keys = {m.get("turn_key") for m in room.messages}
                 new_responses = []
 
-                if sequential:
+                if room.dag:
+                    new_responses = await self._dag_dispatch(
+                        room, active, round_num, sparse_topology, blind_first_round, loop_idx
+                    )
+                elif sequential:
                     # Commit each response before the next agent runs so later agents
                     # read current-round peers rather than prior-round messages.
                     for p in active:
