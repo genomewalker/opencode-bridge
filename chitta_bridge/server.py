@@ -2317,20 +2317,34 @@ async def call_tool(name: str, arguments: dict):
             # Shared preamble: file manifest (agents read on demand) + explicit preamble text
             _cf_preamble_parts: list[str] = []
             _cf_file_paths = arguments.get("files") or []
-            if _cf_file_paths:
+            # Normalise: accept flat strings or {path, description} dicts
+            _cf_file_specs: list[dict] = []
+            for _fp in _cf_file_paths:
+                if isinstance(_fp, dict):
+                    _cf_file_specs.append(_fp)
+                else:
+                    _cf_file_specs.append({"path": str(_fp), "description": ""})
+            if _cf_file_specs:
                 _cf_manifest: list[str] = []
-                for _fp in _cf_file_paths:
-                    _afp = os.path.abspath(_fp)
+                for _spec in _cf_file_specs:
+                    _afp = os.path.abspath(_spec["path"])
+                    _desc = _spec.get("description", "")
+                    _desc_part = f" — {_desc}" if _desc else ""
                     if os.path.isdir(_afp):
-                        _cf_manifest.append(f"- {_afp}/")
+                        _cf_manifest.append(f"- `{_afp}/`{_desc_part}")
                     elif os.path.exists(_afp):
-                        _cf_manifest.append(f"- {_afp}")
+                        _size = os.path.getsize(_afp)
+                        _size_str = f"{_size // 1024 // 1024}MB" if _size > 1024*1024 else f"{_size // 1024}KB"
+                        _cf_manifest.append(f"- `{_afp}` ({_size_str}){_desc_part}")
                 if _cf_manifest:
                     _cf_preamble_parts.append(
                         "## Files available for reading\n"
-                        "Use read_file, sqz_read_file, find, or ls to read these paths on demand:\n\n"
+                        "Use bash/read_file to access these paths on disk. "
+                        "Binary/large files (.gz, .bam, etc.) must be read via bash — they are NOT embedded.\n\n"
                         + "\n".join(_cf_manifest)
                     )
+            # Pass normalised specs to room so _embed_files_in_prompt handles them correctly
+            _cf_room_files = [_s["path"] if not _s.get("description") else _s for _s in _cf_file_specs]
             if arguments.get("preamble"):
                 _cf_preamble_parts.append(arguments["preamble"])
             _cf_shared_preamble = "\n\n".join(_cf_preamble_parts)
@@ -2374,6 +2388,7 @@ async def call_tool(name: str, arguments: dict):
                 roles=_cf_roles or None,
                 participant_tools=["all"],
                 dag=_cf_dag,
+                files=_cf_room_files if _cf_room_files else None,
             )
             await rooms.run_rounds(_cf_room_id, rounds=_cf_rounds)
             result = await rooms.synthesize(

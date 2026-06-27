@@ -161,19 +161,45 @@ def _expand_paths(paths: list[str]) -> list[str]:
     return result
 
 
-def _embed_files_in_prompt(message: str, files: list[str]) -> str:
-    """Embed file content inline for backends that don't support --file args."""
+_BINARY_SUFFIXES = frozenset({
+    ".gz", ".bz2", ".zst", ".xz", ".bam", ".cram", ".bcf",
+    ".png", ".jpg", ".jpeg", ".gif", ".pdf", ".zip", ".tar",
+})
+_EMBED_SIZE_LIMIT = 100_000  # bytes — skip files larger than this
+
+
+def _embed_files_in_prompt(message: str, files: list) -> str:
+    """Embed small text file content inline; list path+description for large/binary files.
+
+    Accepts either flat strings or {path, description} dicts.
+    Binary files and files over 100KB are never embedded — only listed with their description.
+    """
     if not files:
         return message
-    parts = []
+    embedded, listed = [], []
     for f in files:
-        p = Path(f)
-        if p.is_file():
+        if isinstance(f, dict):
+            raw_path = f.get("path", "")
+            desc = f.get("description", "")
+        else:
+            raw_path, desc = str(f), ""
+        p = Path(raw_path)
+        if not p.is_file():
+            continue
+        label = f"{p.name}" + (f" — {desc}" if desc else "")
+        if p.suffix.lower() in _BINARY_SUFFIXES or p.stat().st_size > _EMBED_SIZE_LIMIT:
+            listed.append(f"- **{label}** (binary/large — read via bash/read_file, path: `{p}`)")
+        else:
             try:
                 content = p.read_text(errors="replace")
-                parts.append(f"### File: {p.name}\n```\n{content}\n```")
+                embedded.append(f"### File: {label}\n```\n{content}\n```")
             except OSError:
-                pass
+                listed.append(f"- **{label}** (unreadable, path: `{p}`)")
+    parts = []
+    if embedded:
+        parts.extend(embedded)
+    if listed:
+        parts.append("### Reference files (too large or binary — access via bash/read_file)\n" + "\n".join(listed))
     if not parts:
         return message
     return "\n\n".join(parts) + "\n\n" + message
