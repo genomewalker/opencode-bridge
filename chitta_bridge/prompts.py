@@ -149,15 +149,28 @@ def _human_size(size_bytes: int) -> str:
     return f"{size_bytes:.1f}TB"
 
 
-def _expand_paths(paths: list[str]) -> list[str]:
-    """Expand directories to contained files; keep plain file paths as-is."""
-    result: list[str] = []
+def _expand_paths(paths: list) -> list:
+    """Expand directories to contained files; keep plain file paths as-is.
+
+    Accepts both strings and {path, description} dicts — dicts are passed
+    through with their description preserved; only the path is expanded.
+    """
+    result: list = []
     for p in paths:
-        path = Path(p)
-        if path.is_dir():
-            result.extend(str(f) for f in sorted(path.rglob("*")) if f.is_file())
-        elif path.is_file():
-            result.append(str(path))
+        if isinstance(p, dict):
+            raw = p.get("path", "")
+            desc = p.get("description", "")
+            path = Path(raw)
+            if path.is_dir():
+                result.extend({"path": str(f), "description": desc} for f in sorted(path.rglob("*")) if f.is_file())
+            elif path.is_file():
+                result.append({"path": str(path), "description": desc})
+        else:
+            path = Path(p)
+            if path.is_dir():
+                result.extend(str(f) for f in sorted(path.rglob("*")) if f.is_file())
+            elif path.is_file():
+                result.append(str(path))
     return result
 
 
