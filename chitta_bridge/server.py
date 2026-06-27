@@ -2334,14 +2334,28 @@ async def call_tool(name: str, arguments: dict):
             if arguments.get("preamble"):
                 _cf_preamble_parts.append(arguments["preamble"])
             _cf_shared_preamble = "\n\n".join(_cf_preamble_parts)
-            # Derive roles: explicit "role" key in step, or infer "verifier" from subtask text.
+            # Derive roles: explicit "role" key in step, or infer from subtask keywords.
             _cf_roles: dict[str, str] = {}
             for _step, _p in zip(_cf_workflow, _cf_participants):
                 _explicit_role = _step.get("role", "").lower()
+                _subtask_text = _step.get("subtask", "")
                 if _explicit_role:
                     _cf_roles[_p["name"]] = _explicit_role
-                elif re.search(r'\bverif', _step.get("subtask", ""), re.IGNORECASE):
+                elif re.search(r'\bverif', _subtask_text, re.IGNORECASE):
                     _cf_roles[_p["name"]] = "verifier"
+                elif re.search(r'\bsynthes', _subtask_text, re.IGNORECASE):
+                    _cf_roles[_p["name"]] = "synthesizer"
+                elif re.search(r'\bthinker\b|\bfrom\s+first\s+principles\b|\bwithout.*data\b|\bblind\b', _subtask_text, re.IGNORECASE):
+                    _cf_roles[_p["name"]] = "thinker"
+                elif re.search(r'\bworker\b|\brun\s+it\b|\bexecut\b|\bimplement\b|\bwrite.*script\b|\bpython\b', _subtask_text, re.IGNORECASE):
+                    _cf_roles[_p["name"]] = "worker"
+            # Auto-quarantine: workers → actor (bash/write), thinkers → reader (no execution)
+            for _p in _cf_participants:
+                _role = _cf_roles.get(_p["name"], "")
+                if _role == "worker" and "quarantine" not in _p:
+                    _p["quarantine"] = "actor"
+                elif _role == "thinker" and "quarantine" not in _p:
+                    _p["quarantine"] = "reader"
             # Build DAG: depends defaults to sees (same scheduling as visibility) unless step has explicit "depends"
             _cf_dag: dict[str, list[str]] = {}
             for _step, _p in zip(_cf_workflow, _cf_participants):

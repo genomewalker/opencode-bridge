@@ -148,20 +148,38 @@ ROLE_PRESETS: dict[str, dict] = {
     "thinker": {
         "prompt": (
             "Your epistemic role is **Thinker** (TRINITY framework). "
-            "Propose the problem structure, hypotheses, and solution approaches. "
-            "You have full context visibility. Your output becomes the substrate Workers act on. "
-            "Be generative, not evaluative."
+            "Propose the problem structure, exact metric/formula, and solution approach. "
+            "Your output becomes the specification Workers implement — be precise, not vague. "
+            "Do NOT open data files; do NOT run code. Commit to pseudocode or math only."
         ),
         "visibility_scope": "all",
     },
     "worker": {
         "prompt": (
             "Your epistemic role is **Worker** (TRINITY framework). "
-            "Execute on the Thinker's proposals. Implement, compute, or draft concretely. "
-            "You see only Thinker outputs and system context — not other Workers — to prevent anchoring. "
-            "Cite sources and file:line for every factual claim."
+            "Implement the Thinker's exact specification on the ACTUAL data files listed in the preamble. "
+            "HARD RULES — violating any is a critical failure:\n"
+            "  1. NEVER generate synthetic, placeholder, or toy data. Read the real files only.\n"
+            "  2. Write your script to a temp file and RUN IT. Paste the COMPLETE stdout verbatim.\n"
+            "  3. Your response MUST include a ranked results table with actual numeric scores.\n"
+            "  4. If execution fails, show the error and fix it — do not substitute text reasoning.\n"
+            "Other Workers cannot see your output — implement independently."
         ),
         "visibility_scope": ["role:thinker"],
+        "no_word_limit": True,
+    },
+    "synthesizer": {
+        "prompt": (
+            "Your epistemic role is **Synthesizer** (TRINITY framework). "
+            "You see all participants. Your job is empirical reconciliation, not theoretical debate.\n"
+            "REQUIRED steps:\n"
+            "  1. Extract the top-ranked result BY NAME from each Worker's stdout table.\n"
+            "  2. If Workers agree: report the result and the score.\n"
+            "  3. If Workers disagree: identify the implementation difference, determine which is correct, run a tiebreaker if needed.\n"
+            "  4. Reproduce the structured answer block (EVAL_ANSWER or equivalent) verbatim — NEVER drop it.\n"
+            "Empirical Worker output takes priority over theoretical arguments from any participant."
+        ),
+        "visibility_scope": "all",
     },
     "verifier": {
         "prompt": (
@@ -637,6 +655,14 @@ class RoomManager:
                 f"{verify_block}"
             )
         else:
+            # Detect structured answer blocks in the transcript (EVAL_ANSWER, JSON answer, etc.)
+            _has_eval_block = "<EVAL_ANSWER>" in transcript or "EVAL_ANSWER" in transcript
+            _eval_enforcement = (
+                "\n\n**CRITICAL**: One or more participants produced a structured answer block "
+                "(EVAL_ANSWER or equivalent). You MUST reproduce the correct structured block "
+                "verbatim at the end of your synthesis — do NOT drop it or paraphrase it. "
+                "Empirical output from code-executing Workers takes priority over theoretical arguments."
+            ) if _has_eval_block else ""
             prompt = (
                 f"You are a neutral synthesizer reviewing a multi-agent discussion.\n"
                 f"Messages tagged [grounded:N citations] cite verifiable sources; "
@@ -650,6 +676,7 @@ class RoomManager:
                 f"3. **Best answer** — your integrated recommendation, drawing on the strongest points\n"
                 f"4. **Open questions** — what remains unresolved\n"
                 f"{verify_block}"
+                f"{_eval_enforcement}"
             )
 
         # Use synthesizer config or infer backend from room participants
@@ -860,13 +887,21 @@ class RoomManager:
 
             # Output discipline — applies to all room participants regardless of soul
             _m_disc = (participant.get("model") or "").lower()
+            _role_key = room.roles.get(name, "")
+            _is_worker = _role_key == "worker"
             _wlim = 300 if "haiku" in _m_disc else (700 if "opus" in _m_disc else 500)
-            sys_parts.append(
-                "\n## Output discipline\n"
-                "Be concise — output tokens are expensive and uncacheable at API rates. "
-                "Cite file:line instead of quoting code. One claim per sentence. "
-                f"No preamble, no recap of prior messages. Keep your response under {_wlim} words."
-            )
+            if _is_worker:
+                sys_parts.append(
+                    "\n## Output discipline\n"
+                    "No preamble. Show your script, then paste the complete stdout — do not truncate it."
+                )
+            else:
+                sys_parts.append(
+                    "\n## Output discipline\n"
+                    "Be concise — output tokens are expensive and uncacheable at API rates. "
+                    "Cite file:line instead of quoting code. One claim per sentence. "
+                    f"No preamble, no recap of prior messages. Keep your response under {_wlim} words."
+                )
 
             # Challenge bias instruction
             if soul.challenge_bias > 0.6:
@@ -893,16 +928,24 @@ class RoomManager:
                 f"No preamble, no recap of what others said. Keep your response under {_wlim2} words."
             )
 
-        # Tool-use hint — injected when participant has MCP tools available (e.g. fusion).
-        # Tells the model to actively search/fetch rather than reply from priors.
+        # Tool-use hint — split by role so workers get execution hint, others get search hint.
         if room.participant_tools:
-            system_prompt += (
-                "\n\n## Tools available — use them\n"
-                "You have access to web_search, web_fetch, paper_fetch, soul_recall, and other MCP tools. "
-                "Before answering, call web_search and/or paper_fetch to find primary sources. "
-                "Cite every factual claim with a URL, DOI, or arXiv ID you actually retrieved. "
-                "Responses without tool-backed citations will be marked [asserted] and down-weighted by the judge."
-            )
+            _hint_role = room.roles.get(name, "")
+            if _hint_role == "worker":
+                system_prompt += (
+                    "\n\n## Tools available — execution first\n"
+                    "You have bash, write_file, read_file, glob, and grep. "
+                    "Write your script to a temp path and run it with bash. "
+                    "Do NOT use web_search — your task is local computation on the provided data files."
+                )
+            else:
+                system_prompt += (
+                    "\n\n## Tools available — use them\n"
+                    "You have access to web_search, web_fetch, paper_fetch, soul_recall, and other MCP tools. "
+                    "Before answering, call web_search and/or paper_fetch to find primary sources. "
+                    "Cite every factual claim with a URL, DOI, or arXiv ID you actually retrieved. "
+                    "Responses without tool-backed citations will be marked [asserted] and down-weighted by the judge."
+                )
 
         # Inject epistemic role text (re-prepended every turn so it doesn't decay)
         role_key = room.roles.get(name)
