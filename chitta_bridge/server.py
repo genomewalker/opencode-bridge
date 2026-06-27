@@ -2382,13 +2382,8 @@ async def call_tool(name: str, arguments: dict):
                     _cf_roles[_p["name"]] = "thinker"
                 elif re.search(r'\bworker\b|\brun\s+it\b|\bexecut\b|\bimplement\b|\bwrite.*script\b|\bpython\b', _subtask_text, re.IGNORECASE):
                     _cf_roles[_p["name"]] = "worker"
-            # Auto-quarantine: workers+synthesizer → actor (bash/write), thinkers → reader (no execution)
-            for _p in _cf_participants:
-                _role = _cf_roles.get(_p["name"], "")
-                if _role in ("worker", "synthesizer") and "quarantine" not in _p:
-                    _p["quarantine"] = "actor"
-                elif _role == "thinker" and "quarantine" not in _p:
-                    _p["quarantine"] = "reader"
+            # All participants get full tool access by default.
+            # Explicit "quarantine" key in a workflow step still restricts if set.
             # Build DAG: depends defaults to sees (same scheduling as visibility) unless step has explicit "depends"
             _cf_dag: dict[str, list[str]] = {}
             for _step, _p in zip(_cf_workflow, _cf_participants):

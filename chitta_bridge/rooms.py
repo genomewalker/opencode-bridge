@@ -934,24 +934,14 @@ class RoomManager:
                 f"No preamble, no recap of what others said. Keep your response under {_wlim2} words."
             )
 
-        # Tool-use hint — split by role so workers get execution hint, others get search hint.
+        # Tool-use hint — all participants get all tools; role prompts guide which to prioritise.
         if room.participant_tools:
-            _hint_role = room.roles.get(name, "")
-            if _hint_role in ("worker", "synthesizer"):
-                system_prompt += (
-                    "\n\n## Tools available — execution first\n"
-                    "You have bash, write_file, read_file, glob, and grep. "
-                    "Write your script to a temp path and run it with bash. "
-                    "Do NOT use web_search — your task is local computation on the provided data files."
-                )
-            else:
-                system_prompt += (
-                    "\n\n## Tools available — use them\n"
-                    "You have access to web_search, web_fetch, paper_fetch, soul_recall, and other MCP tools. "
-                    "Before answering, call web_search and/or paper_fetch to find primary sources. "
-                    "Cite every factual claim with a URL, DOI, or arXiv ID you actually retrieved. "
-                    "Responses without tool-backed citations will be marked [asserted] and down-weighted by the judge."
-                )
+            system_prompt += (
+                "\n\n## Tools available — full access\n"
+                "You have bash, write_file, read_file, glob, grep, web_search, web_fetch, "
+                "paper_fetch, recall, remember, and more. Use whichever tools your role requires. "
+                "Your epistemic role (above) specifies which tools to prioritise."
+            )
 
         # Inject epistemic role text (re-prepended every turn so it doesn't decay)
         role_key = room.roles.get(name)
