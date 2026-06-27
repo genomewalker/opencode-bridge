@@ -660,8 +660,27 @@ async def list_tools():
                     "rounds": {"type": "integer", "description": "Discussion rounds per step (default: 1)."},
                     "adversarial": {"type": "boolean", "description": "Adversarial synthesis (default: false)."},
                     "files": {
-                        "type": "array", "items": {"type": "string"},
-                        "description": "File/directory paths to attach as shared context.",
+                        "type": "array",
+                        "items": {
+                            "oneOf": [
+                                {"type": "string"},
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "path": {"type": "string"},
+                                        "description": {"type": "string"},
+                                    },
+                                    "required": ["path"],
+                                },
+                            ]
+                        },
+                        "description": (
+                            "Files to attach as shared context. Each item is either a path string "
+                            "or {path, description} — description is shown in the manifest and helps "
+                            "Workers understand each file before opening it. "
+                            "Small text files are embedded inline; binary/large files (.gz, .bam, >100KB) "
+                            "are listed as bash-access-only."
+                        ),
                     },
                     "preamble": {"type": "string", "description": "Shared preamble prepended to all agents."},
                 },
