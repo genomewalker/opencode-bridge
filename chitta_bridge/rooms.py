@@ -181,7 +181,13 @@ ROLE_PRESETS: dict[str, dict] = {
             "     - Prints a clean results table + the EVAL_ANSWER block\n"
             "  4. RUN /tmp/synthesis_final.py with bash and paste the complete stdout.\n"
             "  5. Write a concise RESULTS REPORT (method, top result, score, per-patient breakdown, caveats).\n"
-            "  6. End with the EVAL_ANSWER block from the script's stdout — NEVER fabricate or drop it.\n"
+            "  6. **FIELD COMPLETENESS CHECK** — before writing the EVAL_ANSWER block:\n"
+            "     a. List every field in the EVAL_ANSWER template from the preamble.\n"
+            "     b. For each field, confirm you have a computed value from actual data (not None, not '?', not placeholder).\n"
+            "     c. For any missing field: run a script NOW to compute it — do not skip or omit fields.\n"
+            "     Common missing fields: confounder-adjusted stats, negative-control associations, per-stratum breakdowns.\n"
+            "  7. End with the EVAL_ANSWER block — ALL fields populated with real computed values.\n"
+            "     NEVER output an EVAL_ANSWER with missing, null, or placeholder values.\n"
             "Empirical execution output takes priority over theoretical arguments from any participant."
         ),
         "visibility_scope": "all",
@@ -664,10 +670,15 @@ class RoomManager:
             # Detect structured answer blocks in the transcript (EVAL_ANSWER, JSON answer, etc.)
             _has_eval_block = "<EVAL_ANSWER>" in transcript or "EVAL_ANSWER" in transcript
             _eval_enforcement = (
-                "\n\n**CRITICAL**: One or more participants produced a structured answer block "
-                "(EVAL_ANSWER or equivalent). You MUST reproduce the correct structured block "
-                "verbatim at the end of your synthesis — do NOT drop it or paraphrase it. "
-                "Empirical output from code-executing Workers takes priority over theoretical arguments."
+                "\n\n**CRITICAL — EVAL_ANSWER COMPLETENESS**:\n"
+                "One or more participants produced a structured answer block (EVAL_ANSWER or equivalent).\n"
+                "Before writing your final EVAL_ANSWER:\n"
+                "  1. List every field in the EVAL_ANSWER template from the preamble.\n"
+                "  2. Confirm each field has a real computed value (not None, not '?', not placeholder).\n"
+                "  3. If any field is missing — run a script NOW to compute it. Do NOT skip fields.\n"
+                "     Common gaps: confounder-adjusted stats, negative-control correlations, per-stratum breakdowns.\n"
+                "  4. Output the EVAL_ANSWER block with ALL fields populated.\n"
+                "     NEVER output a partial EVAL_ANSWER. Empirical Worker output takes priority over theory."
             ) if _has_eval_block else ""
             prompt = (
                 f"You are a neutral synthesizer reviewing a multi-agent discussion.\n"
