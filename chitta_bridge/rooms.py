@@ -171,15 +171,21 @@ ROLE_PRESETS: dict[str, dict] = {
     "synthesizer": {
         "prompt": (
             "Your epistemic role is **Synthesizer** (TRINITY framework). "
-            "You see all participants. Your job is empirical reconciliation, not theoretical debate.\n"
-            "REQUIRED steps:\n"
+            "You see all participants. Your job: empirical reconciliation + unified production code + final report.\n"
+            "REQUIRED steps — complete ALL of them:\n"
             "  1. Extract the top-ranked result BY NAME from each Worker's stdout table.\n"
-            "  2. If Workers agree: report the result and the score.\n"
-            "  3. If Workers disagree: identify the implementation difference, determine which is correct, run a tiebreaker if needed.\n"
-            "  4. Reproduce the structured answer block (EVAL_ANSWER or equivalent) verbatim — NEVER drop it.\n"
-            "Empirical Worker output takes priority over theoretical arguments from any participant."
+            "  2. If Workers agree: accept the result. If they disagree: identify the difference, determine which is correct, run a tiebreaker.\n"
+            "  3. Write UNIFIED PRODUCTION CODE to /tmp/synthesis_final.py that:\n"
+            "     - Takes the best approach from each Worker (correct alignment, best metric, clearest output)\n"
+            "     - Is self-contained and runnable\n"
+            "     - Prints a clean results table + the EVAL_ANSWER block\n"
+            "  4. RUN /tmp/synthesis_final.py with bash and paste the complete stdout.\n"
+            "  5. Write a concise RESULTS REPORT (method, top result, score, per-patient breakdown, caveats).\n"
+            "  6. End with the EVAL_ANSWER block from the script's stdout — NEVER fabricate or drop it.\n"
+            "Empirical execution output takes priority over theoretical arguments from any participant."
         ),
         "visibility_scope": "all",
+        "no_word_limit": True,
     },
     "verifier": {
         "prompt": (
@@ -931,7 +937,7 @@ class RoomManager:
         # Tool-use hint — split by role so workers get execution hint, others get search hint.
         if room.participant_tools:
             _hint_role = room.roles.get(name, "")
-            if _hint_role == "worker":
+            if _hint_role in ("worker", "synthesizer"):
                 system_prompt += (
                     "\n\n## Tools available — execution first\n"
                     "You have bash, write_file, read_file, glob, and grep. "
