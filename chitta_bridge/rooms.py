@@ -2497,6 +2497,14 @@ class RoomManager:
                 room._last_tool_calls = {}
             room._last_tool_calls.setdefault(name, []).append(tool_req["tool"])
 
+            # Log tool call + result into room transcript for visibility
+            tool_args_str = " ".join(f"{k}={repr(v)[:60]}" for k, v in tool_req["args"].items())
+            room.messages.append({
+                "name": f"{name}[tool:{tool_req['tool']}]",
+                "content": f"{tool_args_str}\n→ {tool_result[:400]}",
+                "ts": datetime.now().isoformat(),
+            })
+
             # Inject result and re-prompt
             user_msg = (
                 f"{reply}\n\n"
