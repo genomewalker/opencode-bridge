@@ -120,6 +120,29 @@ orchestrator = Orchestrator(codex_bridge)
 rooms = RoomManager(codex_bridge, local_bridge)
 server = Server("chitta-bridge")
 
+# Background conductor_fusion tasks: room_id → {status, rounds_done, rounds_total, synthesis, error}
+_bg_rooms: dict[str, dict] = {}
+
+
+async def _run_conductor_bg(
+    room_id: str, rounds: int, judge: dict, adversarial: bool,
+) -> None:
+    """Run conductor_fusion rounds+synthesis in the background; never raises."""
+    try:
+        for i in range(rounds):
+            await rooms.run_rounds(room_id, rounds=1)
+            _bg_rooms[room_id]["rounds_done"] = i + 1
+        _bg_rooms[room_id]["status"] = "synthesizing"
+        synthesis = await rooms.synthesize(room_id, synthesizer=judge, adversarial=adversarial)
+        synth_path = rooms.rooms_dir / f"{room_id}.synthesis"
+        synth_path.write_text(synthesis)
+        _bg_rooms[room_id]["status"] = "done"
+        _bg_rooms[room_id]["synthesis"] = synthesis
+        _threading.Thread(target=distill_event, args=("room_synth", synthesis, {}), daemon=True).start()
+    except Exception as _e:
+        _bg_rooms[room_id]["status"] = "error"
+        _bg_rooms[room_id]["error"] = str(_e)
+
 # ── Registry-backed tool handlers ───────────────────────────────────────────
 # Single source of truth for schema + handler. list_tools() iterates REGISTRY;
 # call_tool() fast-paths through REGISTRY before the legacy if/elif fallback.
@@ -2404,12 +2427,20 @@ async def call_tool(name: str, arguments: dict):
                 dag=_cf_dag,
                 files=_cf_room_files if _cf_room_files else None,
             )
-            await rooms.run_rounds(_cf_room_id, rounds=_cf_rounds)
-            result = await rooms.synthesize(
-                _cf_room_id, synthesizer=_cf_judge, adversarial=_cf_adversarial,
+            _bg_rooms[_cf_room_id] = {
+                "status": "running", "rounds_done": 0, "rounds_total": _cf_rounds,
+                "synthesis": None, "error": None,
+            }
+            asyncio.get_event_loop().create_task(
+                _run_conductor_bg(_cf_room_id, _cf_rounds, _cf_judge, _cf_adversarial)
             )
-            _threading.Thread(target=distill_event, args=("room_synth", result, {}), daemon=True).start()
-            result = f"[conductor_fusion:{_cf_room_id}]\n{result}"
+            result = json.dumps({
+                "room_id": _cf_room_id,
+                "status": "running",
+                "rounds_total": _cf_rounds,
+                "participants": [p["name"] for p in _cf_participants],
+                "poll": "room_status to track rounds; room_read when done to get synthesis.",
+            }, indent=2)
 
         elif name == "room_set_visibility":
             _rv_id = arguments.get("room_id", "")
@@ -2780,7 +2811,16 @@ async def call_tool(name: str, arguments: dict):
                 rooms._save_room(rid)
                 result = f"Injected {injected} context item(s) into '{rid}' ({total_chars:,} chars total)."
         elif name == "room_read":
-            result = rooms.read(room_id=arguments.get("room_id", ""), last_n=arguments.get("last_n"))
+            _rr_id = arguments.get("room_id", "")
+            result = rooms.read(room_id=_rr_id, last_n=arguments.get("last_n"))
+            # Append synthesis if background task has completed
+            _rr_bg = _bg_rooms.get(_rr_id)
+            if _rr_bg and _rr_bg.get("synthesis"):
+                result += f"\n\n---\n## Synthesis\n{_rr_bg['synthesis']}"
+            elif not (_rr_bg and _rr_bg.get("synthesis")):
+                _synth_path = rooms.rooms_dir / f"{_rr_id}.synthesis"
+                if _synth_path.exists():
+                    result += f"\n\n---\n## Synthesis\n{_synth_path.read_text()}"
         elif name == "room_status":
             rid = arguments.get("room_id", "")
             if rid not in rooms.rooms:
@@ -2807,7 +2847,20 @@ async def call_tool(name: str, arguments: dict):
                         except ValueError:
                             pass
                 max_round = max(existing_rounds) if existing_rounds else 0
-                lines = [f"# Room status: {rid}", f"Participants: {', '.join(participants)}", ""]
+                _rs_bg = _bg_rooms.get(rid)
+                _rs_bg_line = ""
+                if _rs_bg:
+                    _st = _rs_bg["status"]
+                    _rd = _rs_bg["rounds_done"]
+                    _rt = _rs_bg["rounds_total"]
+                    _rs_bg_line = (
+                        f"**Background task:** {_st} — rounds {_rd}/{_rt}"
+                        + (f" — error: {_rs_bg['error']}" if _rs_bg.get("error") else "")
+                    )
+                lines = [f"# Room status: {rid}", f"Participants: {', '.join(participants)}"]
+                if _rs_bg_line:
+                    lines.append(_rs_bg_line)
+                lines.append("")
                 for rnum in range(1, max_round + 1):
                     lines.append(f"## Round {rnum}")
                     for pname in participants:
