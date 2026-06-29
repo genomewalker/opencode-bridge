@@ -92,6 +92,7 @@ from chitta_bridge.soul import SoulClient
 from chitta_bridge.backends.codex import CodexBridge
 from chitta_bridge.backends.local import GpuNodeDiscovery, LocalModelBridge
 from chitta_bridge.search.web import WebSearch
+from chitta_bridge.search.browser import BrowserFetch, BrowserStackUnavailable
 from chitta_bridge.search.lit import LitSearch
 from chitta_bridge.reflib import RefLib
 from chitta_bridge.orchestrator import Orchestrator
@@ -1407,6 +1408,43 @@ async def list_tools():
                 "required": ["url"]
             }
         ),
+        Tool(
+            name="browser_fetch",
+            description=(
+                "Fetch a JS-rendered or Cloudflare-protected page. Lightweight by "
+                "default (curl_cffi with Firefox JA3); only mints a cf_clearance "
+                "cookie via headless camoufox when Cloudflare actually challenges, "
+                "then caches it per domain (~25 min) so later fetches stay browserless. "
+                "Without download_path: returns body text + candidate supplement/"
+                "download links. With download_path: saves the URL's bytes to that path. "
+                "Set render=true to force a full browser load for genuinely JS-only (SPA) pages."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL to fetch"},
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "Max characters of body text (default 20000)",
+                        "default": 20000,
+                    },
+                    "download_path": {
+                        "type": "string",
+                        "description": "If set, save URL bytes here instead of returning text",
+                    },
+                    "wait_selector": {
+                        "type": "string",
+                        "description": "Optional CSS selector to wait for (render mode only)",
+                    },
+                    "render": {
+                        "type": "boolean",
+                        "description": "Force full headless-browser load for JS-only pages (default false)",
+                        "default": False,
+                    },
+                },
+                "required": ["url"]
+            }
+        ),
 
         # ── Soul Memory ────────────────────────────────────────────
         Tool(
@@ -2431,7 +2469,7 @@ async def call_tool(name: str, arguments: dict):
                 "status": "running", "rounds_done": 0, "rounds_total": _cf_rounds,
                 "synthesis": None, "error": None,
             }
-            asyncio.get_event_loop().create_task(
+            asyncio.create_task(
                 _run_conductor_bg(_cf_room_id, _cf_rounds, _cf_judge, _cf_adversarial)
             )
             result = json.dumps({
@@ -3141,6 +3179,23 @@ async def call_tool(name: str, arguments: dict):
                     arguments.get("max_chars", 12000),
                 ),
             )
+        elif name == "browser_fetch":
+            def _browser_or_fallback():
+                try:
+                    return BrowserFetch.fetch(
+                        arguments["url"],
+                        arguments.get("max_chars", 20000),
+                        arguments.get("download_path"),
+                        arguments.get("wait_selector"),
+                        arguments.get("render", False),
+                    )
+                except BrowserStackUnavailable:
+                    if arguments.get("download_path"):
+                        return ("(browser stack not installed: `uv sync --extra browser` "
+                                "+ `camoufox fetch`; cannot download this URL)")
+                    return WebSearch.fetch_page(arguments["url"], arguments.get("max_chars", 12000))
+
+            result = await asyncio.get_event_loop().run_in_executor(None, _browser_or_fallback)
         elif name == "soul_recall":
             r = await asyncio.get_event_loop().run_in_executor(
                 None,
