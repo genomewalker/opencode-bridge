@@ -309,6 +309,46 @@ web_fetch(url="https://example.com/article", max_chars=12000)
 | `web_search` | Search via DuckDuckGo — returns titles, URLs, snippets |
 | `web_fetch` | Fetch a web page as plain text (HTML stripped) |
 
+## Browser Fetch (Cloudflare bypass)
+
+`browser_fetch` upgrades `web_fetch` for Cloudflare-protected pages. It uses a
+three-tier stack: fast TLS impersonation first, then a headless Firefox cookie mint
+only when challenged, then a cached retry — so the heavy browser fires at most once
+per domain per ~25 min TTL.
+
+### Install the optional stack
+
+```bash
+# via the Claude Code skill (recommended)
+/bridge-install-browser
+
+# or manually
+uv pip install "chitta-bridge[browser]"   # installs curl_cffi + playwright==1.49
+python -m playwright install firefox      # base Firefox binary
+python -m camoufox fetch                  # download the fortified camoufox binary (~700 MB)
+```
+
+> **Note:** `camoufox` requires `playwright==1.49` exactly — newer versions break the
+> binary download. The `[browser]` extra pins this automatically.
+
+### Usage
+
+```python
+# Same interface as web_fetch — falls back gracefully if stack is absent
+browser_fetch(url="https://cloudflare-protected-site.com/article", render=False)
+
+# render=True forces a full camoufox load for JS-rendered (SPA) pages
+browser_fetch(url="https://spa-site.com", render=True)
+```
+
+| Option | Default | Effect |
+|--------|---------|--------|
+| `render` | `False` | Force full camoufox load (needed for SPA / heavy JS pages) |
+| `max_chars` | `20000` | Truncate output |
+
+If `curl_cffi` is not installed, `browser_fetch` falls back to the standard `web_fetch`
+path automatically — no error, just a note in the output.
+
 ## Soul Memory (chittad)
 
 Bidirectional memory bridge to the cc-soul daemon with **realm-scoped** memory. Each room participant can have its own memory namespace, and room discussions automatically pull relevant memories as context.
