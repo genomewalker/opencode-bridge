@@ -10,6 +10,7 @@ __all__ = ["_estimate_cost_usd", "_append_room_cost", "_append_room_audit"]
 _MODEL_RATES: dict[str, tuple[float, float]] = {
     "claude-opus-4-8":    (15.0, 75.0),
     "claude-opus-4-7":    (15.0, 75.0),
+    "claude-sonnet-5":    (3.0,  15.0),
     "claude-sonnet-4-6":  (3.0,  15.0),
     "claude-haiku-4-5":   (0.8,   4.0),
     "claude-fable-5":     (3.0,  15.0),
