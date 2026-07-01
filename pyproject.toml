@@ -41,6 +41,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Optional Cloudflare-bypass stack for browser_fetch. Absent → browser_fetch
+# transparently falls back to the normal web_fetch route. Present → curl_cffi
+# (Firefox JA3) first, camoufox mints a cf_clearance cookie only on challenge.
+# After install, also run `camoufox fetch` to download the Firefox binary.
+browser = [
+    "curl-cffi>=0.15.0",
+    "playwright==1.49.0",
+    "camoufox[geoip]>=0.4.11",
+]
 dev = [
     "ruff>=0.4.0",
     "pytest>=8.0.0",
