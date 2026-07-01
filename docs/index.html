@@ -788,6 +788,10 @@ codex_rescue(task="apply the fix", resume_from="SESSION_ID")</code></pre>
             <span class="chunk-key">synthesis</span>
             <span class="chunk-val">distill transcript &middot; consensus &middot; disagreements &middot; best answer &middot; open questions</span>
           </div>
+          <div class="chunk-row">
+            <span class="chunk-key">conductor fusion</span>
+            <span class="chunk-val">arXiv:2512.04388 &middot; one call compiles subtasks + visibility matrix &middot; runs async, returns room_id immediately</span>
+          </div>
         </div>
 
         <div class="code-block" style="margin-top: 1.5rem;">
@@ -819,6 +823,28 @@ room_run(room_id="expert-panel", rounds=2, challenge=true)
 room_synthesize(room_id="expert-panel")</code></pre>
         </div>
 
+        <div class="code-block" style="margin-top: 1.5rem;">
+          <div class="code-bar">
+            <span class="code-dot red"></span>
+            <span class="code-dot yellow"></span>
+            <span class="code-dot green"></span>
+            <span class="code-title">conductor fusion &mdash; one-call orchestration</span>
+          </div>
+          <pre><code>conductor_fusion(
+  topic="Design a fast HNSW build for 144k vectors",
+  workflow='[
+    {"agent":"claude:opus:xhigh", "subtask":"Thinker: propose independently.", "sees":"none"},
+    {"agent":"codex:gpt-5.5",     "subtask":"Worker: extend the Thinker.",     "sees":["Opus"]},
+    {"agent":"claude:opus:high",  "subtask":"Verifier: critique both.",       "sees":["Opus","GPT-5.5"]}
+  ]',
+  project_roots=["/path/to/target/repo"]
+)
+<span class="comment"># → {"room_id": "conductor-ab12cd34", "status": "running", ...}</span>
+
+room_status(room_id="conductor-ab12cd34")  <span class="comment"># poll rounds_done/rounds_total</span>
+room_read(room_id="conductor-ab12cd34")    <span class="comment"># transcript + synthesis once done</span></code></pre>
+        </div>
+
         <div class="tool-group" style="margin-top: 1.5rem;">
           <div class="tool-grid">
             <div class="tool-card">
@@ -840,6 +866,14 @@ room_synthesize(room_id="expert-panel")</code></pre>
             <div class="tool-card">
               <code class="tool-name">room_read</code>
               <span class="tool-desc">read full transcript</span>
+            </div>
+            <div class="tool-card">
+              <code class="tool-name">conductor_fusion</code>
+              <span class="tool-desc">one-call conductor orchestration &mdash; Thinker/Worker/Verifier by default, runs async</span>
+            </div>
+            <div class="tool-card">
+              <code class="tool-name">room_status</code>
+              <span class="tool-desc">poll an async room for rounds-done/total and completion</span>
             </div>
           </div>
         </div>

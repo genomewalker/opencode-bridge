@@ -152,6 +152,46 @@ When `challenge=true`, a moderator automatically:
 
 When multiple local models share the same GPU endpoint, rooms automatically run participants **sequentially** to avoid model-swap thrashing. Different endpoints run in parallel.
 
+### Conductor Fusion
+
+Runs a **conductor-style orchestration** (arXiv:2512.04388) as a single call: each agent gets a distinct subtask and explicit visibility over peers, then a judge synthesizes. It compiles the workflow into preambles + a per-round visibility matrix automatically — no manual `room_create`/`room_run` needed. Use it for tasks that benefit from information asymmetry (a Thinker proposing blind, Workers extending on different angles, a Verifier checking without cross-contamination).
+
+`conductor_fusion` runs **async**: it returns `room_id` immediately (status `"running"`) instead of blocking for the full discussion, so there's no request timeout on long multi-round runs.
+
+```python
+conductor_fusion(
+    topic="Design a fast HNSW build for 144k vectors",
+    workflow='[
+        {"agent":"claude:opus:xhigh", "subtask":"Thinker: propose a complete answer independently.", "sees":"none"},
+        {"agent":"codex:gpt-5.5",     "subtask":"Worker: build on or extend the Thinker.", "sees":["Opus"]},
+        {"agent":"claude:opus:high",  "subtask":"Verifier: critique both, cite 2+ specific issues.", "sees":["Opus","GPT-5.5"]}
+    ]',
+    rounds=1,
+    project_roots=["/path/to/target/repo"]
+)
+# → {"room_id": "conductor-ab12cd34", "status": "running", ...}
+
+room_status(room_id="conductor-ab12cd34")   # poll: rounds_done/rounds_total, status
+room_read(room_id="conductor-ab12cd34")     # once done: full transcript + synthesis
+```
+
+Omit `workflow` to get the default **TRINITY** panel shown above (Thinker/Worker/Verifier). Each step takes:
+
+| Field | Description |
+|-------|-------------|
+| `agent` | `backend:model[:effort]` shorthand (same as `fusion`). Default `claude:opus:xhigh` |
+| `subtask` | Injected as this agent's preamble |
+| `sees` | Agent name(s) it can see, or `"all"`/`"none"` |
+| `name` | Optional explicit display name (else derived from `agent`) |
+| `role` | Optional explicit role (`thinker`/`worker`/`verifier`/`synthesizer`); else inferred from `subtask` keywords |
+| `depends` | Optional scheduling deps; defaults to `sees` |
+
+Other params: `judge` (synthesis model, default `claude:opus:max`), `adversarial` (majority/minority split), `files`, `preamble` (shared across all agents).
+
+`project_roots` should be set explicitly whenever the target codebase's real paths are only described in `subtask`/`preamble` text rather than attached via `files` — otherwise chittad's code-intel/memory recall are unscoped across every indexed project, and agents can silently ground claims in the wrong repo. Derived automatically from `files` when present.
+
+All `conductor_fusion` participants get full tool access (`participant_tools=["all"]`), including `bash` — they are not restricted to read-only reasoning unless a step sets `quarantine` explicitly.
+
 ### Room Tools
 
 | Tool | Description |
@@ -161,6 +201,8 @@ When multiple local models share the same GPU endpoint, rooms automatically run 
 | `room_run` | Run N rounds with optional challenge mode |
 | `room_read` | Read the full transcript |
 | `room_synthesize` | Distill the transcript — consensus, disagreements, best answer, open questions |
+| `room_status` | Poll an async room (e.g. `conductor_fusion`) for rounds-done/total and completion status |
+| `conductor_fusion` | One-call conductor-style orchestration — see above |
 
 ### Agent Tools
 
