@@ -707,6 +707,17 @@ async def list_tools():
                         ),
                     },
                     "preamble": {"type": "string", "description": "Shared preamble prepended to all agents."},
+                    "project_roots": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Explicit repo root path(s) this room is scoped to. REQUIRED if the target "
+                            "codebase's real paths/fields are described in `subtask`/`preamble` text rather "
+                            "than attached via `files` — without either, chittad's code-intel and memory "
+                            "recall are global across every project ever indexed, and agents can silently "
+                            "ground claims in an unrelated repo's symbols. Derived from `files` if omitted."
+                        )
+                    },
                 },
                 "required": [],
             },
@@ -1134,6 +1145,22 @@ async def list_tools():
                             "Default: [] (no tools — text-only responses). "
                             "Applies to claude backend; codex has tools natively via full-auto."
                         )
+                    },
+                    "project_roots": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Explicit repo root path(s) this room is scoped to — REQUIRED if the target "
+                            "codebase's actual paths/fields are described in the topic/preamble text rather "
+                            "than attached via `files`. Without either `files` or this, chittad's code-intel "
+                            "and memory recall are global across every project it has ever indexed, and "
+                            "participants can silently ground claims in an unrelated repo's symbols/memories. "
+                            "When omitted, scope is best-effort derived from `files`' common .git root."
+                        )
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": "Optional short project slug for the memory realm. Derived from project_roots/files if omitted."
                     }
                 },
                 "required": ["room_id", "topic", "participants"]
@@ -2464,6 +2491,7 @@ async def call_tool(name: str, arguments: dict):
                 participant_tools=["all"],
                 dag=_cf_dag,
                 files=_cf_room_files if _cf_room_files else None,
+                project_roots=arguments.get("project_roots"),
             )
             _bg_rooms[_cf_room_id] = {
                 "status": "running", "rounds_done": 0, "rounds_total": _cf_rounds,
@@ -2700,6 +2728,8 @@ async def call_tool(name: str, arguments: dict):
                     preambles=(json.loads(arguments["preambles"]) if isinstance(arguments.get("preambles"), str) else arguments.get("preambles") or {}),
                     visibility=(json.loads(arguments["visibility"]) if isinstance(arguments.get("visibility"), str) else arguments.get("visibility") or {}),
                     participant_tools=arguments.get("participant_tools") or [],
+                    project=arguments.get("project", ""),
+                    project_roots=arguments.get("project_roots"),
                 )
         elif name == "room_set_preamble":
             rid = arguments.get("room_id", "")
@@ -2833,7 +2863,8 @@ async def call_tool(name: str, arguments: dict):
                         if SoulClient.is_available():
                             query = item.get("query", "")
                             limit = int(item.get("limit", 5))
-                            recalled = SoulClient.hybrid_recall(query, limit=limit)
+                            realm = item.get("realm") or getattr(room_obj, "project", "") or None
+                            recalled = SoulClient.hybrid_recall(query, limit=limit, realm=realm)
                             msg_content = f"[Memory: {query}]\n{recalled or '(no results)'}"
                         else:
                             msg_content = "[Memory: chitta not available]"

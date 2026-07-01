@@ -62,6 +62,8 @@ class DiscussionRoom:
     turn_counts: dict = field(default_factory=dict)  # {name: int} derived from committed turn_keys
     challenge_mode: bool = False
     files: list = field(default_factory=list)
+    project: str = ""              # derived project slug — scopes memory realm + code-intel filtering
+    project_roots: list = field(default_factory=list)  # resolved repo root dir(s) backing `project`
     claim_ledger: list = field(default_factory=list)
     open_questions: list = field(default_factory=list)
     roles: dict = field(default_factory=dict)  # {participant_name: role_key}
@@ -86,6 +88,40 @@ class DiscussionRoom:
         data = _migrate_persisted(json.loads(path.read_text()), "room")
         valid = {f.name for f in dc_fields(cls)}
         return cls(**{k: v for k, v in data.items() if k in valid})
+
+
+def _derive_project(files: list) -> tuple:
+    """Best-effort (project_slug, project_roots) from a room's attached file paths.
+
+    Walks up from the files' common ancestor to the nearest .git root so a
+    room's scope covers the whole repo, not just the subdirs of the files that
+    happened to be attached. Returns ("", []) when no files are attached —
+    callers must treat that as "no project scope available", not "global is
+    fine": role-preset participants (e.g. "Verifier") are reused verbatim
+    across unrelated rooms, so a realm/filter that silently falls back to a
+    role-name-only namespace bleeds memory and code-intel results across
+    projects that happen to share a role name.
+    """
+    dirs = []
+    for f in files or []:
+        try:
+            p = Path(f).expanduser().resolve()
+        except OSError:
+            continue
+        dirs.append(p if p.is_dir() else p.parent)
+    if not dirs:
+        return "", []
+    try:
+        common = Path(os.path.commonpath([str(d) for d in dirs]))
+    except ValueError:
+        common = dirs[0]
+    root = common
+    for parent in (common, *common.parents):
+        if (parent / ".git").exists():
+            root = parent
+            break
+    slug = re.sub(r"[^a-z0-9]+", "-", root.name.lower()).strip("-") or "project"
+    return slug, [str(root)]
 
 
 # Named, reusable framing preambles. Opt-in only (room.preamble = "<name>" or literal
@@ -377,6 +413,10 @@ class RoomManager:
         fork_files = list(old_room.files) if old_room else []
         fork_roles = dict(old_room.roles) if old_room else {}
         fork_preambles = dict(old_room.preambles) if (old_room and getattr(old_room, "preambles", None)) else {}
+        fork_project = old_room.project if (old_room and getattr(old_room, "project", "")) else ""
+        fork_project_roots = list(old_room.project_roots) if (old_room and getattr(old_room, "project_roots", None)) else []
+        if not fork_project:
+            fork_project, fork_project_roots = _derive_project(fork_files)
         # Validate participant shape before creating anything — failing later
         # (e.g. on a string participant) would orphan a half-saved room.
         bad = [p for p in fork_participants if not (isinstance(p, dict) and p.get("name"))]
@@ -387,7 +427,7 @@ class RoomManager:
         new_room = DiscussionRoom(
             id=new_room_id, topic=fork_topic, participants=fork_participants,
             files=fork_files, roles=fork_roles, clean=clean, verbatim_rounds=verbatim_rounds,
-            preambles=fork_preambles,
+            preambles=fork_preambles, project=fork_project, project_roots=fork_project_roots,
             forked_from=old_room_id,
         )
         new_room.messages.append({"name": "TOPIC", "content": fork_topic, "ts": datetime.now().isoformat()})
@@ -409,7 +449,9 @@ class RoomManager:
                      preambles: Optional[dict] = None,
                      visibility: Optional[dict] = None,
                      participant_tools: Optional[list] = None,
-                     dag: Optional[dict] = None) -> str:
+                     dag: Optional[dict] = None,
+                     project: str = "",
+                     project_roots: Optional[list[str]] = None) -> str:
         _sanitize_session_id(room_id)
         if room_id in self.rooms:
             # Auto-fork: summarize old room, create new room with UUID suffix
@@ -425,7 +467,24 @@ class RoomManager:
                 if role not in valid:
                     return f"Invalid role '{role}' for '{pname}'. Valid: {sorted(valid)}"
         expanded = _expand_paths(files or [])
+        # Explicit project/project_roots (e.g. the caller knows the target repo but
+        # only referenced paths in free text rather than attaching files) takes
+        # priority over derivation from attached files — derivation is a best-effort
+        # fallback, not the only way to establish scope.
+        if project_roots:
+            resolved_roots = []
+            for r in project_roots:
+                try:
+                    resolved_roots.append(str(Path(r).expanduser().resolve()))
+                except OSError:
+                    resolved_roots.append(r)
+            if not project:
+                project = re.sub(r"[^a-z0-9]+", "-", Path(resolved_roots[0]).name.lower()).strip("-") or "project"
+            project_roots = resolved_roots
+        else:
+            project, project_roots = _derive_project(expanded)
         room = DiscussionRoom(id=room_id, topic=topic, participants=participants, files=expanded,
+                              project=project, project_roots=project_roots,
                               roles=roles or {}, clean=clean, verbatim_rounds=verbatim_rounds,
                               preamble=preamble or "",
                               preambles=preambles or {},
@@ -764,8 +823,15 @@ class RoomManager:
     # Soul-aware context building
     # ------------------------------------------------------------------
 
-    def _parse_soul(self, participant: dict) -> Optional[AgentSoul]:
-        """Parse soul from participant dict, if present."""
+    def _parse_soul(self, participant: dict, project: str = "") -> Optional[AgentSoul]:
+        """Parse soul from participant dict, if present.
+
+        `project` (from room.project) is folded into the default realm so that
+        role-preset participants (e.g. "Verifier", "Skeptic" — reused verbatim
+        across unrelated rooms per ROLE_PRESETS) don't share one memory
+        namespace across every project that uses the same role name. An
+        explicit soul.realm in the participant dict always wins.
+        """
         raw = participant.get("soul")
         if not raw:
             return None
@@ -775,9 +841,10 @@ class RoomManager:
             except json.JSONDecodeError:
                 return AgentSoul(system_prompt=raw)
         name_slug = re.sub(r"[^a-z0-9]+", "-", participant["name"].lower()).strip("-")
+        default_realm = f"{project}:agent:{name_slug}" if project else f"agent:{name_slug}"
         return AgentSoul(
             system_prompt=raw.get("system_prompt", raw.get("prompt", "")),
-            realm=raw.get("realm", f"agent:{name_slug}"),
+            realm=raw.get("realm", default_realm),
             tools=raw.get("tools", []),
             max_tool_turns=raw.get("max_tool_turns", 3),
             max_rounds=raw.get("max_rounds", 0),
@@ -796,7 +863,7 @@ class RoomManager:
         participant forms their view independently (prevents first-round anchoring).
         """
         name = participant["name"]
-        soul = self._parse_soul(participant)
+        soul = self._parse_soul(participant, project=room.project)
 
         # -- Build discussion transcript --
         # SYSTEM_NAMES: messages that are always visible regardless of blind mode
@@ -1053,9 +1120,49 @@ class RoomManager:
         m = self._FINAL_RESPONSE_RE.search(text)
         return m.group(1).strip() if m else None
 
+    @staticmethod
+    def _path_in_project(file_path: str, project_roots: list) -> bool:
+        """True if file_path resolves under one of the room's project roots.
+
+        chittad's code-intel store is global — search_symbols/read_symbol/
+        read_function have no project filter server-side (verified: the C++
+        handlers never read a "project" param at all, unlike codebase_overview
+        which does). This is the client-side substitute: without it, a room
+        scoped to one repo can silently ground claims in same-named symbols
+        from any other repo chitta has ever indexed.
+        """
+        if not file_path:
+            return True
+        try:
+            resolved = str(Path(file_path).expanduser().resolve())
+        except OSError:
+            resolved = file_path
+        return any(resolved == r or resolved.startswith(r + os.sep) for r in project_roots)
+
+    @staticmethod
+    def _no_project_scope_refusal(tool_name: str) -> str:
+        """Fail closed, not warn-and-pass.
+
+        A warning banner ahead of results was tried and failed in practice: a
+        real room let "Verifier" ground a claim in an unrelated repo's code
+        despite an equivalent warning, because the model trusted the returned
+        symbol over the caveat. chittad's code index has no project filter for
+        this class of tool, so with no scope established there is no way to
+        tell a same-name symbol in the right repo from one in the wrong repo —
+        refuse rather than return a coin flip.
+        """
+        return (
+            f"(refusing '{tool_name}': this room has no project scope — no `files` were "
+            f"attached and no explicit `project_roots` was set at room_create/conductor_fusion. "
+            f"chittad's code index is global across every project it has ever indexed, so results "
+            f"can't be trusted to belong to this room's target repo. Fix: recreate the room with "
+            f"`files` pointing into the target repo, or pass `project_roots` explicitly.)"
+        )
+
     async def _execute_agent_tool(self, tool_name: str, args: dict,
                                    realm: Optional[str] = None,
-                                   participant_name: str = "") -> str:
+                                   participant_name: str = "",
+                                   room: Optional[DiscussionRoom] = None) -> str:
         """Execute a tool on behalf of a room participant.
 
         Categories:
@@ -1198,24 +1305,69 @@ class RoomManager:
 
             # ── Code intelligence ──────────────────────────────────────
             elif tool_name == "code_intel":
+                project_roots = room.project_roots if room else []
                 return _code_intel(
                     symbol=args.get("symbol", ""),
                     path=args.get("path", ""),
                     realm=realm,
+                    project_roots=project_roots,
                 )
 
             elif tool_name == "read_function":
-                return SoulClient._call("read_function", {"name": args.get("name", "")}) or "(not found)"
+                project_roots = room.project_roots if room else []
+                if not project_roots:
+                    return self._no_project_scope_refusal("read_function")
+                text, structured = SoulClient._call_full("read_function", {"name": args.get("name", "")})
+                if not text:
+                    return "(not found)"
+                file_path = structured.get("file", "")
+                if not self._path_in_project(file_path, project_roots):
+                    return (f"(refusing: '{args.get('name', '')}' resolved to {file_path or 'an unknown file'}, "
+                            f"outside this room's project — likely a same-name symbol in an unrelated repo "
+                            f"chitta has indexed. Not returning it.)")
+                return text
 
             elif tool_name == "read_symbol":
-                return SoulClient._call("read_symbol", {"name": args.get("name", "")}) or "(not found)"
+                project_roots = room.project_roots if room else []
+                if not project_roots:
+                    return self._no_project_scope_refusal("read_symbol")
+                text, structured = SoulClient._call_full("read_symbol", {"name": args.get("name", "")})
+                if not text:
+                    return "(not found)"
+                file_path = structured.get("file", "")
+                if not self._path_in_project(file_path, project_roots):
+                    return (f"(refusing: '{args.get('name', '')}' resolved to {file_path or 'an unknown file'}, "
+                            f"outside this room's project — likely a same-name symbol in an unrelated repo "
+                            f"chitta has indexed. Not returning it.)")
+                return text
 
             elif tool_name == "search_symbols":
+                project_roots = room.project_roots if room else []
+                if not project_roots:
+                    return self._no_project_scope_refusal("search_symbols")
                 a = {"query": args.get("query", ""), "limit": int(args.get("limit", 10))}
-                return SoulClient._call("search_symbols", a) or "(no symbols found)"
+                text, structured = SoulClient._call_full("search_symbols", a)
+                if not text:
+                    return "(no symbols found)"
+                symbols = structured.get("symbols", [])
+                if not symbols:
+                    return text
+                kept = [s for s in symbols if self._path_in_project(s.get("file", ""), project_roots)]
+                dropped = len(symbols) - len(kept)
+                if not kept:
+                    return (f"(no symbols found within this room's project for '{a['query']}' — "
+                            f"{dropped} match(es) existed but belong to unrelated repos in chitta's "
+                            f"shared code index)")
+                header = f"Found {len(kept)} symbols for '{a['query']}' (this room's project"
+                header += f", {dropped} cross-project match(es) hidden)" if dropped else ")"
+                lines = [header + ":"]
+                for s in kept:
+                    lines.append(f"  {s.get('kind', '')} {s.get('name', '')} @{s.get('file', '')}:{s.get('line_start', '')}")
+                return "\n".join(lines)
 
             elif tool_name == "codebase_overview":
-                return SoulClient._call("codebase_overview", {}) or "(no overview available)"
+                a = {"project": room.project} if room and room.project else {}
+                return SoulClient._call("codebase_overview", a) or "(no overview available)"
 
             # ── Task tracking ──────────────────────────────────────────
             elif tool_name == "todo_add":
@@ -2419,7 +2571,7 @@ class RoomManager:
                                     visible_names=None) -> dict:
         """Get one participant's response with optional tool-use loop."""
         name = participant["name"]
-        soul = self._parse_soul(participant)
+        soul = self._parse_soul(participant, project=room.project)
         participant["_room_id"] = room.id
         if room.participant_tools and "_allowed_tools" not in participant:
             participant["_allowed_tools"] = room.participant_tools
@@ -2491,7 +2643,7 @@ class RoomManager:
             # Execute the tool
             tool_result = await self._execute_agent_tool(
                 tool_req["tool"], tool_req["args"], realm=realm,
-                participant_name=name,
+                participant_name=name, room=room,
             )
             if not hasattr(room, "_last_tool_calls"):
                 room._last_tool_calls = {}
@@ -2967,7 +3119,7 @@ class RoomManager:
                 # Filter participants who haven't hit their round limit (derived from committed messages)
                 active = []
                 for p in room.participants:
-                    soul = self._parse_soul(p)
+                    soul = self._parse_soul(p, project=room.project)
                     if soul and soul.max_rounds > 0:
                         committed = sum(
                             1 for m in room.messages

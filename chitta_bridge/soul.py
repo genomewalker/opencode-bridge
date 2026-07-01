@@ -38,9 +38,23 @@ class SoulClient:
 
     @classmethod
     def _call(cls, method: str, arguments: dict, timeout: float = 5.0) -> Optional[str]:
+        text, _ = cls._call_full(method, arguments, timeout)
+        return text
+
+    @classmethod
+    def _call_full(cls, method: str, arguments: dict, timeout: float = 5.0) -> tuple:
+        """Like _call, but also returns the tool's structured metadata dict.
+
+        chittad's code-intel RPCs (search_symbols, read_symbol, read_function)
+        are NOT project-scoped server-side — the store has no project filter —
+        so callers that need to exclude cross-project results must inspect the
+        structured "file"/"symbols[].file" paths here, since the rendered text
+        alone (display_path) truncates to two path segments and loses the
+        repo name.
+        """
         path = cls._socket_path()
         if not os.path.exists(path):
-            return None
+            return None, {}
         try:
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             sock.settimeout(timeout)
@@ -62,12 +76,15 @@ class SoulClient:
             sock.close()
             data = json.loads(response.decode().strip())
             result = data.get("result", {})
+            structured = result.get("structured", {})
+            if not isinstance(structured, dict):
+                structured = {}
             content = result.get("content", [])
             if content and isinstance(content, list):
-                return content[0].get("text", "")
-            return str(result)
+                return content[0].get("text", ""), structured
+            return str(result), structured
         except Exception:
-            return None
+            return None, {}
 
     @classmethod
     def recall(cls, query: str, limit: int = 5, realm: Optional[str] = None) -> Optional[str]:

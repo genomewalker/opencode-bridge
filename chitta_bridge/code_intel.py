@@ -257,14 +257,34 @@ def _post_write_refresh(paths) -> None:
 # Composite code analysis
 # ---------------------------------------------------------------------------
 
-def _code_intel(symbol: str = "", path: str = "", realm: Optional[str] = None) -> str:
+def _symbol_in_project(file_path: str, project_roots: list) -> bool:
+    """Same rule as RoomManager._path_in_project — duplicated here (not imported)
+    to keep code_intel.py free of a rooms.py dependency."""
+    if not file_path or not project_roots:
+        return True
+    try:
+        resolved = str(Path(file_path).expanduser().resolve())
+    except OSError:
+        resolved = file_path
+    return any(resolved == r or resolved.startswith(r + os.sep) for r in project_roots)
+
+
+def _code_intel(symbol: str = "", path: str = "", realm: Optional[str] = None,
+                project_roots: Optional[list] = None) -> str:
     """Composite code analysis: structure + call graph + imports + chitta memory.
 
     Smarter than tldr: fuses static analysis with chitta's knowledge graph so
     you get callers, callees, imports, and every memory chitta holds about this
     symbol — in one call, zero extra tokens spent navigating.
+
+    chittad's read_symbol/symbol_callers/symbol_callees are NOT project-scoped
+    server-side (the store has no project filter), so when project_roots is
+    given, results outside those roots are dropped rather than trusted —
+    otherwise a same-named symbol in an unrelated indexed repo could be
+    grounded as if it were part of the caller's actual codebase.
     """
     parts: list[str] = []
+    roots = project_roots or []
 
     # 1. File-level structure
     if path:
@@ -276,16 +296,48 @@ def _code_intel(symbol: str = "", path: str = "", realm: Optional[str] = None) -
             parts.append(f"## Imports\n{imports}")
 
     # 2. Symbol call graph
-    if symbol:
-        source = SoulClient._call("read_symbol", {"name": symbol})
-        if source:
-            parts.append(f"## Source: {symbol}\n{source}")
-        callers = SoulClient._call("symbol_callers", {"name": symbol})
-        if callers:
-            parts.append(f"## Callers → {symbol}\n{callers}")
-        callees = SoulClient._call("symbol_callees", {"name": symbol})
-        if callees:
-            parts.append(f"## {symbol} → Callees\n{callees}")
+    if symbol and not roots:
+        parts.append(
+            f"## Source: {symbol}\n(refusing: no project scope on this room — chittad's symbol "
+            f"index is global across every project it has ever indexed, so read_symbol/callers/"
+            f"callees results for '{symbol}' can't be trusted to belong to this room's target "
+            f"repo. Fix: attach `files` or pass `project_roots` at room creation.)"
+        )
+    elif symbol:
+        source_text, source_meta = SoulClient._call_full("read_symbol", {"name": symbol})
+        if source_text:
+            if not _symbol_in_project(source_meta.get("file", ""), roots):
+                parts.append(f"## Source: {symbol}\n(refusing: resolved to "
+                              f"{source_meta.get('file', 'an unknown file')}, outside this room's "
+                              f"project — likely a same-name symbol in an unrelated indexed repo)")
+            else:
+                parts.append(f"## Source: {symbol}\n{source_text}")
+
+        callers_text, callers_meta = SoulClient._call_full("symbol_callers", {"name": symbol})
+        if callers_text:
+            callers = callers_meta.get("callers", [])
+            if callers:
+                kept = [c for c in callers if _symbol_in_project(c.get("file", ""), roots)]
+                if not kept:
+                    parts.append(f"## Callers → {symbol}\n(all callers were in unrelated repos — hidden)")
+                else:
+                    lines = [f"  {c.get('kind', '')} {c.get('name', '')} @{c.get('file', '')}:{c.get('line_start', '')}" for c in kept]
+                    parts.append(f"## Callers → {symbol}\n" + "\n".join(lines))
+            else:
+                parts.append(f"## Callers → {symbol}\n{callers_text}")
+
+        callees_text, callees_meta = SoulClient._call_full("symbol_callees", {"name": symbol})
+        if callees_text:
+            callees = callees_meta.get("callees", [])
+            if callees:
+                kept = [c for c in callees if _symbol_in_project(c.get("file", ""), roots)]
+                if not kept:
+                    parts.append(f"## {symbol} → Callees\n(all callees were in unrelated repos — hidden)")
+                else:
+                    lines = [f"  {c.get('kind', '')} {c.get('name', '')} @{c.get('file', '')}:{c.get('line_start', '')}" for c in kept]
+                    parts.append(f"## {symbol} → Callees\n" + "\n".join(lines))
+            else:
+                parts.append(f"## {symbol} → Callees\n{callees_text}")
 
     # 3. Chitta memory recall — what the system remembers about this symbol/file
     query = " ".join(filter(None, [symbol, path]))
