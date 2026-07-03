@@ -2063,6 +2063,36 @@ async def list_tools():
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict):
+    # Long tool calls (fusion/conductor_fusion/room_run with xhigh multi-round
+    # panels) can run past the client's MCP tool idle timeout with zero output.
+    # If the client opted into progress reporting (sent a progressToken), send
+    # a heartbeat every 25s so "still thinking" activity resets its idle clock
+    # instead of looking indistinguishable from a hang.
+    _heartbeat_task = None
+    try:
+        _req_ctx = server.request_context
+        _progress_token = _req_ctx.meta.progressToken if _req_ctx.meta else None
+    except LookupError:
+        _progress_token = None
+
+    if _progress_token is not None:
+        _session = _req_ctx.session
+
+        async def _heartbeat():
+            elapsed = 0
+            while True:
+                await asyncio.sleep(25)
+                elapsed += 25
+                try:
+                    await _session.send_progress_notification(
+                        _progress_token, progress=float(elapsed),
+                        message=f"{name}: still running ({elapsed}s)…",
+                    )
+                except Exception:
+                    return
+
+        _heartbeat_task = asyncio.create_task(_heartbeat())
+
     try:
         if name in REGISTRY:
             return await REGISTRY[name].handler(arguments)
@@ -3465,6 +3495,9 @@ async def call_tool(name: str, arguments: dict):
 
     except Exception as e:
         return [TextContent(type="text", text=f"Error: {e}")]
+    finally:
+        if _heartbeat_task is not None:
+            _heartbeat_task.cancel()
 
 
 async def _run_exec_mode() -> None:
