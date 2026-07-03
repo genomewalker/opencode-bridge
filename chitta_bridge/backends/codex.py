@@ -529,6 +529,7 @@ class CodexBridge:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
                 start_new_session=True,
+                limit=2**20,
                 env=_llm_env(),
             )
             proc.stdin.close()
@@ -856,6 +857,7 @@ Set via:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=session.working_dir,
                 start_new_session=True,
+                limit=2**20,
             )
             proc.stdin.write(message.encode())
             await proc.stdin.drain()
