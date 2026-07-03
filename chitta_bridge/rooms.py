@@ -1030,9 +1030,14 @@ class RoomManager:
 
         # Opt-in framing preamble — leads the whole payload (system prompt is sent
         # first) so a benign-but-sensitive domain is legible before the task.
-        # Per-participant preamble overrides the room-level preamble.
+        # Per-participant preamble is appended after the shared room-level preamble —
+        # they compose, since conductor_fusion always sets both (shared preamble =
+        # files/task framing, per-participant = each step's subtask) and dropping
+        # either one silently discards content the caller explicitly passed.
         _preambles = getattr(room, "preambles", {})
-        _pre_text = _preambles.get(name) if name in _preambles else getattr(room, "preamble", "")
+        _shared_pre = getattr(room, "preamble", "")
+        _own_pre = _preambles.get(name, "")
+        _pre_text = "\n\n".join(p for p in (_shared_pre, _own_pre) if p)
         _pre = _resolve_preamble(_pre_text)
         if _pre:
             system_prompt = f"## Research context\n{_pre}\n\n{system_prompt}"
@@ -2296,7 +2301,8 @@ class RoomManager:
     async def _send_to_backend(self, participant: dict, message: str,
                                 system_prompt: Optional[str] = None,
                                 tools: Optional[list] = None,
-                                files: Optional[list[str]] = None) -> str:
+                                files: Optional[list[str]] = None,
+                                working_dir: Optional[str] = None) -> str:
         """Send a message to a participant's backend, returning the raw reply."""
         name = participant["name"]
         backend = participant.get("backend") or participant.get("type")
@@ -2380,6 +2386,7 @@ class RoomManager:
             else:
                 reply = await self.codex.run_task(
                     full_prompt,
+                    working_dir=working_dir,
                     model=participant.get("model"),
                     effort=participant.get("effort"),
                 )
@@ -2556,10 +2563,15 @@ class RoomManager:
                 if isinstance(resp, Exception):
                     committed.add(p["name"])
                     continue
-                if resp.get("turn_key") not in existing_turn_keys:
+                _tk = resp.get("turn_key")
+                # turn_key is None for "retryable-absent" responses (backend error,
+                # not yet poisoned) — never dedup those against each other, only
+                # real committed turns share the turn_key namespace.
+                if _tk is None or _tk not in existing_turn_keys:
                     resp["citation_score"] = self._score_citations(resp.get("content", ""))
                     room.messages.append(resp)
-                    existing_turn_keys.add(resp["turn_key"])
+                    if _tk is not None:
+                        existing_turn_keys.add(_tk)
                     new_responses.append(resp)
                 committed.add(p["name"])
             remaining = [p for p in remaining if p["name"] not in committed]
@@ -2620,13 +2632,14 @@ class RoomManager:
         allowed_tools = set(soul.tools) if soul else set()
 
         room_files = room.files or None
+        working_dir = room.project_roots[0] if room.project_roots else None
         reply = ""
         for turn in range(max_tool_turns + 1):
             try:
                 if turn == 0:
-                    reply = await self._send_to_backend(participant, user_msg, system_prompt, files=room_files)
+                    reply = await self._send_to_backend(participant, user_msg, system_prompt, files=room_files, working_dir=working_dir)
                 else:
-                    reply = await self._send_to_backend(participant, user_msg, system_prompt)
+                    reply = await self._send_to_backend(participant, user_msg, system_prompt, working_dir=working_dir)
             except Exception as e:
                 reply = f"[error: {e}]"
                 break
@@ -2684,7 +2697,7 @@ class RoomManager:
                         f"This is retry {_cit_retries + 1}/2."
                     )
                     try:
-                        _retry_reply = await self._send_to_backend(participant, _retry_prompt, system_prompt)
+                        _retry_reply = await self._send_to_backend(participant, _retry_prompt, system_prompt, working_dir=working_dir)
                         _retry_final = self._extract_final_response(_retry_reply) or _retry_reply
                         if _retry_final.strip() and not _retry_final.startswith("[error:"):
                             final = _retry_final
@@ -3163,10 +3176,12 @@ class RoomManager:
                         _vnames = _vis if (_vis is not None and len(_vis) > 0) else None
                         resp = await self._participant_respond(room, p, round_num=round_num,
                                                                blind=_blind, visible_names=_vnames)
-                        if resp.get("turn_key") not in existing_turn_keys:
+                        _tk = resp.get("turn_key")
+                        if _tk is None or _tk not in existing_turn_keys:
                             resp["citation_score"] = self._score_citations(resp.get("content", ""))
                             room.messages.append(resp)
-                            existing_turn_keys.add(resp["turn_key"])
+                            if _tk is not None:
+                                existing_turn_keys.add(_tk)
                             new_responses.append(resp)
                 else:
                     coros = []
@@ -3177,9 +3192,12 @@ class RoomManager:
                         coros.append(self._participant_respond(room, p, round_num=round_num,
                                                                blind=_blind, visible_names=_vnames))
                     for resp in await asyncio.gather(*coros):
-                        if resp.get("turn_key") not in existing_turn_keys:
+                        _tk = resp.get("turn_key")
+                        if _tk is None or _tk not in existing_turn_keys:
                             resp["citation_score"] = self._score_citations(resp.get("content", ""))
                             room.messages.append(resp)
+                            if _tk is not None:
+                                existing_turn_keys.add(_tk)
                             new_responses.append(resp)
 
                 # Reconcile turn_counts from committed messages (single source of truth)

@@ -142,7 +142,7 @@ class TestPerParticipantPreamble:
         self.tmp = Path(tempfile.mkdtemp())
         self.rm = _make_rm(self.tmp)
 
-    def test_preamble_override_injected_for_named_participant(self):
+    def test_preamble_composes_shared_and_own_for_named_participant(self):
         room = DiscussionRoom(id="p-test", topic="t",
                               participants=[{"name": "Alice", "backend": "claude"}],
                               preamble="shared preamble",
@@ -159,7 +159,7 @@ class TestPerParticipantPreamble:
 
         assert "system" in captured
         assert "alice specific" in captured["system"]
-        assert "shared preamble" not in captured["system"]
+        assert "shared preamble" in captured["system"]
 
     def test_shared_preamble_used_when_no_override(self):
         room = DiscussionRoom(id="p-test2", topic="t",
