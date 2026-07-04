@@ -223,10 +223,30 @@ def _finalize(name: str, result: str) -> list:
 
 
 async def _h_discuss(arguments: dict) -> list:
-    result = await codex_bridge.send_message(
-        message=arguments["message"],
-        images=arguments.get("files"),
-    )
+    model = arguments.get("model")
+    backend = arguments.get("backend")
+    if not backend and model:
+        try:
+            backend = _infer_backend("", model)
+        except ValueError:
+            backend = None
+    backend = backend or "codex"
+
+    if backend == "claude":
+        resolved_model = _discover_claude_shorthands().get((model or "").lower(), model) if model else None
+        result = await rooms._run_claude_p(
+            arguments["message"],
+            files=arguments.get("files"),
+            model=resolved_model,
+            effort=arguments.get("effort"),
+        )
+    elif backend == "local":
+        return _finalize("discuss", "[error: discuss doesn't support backend='local' — use fusion or room_create instead]")
+    else:
+        result = await codex_bridge.send_message(
+            message=arguments["message"],
+            images=arguments.get("files"),
+        )
     _threading.Thread(target=distill_event, args=("checkpoint", result, {}), daemon=True).start()
     return _finalize("discuss", result)
 
@@ -238,9 +258,9 @@ register("discuss", {
         "message":  {"type": "string",  "description": "Your message or question"},
         "files":    {"type": "array", "items": {"type": "string"}, "description": "File paths to attach"},
         "domain":   {"type": "string",  "description": "Domain hint (e.g. 'bioinformatics', 'security')"},
-        "model":    {"type": "string",  "description": f"Model override (default: {_REGISTRY_CODEX_DEFAULT})"},
+        "model":    {"type": "string",  "description": f"Model override (default: {_REGISTRY_CODEX_DEFAULT}). Claude aliases (fable, opus, sonnet, haiku) auto-route to backend='claude'."},
         "effort":   {"type": "string",  "description": "Effort: low, medium, high, xhigh (default: xhigh)"},
-        "backend":  {"type": "string",  "description": "codex (default)"},
+        "backend":  {"type": "string",  "description": "codex (default) or claude. Inferred from model if omitted."},
     },
     "required": ["message"],
 })(_h_discuss)
@@ -438,16 +458,16 @@ async def list_tools():
         # ── Intent-shaped tools (backend is an internal detail) ─────────────────
         Tool(
             name="discuss",
-            description=f"Ask a question or start a discussion. Routes to {_codex_default} by default.",
+            description=f"Ask a question or start a discussion. Routes to {_codex_default} by default; pass backend='claude' (or a claude model alias like fable/opus/sonnet/haiku) to route to Claude instead.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "message":  {"type": "string",  "description": "Your message or question"},
                     "files":    {"type": "array", "items": {"type": "string"}, "description": "File paths to attach"},
                     "domain":   {"type": "string",  "description": "Domain hint (e.g. 'bioinformatics', 'security')"},
-                    "model":    {"type": "string",  "description": f"Model override (default: {_codex_default})"},
+                    "model":    {"type": "string",  "description": f"Model override (default: {_codex_default}). Claude aliases (fable, opus, sonnet, haiku) auto-route to backend='claude'."},
                     "effort":   {"type": "string",  "description": "Effort: low, medium, high, xhigh (default: xhigh)"},
-                    "backend":  {"type": "string",  "description": "codex (default)"},
+                    "backend":  {"type": "string",  "description": "codex (default) or claude. Inferred from model if omitted."},
                 },
                 "required": ["message"],
             },
