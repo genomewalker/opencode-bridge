@@ -13,6 +13,7 @@ log = logging.getLogger("embed-server")
 MODEL_ID   = os.getenv("EMBED_MODEL",  "nomic-ai/nomic-embed-text-v1.5")
 DEVICE     = os.getenv("EMBED_DEVICE", "cuda")
 BATCH_SIZE = int(os.getenv("EMBED_BATCH", "512"))
+IDLE_TIMEOUT = int(os.getenv("EMBED_IDLE_TIMEOUT", "900"))  # on-demand: release GPU after N idle seconds
 
 log.info(f"Loading {MODEL_ID} on {DEVICE} ...")
 from sentence_transformers import SentenceTransformer
@@ -22,12 +23,27 @@ log.info("Model ready.")
 
 app = FastAPI()
 
+import threading
+_last_activity = time.monotonic()
+
+def _touch():
+    global _last_activity
+    _last_activity = time.monotonic()
+
+def _idle_watchdog():
+    while IDLE_TIMEOUT > 0:
+        time.sleep(30)
+        if time.monotonic() - _last_activity > IDLE_TIMEOUT:
+            log.info(f"idle {IDLE_TIMEOUT}s — releasing GPU, exiting")
+            os._exit(0)
+
 class EmbedRequest(BaseModel):
     model: str = ""
     input: List[str]
 
 @app.post("/api/embed")
 def embed(req: EmbedRequest):
+    _touch()
     t0 = time.time()
     vecs = model.encode(req.input, batch_size=BATCH_SIZE, normalize_embeddings=True,
                         show_progress_bar=False)
@@ -47,4 +63,5 @@ def ps():
 
 if __name__ == "__main__":
     port = int(os.getenv("EMBED_PORT", "11436"))
+    threading.Thread(target=_idle_watchdog, daemon=True).start()
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")

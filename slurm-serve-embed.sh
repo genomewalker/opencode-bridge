@@ -9,7 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PORT="${EMBED_PORT:-11436}"
 PARTITION="${SLURM_PARTITION:-compregular}"
 GRES="${SLURM_GRES:-gpu:a100:1}"
-TIME="${SLURM_TIME:-12:00:00}"
+TIME="${SLURM_TIME:-02:00:00}"   # on-demand backstop; embed-server idle-exits well before this
 LOG_DIR="${CHITTA_BRIDGE_LOG_DIR:-$HOME/.chitta-bridge/logs}"
 URL_DIR="${CHITTA_BRIDGE_URL_DIR:-$HOME/.chitta-bridge/endpoints}"
 
