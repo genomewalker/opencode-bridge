@@ -68,7 +68,7 @@ trap cleanup EXIT TERM INT
 
 export OLLAMA_MODELS="${OLLAMA_MODELS}"
 export OLLAMA_HOST="0.0.0.0:${OLLAMA_PORT}"
-export OLLAMA_KEEP_ALIVE="-1"
+export OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-15m}"   # finite: model unloads when idle so the job can release the GPU
 
 echo "[\$(date)] Starting ollama serve on \${NODE}:${OLLAMA_PORT} for model ${MODEL}"
 "${OLLAMA_BIN}" serve &> "${LOG_DIR}/ollama-serve-${MODEL_SAFE}-\${SLURM_JOB_ID}.log" &
@@ -91,8 +91,18 @@ echo "[\$(date)] Endpoint written: \${URL}/v1 -> \${URL_FILE}"
 echo "[\$(date)] Ensuring model ${MODEL} is available"
 "${OLLAMA_BIN}" pull "${MODEL}" 2>&1 || echo "[\$(date)] Pull failed or model already present"
 
-echo "[\$(date)] Ready. Waiting for SLURM job to end."
-wait \$SERVE_PID
+IDLE_RELEASE=${OLLAMA_IDLE_RELEASE:-1800}   # on-demand: release GPU after this many idle seconds
+echo "[\$(date)] Ready. Releasing GPU after \${IDLE_RELEASE}s idle (on-demand)."
+last_active=\$(date +%s)
+while kill -0 \$SERVE_PID 2>/dev/null; do
+    sleep 60
+    if "${OLLAMA_BIN}" ps 2>/dev/null | grep -qi "${MODEL}"; then
+        last_active=\$(date +%s)
+    elif [ \$(( \$(date +%s) - last_active )) -ge \$IDLE_RELEASE ]; then
+        echo "[\$(date)] idle \${IDLE_RELEASE}s — releasing GPU"
+        break
+    fi
+done
 EOF
 
 chmod +x "$JOB_SCRIPT"
