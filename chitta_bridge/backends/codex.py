@@ -529,7 +529,7 @@ class CodexBridge:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
                 start_new_session=True,
-                limit=2**20,
+                limit=2**24,
                 env=_llm_env(),
             )
             proc.stdin.close()
@@ -558,6 +558,11 @@ class CodexBridge:
                     await proc.wait()
                     stderr_task.cancel()
                     return f"Model stalled — no output for {stall_timeout}s", 1
+                except ValueError:
+                    # JSONL event exceeded the pipe limit; readline reset the
+                    # buffer. The reply is in the -o file, so skip this line.
+                    first_line = False
+                    continue
                 if not line:
                     break
                 stdout_parts.append(line.decode(errors="replace"))
@@ -623,7 +628,7 @@ class CodexBridge:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
                 start_new_session=True,
-                limit=2**20,
+                limit=2**24,
                 env=_llm_env(),
             )
             proc.stdin.write(stdin_data.encode())
@@ -650,6 +655,11 @@ class CodexBridge:
                     await proc.wait()
                     stderr_task.cancel()
                     return f"Model stalled — no output for {stall_timeout}s", 1
+                except ValueError:
+                    # JSONL event exceeded the pipe limit; readline reset the
+                    # buffer. The reply is in the -o file, so skip this line.
+                    first_line = False
+                    continue
                 if not line:
                     break
                 stdout_parts.append(line.decode(errors="replace"))
@@ -710,6 +720,30 @@ class CodexBridge:
                 continue
         return "\n".join(reply_parts), thread_id
 
+    @staticmethod
+    def _new_last_message_file() -> str:
+        """Allocate a temp path for codex --output-last-message (-o)."""
+        import tempfile
+        fd, path = tempfile.mkstemp(prefix="codex-last-", suffix=".txt")
+        os.close(fd)
+        return path
+
+    @staticmethod
+    def _read_last_message(path: str, fallback: str) -> str:
+        """Return codex's -o final-message file (authoritative, immune to the
+        stdout pipe-size limit that truncates huge agent_message events);
+        fall back to JSONL-parsed text if the file is empty/missing."""
+        try:
+            text = Path(path).read_text(errors="replace").strip()
+        except OSError:
+            text = ""
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        return text or fallback
+
     async def _run_rescue_background(self, job_id: str) -> None:
         """Coroutine that runs a rescue job in the background and updates its state."""
         job = self.jobs[job_id]
@@ -725,13 +759,15 @@ class CodexBridge:
         args.extend(["-c", f'model_reasoning_effort="{effort}"'])
         if job.sandbox:
             args.extend(["--sandbox", job.sandbox])
-        args.extend(["--full-auto", "--json", "-"])
+        lastmsg = self._new_last_message_file()
+        args.extend(["--full-auto", "--json", "-o", lastmsg, "-"])
 
         try:
             output, code = await self._run_codex_exec_stdin(
                 args, job.task, job.working_dir, timeout=1800, stall_timeout=120
             )
             reply, thread_id = self._parse_codex_jsonl(output)
+            reply = self._read_last_message(lastmsg, reply)
             job.status = "completed" if code == 0 else "failed"
             job.result = reply or output or "(no output)"
             job.codex_session_id = thread_id
@@ -844,6 +880,8 @@ Set via:
             for img in images:
                 args.extend(["--image", img])
 
+        lastmsg = self._new_last_message_file()
+        args.extend(["-o", lastmsg])
         args.append("--json")
         args.append("-")
 
@@ -857,7 +895,7 @@ Set via:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=session.working_dir,
                 start_new_session=True,
-                limit=2**20,
+                limit=2**24,
             )
             proc.stdin.write(message.encode())
             await proc.stdin.drain()
@@ -888,6 +926,11 @@ Set via:
                     await proc.wait()
                     stderr_task.cancel()
                     return f"Model stalled — no output for {stall_timeout}s"
+                except ValueError:
+                    # JSONL event exceeded the pipe limit; readline reset the
+                    # buffer. The reply is in the -o file, so skip this line.
+                    first_line = False
+                    continue
                 if not line:
                     break
                 stdout_parts.append(line.decode(errors="replace"))
@@ -903,6 +946,7 @@ Set via:
             output = "".join(stdout_parts)
             if proc.returncode != 0:
                 err = stderr_raw.decode(errors="replace").strip()
+                self._read_last_message(lastmsg, "")  # unlink temp
                 return f"Error: {err or output}"
         except asyncio.TimeoutError:
             if proc:
@@ -946,7 +990,7 @@ Set via:
             except json.JSONDecodeError:
                 continue
 
-        reply = "\n".join(reply_parts)
+        reply = self._read_last_message(lastmsg, "\n".join(reply_parts))
         if reply:
             session.add_message("assistant", reply)
             session.save(self.sessions_dir / f"{sid}.json")
@@ -980,12 +1024,16 @@ Set via:
     ) -> str:
         """Run a one-off task without session management."""
         args = self._build_exec_args(model, effort, sandbox=sandbox, full_auto=full_auto)
+        lastmsg = self._new_last_message_file()
+        args[1:1] = ["-o", lastmsg]  # after "exec", before the trailing "-"
         cwd = working_dir or os.getcwd()
         output, code = await self._run_codex_exec_stdin(args, task, cwd)
         self._cleanup_stale_arg0_dirs()
         if code != 0:
+            self._read_last_message(lastmsg, "")  # unlink temp
             return f"Error: {output}"
         reply, thread_id = self._parse_codex_jsonl(output)
+        reply = self._read_last_message(lastmsg, reply)
         result = reply or output or "No response received"
         if thread_id:
             result += f"\n\n(Codex session: {thread_id} — resume with: codex resume {thread_id})"

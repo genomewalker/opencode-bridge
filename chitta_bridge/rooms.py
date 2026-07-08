@@ -266,6 +266,7 @@ class RoomManager:
         self.rooms_dir.mkdir(parents=True, exist_ok=True)
         self._room_locks: dict[str, asyncio.Lock] = {}
         self._endpoint_locks: dict[str, asyncio.Lock] = {}
+        self._model_start_locks: dict[str, asyncio.Lock] = {}
         self._load_rooms()
 
     def _room_lock(self, room_id: str) -> asyncio.Lock:
@@ -281,6 +282,54 @@ class RoomManager:
             lock = asyncio.Lock()
             self._endpoint_locks[url] = lock
         return lock
+
+    def _model_start_lock(self, model: str) -> asyncio.Lock:
+        lock = self._model_start_locks.get(model)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._model_start_locks[model] = lock
+        return lock
+
+    async def _ensure_local_endpoint(self, model: str, wait_s: int = 90) -> list[dict]:
+        """On-demand GPU: if no live endpoint serves `model`, submit
+        `chitta-gpu start <model>` and poll discovery up to wait_s seconds.
+        Serialised per-model so concurrent participants don't double-submit.
+        Returns live nodes (empty if the SLURM job is still PENDING).
+        ceiling: fixed 90s wait; upgrade: thread wait_s from room config.
+        """
+        import subprocess
+        loop = asyncio.get_event_loop()
+
+        def _live() -> list[dict]:
+            return [n for n in GpuNodeDiscovery.discover()
+                    if not GpuNodeDiscovery._is_cooled_down(n["base_url"])]
+
+        async with self._model_start_lock(model):
+            live = await loop.run_in_executor(None, _live)  # another coro may have started it
+            if any(model in (n.get("models") or []) for n in live):
+                return live
+            launcher = shutil.which("chitta-gpu")
+            cmd = ([launcher, "start", model] if launcher
+                   else [sys.executable, "-m", "chitta_bridge.gpu_serve", "start", model])
+
+            def _kick() -> None:
+                # cmd_start submits the sbatch job before its own long wait, so a
+                # short timeout captures the submission; the idle watchdog releases
+                # the GPU later. TimeoutExpired here means "submitted, still coming up".
+                try:
+                    subprocess.run(cmd, timeout=15, capture_output=True)
+                except subprocess.TimeoutExpired:
+                    pass
+
+            await loop.run_in_executor(None, _kick)
+            deadline = wait_s
+            while deadline > 0:
+                live = await loop.run_in_executor(None, _live)
+                if any(model in (n.get("models") or []) for n in live):
+                    return live
+                await asyncio.sleep(5)
+                deadline -= 5
+            return await loop.run_in_executor(None, _live)
 
     def _load_rooms(self):
         for path in self.rooms_dir.glob("*.json"):
@@ -2348,7 +2397,13 @@ class RoomManager:
 
             nodes = await asyncio.get_event_loop().run_in_executor(None, GpuNodeDiscovery.discover)
             live = [n for n in nodes if not GpuNodeDiscovery._is_cooled_down(n["base_url"])]
+            attempted_start = False
+            if not live and base_model:
+                attempted_start = True
+                live = await self._ensure_local_endpoint(base_model)
             if not live:
+                if attempted_start:
+                    return f"[local model '{base_model}' warming up (GPU pending) — retry shortly]"
                 return "[error: no local model endpoint found]"
 
             last_err = "[error: all local nodes failed]"
@@ -2437,6 +2492,10 @@ class RoomManager:
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
                 env=_llm_env(),
+                # --output-format json emits the whole reply on one line; the
+                # asyncio default 64KB readline limit truncates long answers into
+                # a ValueError. 16MB covers any real text reply.
+                limit=2**24,
             )
             proc.stdin.write(full_prompt.encode())
             await proc.stdin.drain()
