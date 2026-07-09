@@ -424,7 +424,17 @@ async def _h_codex_review(arguments: dict) -> list:
 })
 async def _h_room_read(arguments: dict) -> list:
     """Read the transcript of a multi-model room (e.g. a fusion or discussion room)."""
-    result = rooms.read(room_id=arguments.get("room_id", ""), last_n=arguments.get("last_n"))
+    _rr_id = arguments.get("room_id", "")
+    result = rooms.read(room_id=_rr_id, last_n=arguments.get("last_n"))
+    # Append the background synthesis (dual_fusion / conductor_fusion) if present —
+    # from the in-memory task record, else the durable <room_id>.synthesis file.
+    _rr_bg = _bg_rooms.get(_rr_id)
+    if _rr_bg and _rr_bg.get("synthesis"):
+        result += f"\n\n---\n## Synthesis\n{_rr_bg['synthesis']}"
+    else:
+        _synth_path = rooms.rooms_dir / f"{_rr_id}.synthesis"
+        if _synth_path.exists():
+            result += f"\n\n---\n## Synthesis\n{_synth_path.read_text()}"
     return _finalize("room_read", result)
 
 
