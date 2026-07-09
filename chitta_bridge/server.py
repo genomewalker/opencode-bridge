@@ -123,6 +123,9 @@ server = Server("chitta-bridge")
 
 # Background conductor_fusion tasks: room_id → {status, rounds_done, rounds_total, synthesis, error}
 _bg_rooms: dict[str, dict] = {}
+# Strong refs to detached fusion tasks so they aren't GC'd mid-run (a dropped
+# MCP request must not cancel or collect an in-flight background synthesis).
+_BG_TASKS: set = set()
 
 
 async def _run_conductor_bg(
@@ -143,6 +146,94 @@ async def _run_conductor_bg(
     except Exception as _e:
         _bg_rooms[room_id]["status"] = "error"
         _bg_rooms[room_id]["error"] = str(_e)
+
+
+async def _run_dual_fusion_bg(
+    base: str, sparse_id: str, dense_id: str, dense_rounds: int,
+    challenge: bool, adversarial: bool, judge: dict, judge_raw: str,
+) -> str:
+    """Run dual_fusion's two rooms + cross-synthesis. Status/result are keyed to
+    the (real) dense room id so room_status/room_read retrieve them unchanged;
+    the synthesis is also written to <dense_id>.synthesis so a dropped MCP
+    transport never loses the result. Never raises. Returns the assembled result.
+    """
+    try:
+        await asyncio.gather(
+            rooms.run_rounds(sparse_id, rounds=1, sparse_topology=True),
+            rooms.run_rounds(dense_id,  rounds=dense_rounds, challenge=challenge),
+        )
+        if dense_id in _bg_rooms:
+            _bg_rooms[dense_id]["rounds_done"] = dense_rounds
+            _bg_rooms[dense_id]["status"] = "synthesizing"
+        _sparse_tx = rooms._build_annotated_transcript(rooms.rooms[sparse_id])
+        _dense_tx  = rooms._build_annotated_transcript(rooms.rooms[dense_id])
+        _adversarial_block = (
+            "\nAfter completing the five sections, add:\n"
+            "### Minority reading\nThe strongest alternative conclusion a reasonable reader could "
+            "reach from the combined evidence.\n"
+            "### Decision bet\nThe single most critical unverified assumption both rooms share.\n"
+        ) if adversarial else ""
+        _synth_prompt = (
+            f"You are a cross-room synthesizer. Two rooms ran the same prompt with the same participants "
+            f"but different topologies.\n\n"
+            f"**SPARSE ROOM** (`{sparse_id}`) — independent sampling, no cross-talk:\n"
+            f"Participants answered without seeing each other. Positions are statistically independent.\n\n"
+            f"{_sparse_tx}\n\n"
+            f"---\n\n"
+            f"**DENSE ROOM** (`{dense_id}`) — full debate topology, {dense_rounds} round(s):\n"
+            f"Participants read each other's responses and could challenge, refine, or concede.\n\n"
+            f"{_dense_tx}\n\n"
+            f"---\n\n"
+            f"## Cross-Room Synthesis\n\n"
+            f"### 1. Double-confirmed claims\n"
+            f"Claims present in BOTH rooms — independently reached AND debate-tested. "
+            f"Highest epistemic weight. Distinguish grounded (cited) from asserted.\n\n"
+            f"### 2. Sparse-only insights\n"
+            f"Positions from the sparse room that debate pressure crowded out or drove to premature consensus. "
+            f"What did cross-talk lose?\n\n"
+            f"### 3. Dense-only refinements\n"
+            f"Claims sharpened or discovered through challenge that neither participant would have reached alone. "
+            f"What did debate add?\n\n"
+            f"### 4. Final integrated answer\n"
+            f"The strongest single answer drawing on all three categories.\n\n"
+            f"### 5. Open questions\n"
+            f"What remains unresolved across both rooms?"
+            f"{_adversarial_block}"
+        )
+        _backend = judge.get("backend", "claude")
+        try:
+            if _backend == "claude":
+                _reply = await rooms._run_claude_p(
+                    _synth_prompt, model=judge.get("model"), effort=judge.get("effort"))
+            elif _backend == "codex":
+                _reply = await codex_bridge.run_task(
+                    _synth_prompt, model=judge.get("model"), effort=judge.get("effort"))
+            elif _backend == "local":
+                _reply = await rooms.synthesize(sparse_id, synthesizer=judge)
+            else:
+                _reply = f"[error: unknown judge backend {_backend!r}]"
+        except Exception as _je:
+            _reply = f"[cross-synthesis error: {_je}]"
+        _threading.Thread(target=distill_event, args=("room_synth", _reply, {}), daemon=True).start()
+        _out = (
+            f"[dual_fusion:{base}]\n"
+            f"Sparse room: {sparse_id} · Dense room: {dense_id}\n\n"
+            f"## Cross-Room Synthesis by {judge.get('name', judge_raw)}\n\n"
+            f"{_reply}"
+        )
+        try:
+            (rooms.rooms_dir / f"{dense_id}.synthesis").write_text(_out)
+        except OSError:
+            pass
+        if dense_id in _bg_rooms:
+            _bg_rooms[dense_id]["status"] = "done"
+            _bg_rooms[dense_id]["synthesis"] = _out
+        return _out
+    except Exception as _e:
+        if dense_id in _bg_rooms:
+            _bg_rooms[dense_id]["status"] = "error"
+            _bg_rooms[dense_id]["error"] = str(_e)
+        return f"[dual_fusion error: {_e}]"
 
 # ── Registry-backed tool handlers ───────────────────────────────────────────
 # Single source of truth for schema + handler. list_tools() iterates REGISTRY;
@@ -661,12 +752,22 @@ async def list_tools():
                         "type": "boolean",
                         "description": "Include majority/minority split in final synthesis (default: false).",
                     },
-                    "topic": {"type": "string", "description": "Short label."},
+                "topic": {"type": "string", "description": "Short label."},
                     "files": {
                         "type": "array", "items": {"type": "string"},
                         "description": "File/directory paths to include as context (same budget as fusion).",
                     },
                     "preamble": {"type": "string", "description": "Framing prepended to all participant prompts."},
+                    "background": {
+                        "type": "boolean",
+                        "description": (
+                            "Run detached and return immediately with room ids; poll room_status "
+                            "and read room_read(dense_room) when done (synthesis also saved to "
+                            "<dense_room>.synthesis). Default: true — a multi-round run takes minutes "
+                            "and would otherwise drop when the MCP transport idles out. "
+                            "Set false to block until synthesis is ready (only for short runs)."
+                        ),
+                    },
                 },
                 "required": ["prompt"],
             },
@@ -2333,78 +2434,36 @@ async def call_tool(name: str, arguments: dict):
                                participants=_copy.deepcopy(_df_norm), participant_tools=["all"], preamble=_df_preamble)
             await rooms.create(room_id=_df_dense_id,  topic=_df_topic,
                                participants=_copy.deepcopy(_df_norm), participant_tools=["all"], preamble=_df_preamble)
-            await asyncio.gather(
-                rooms.run_rounds(_df_sparse_id, rounds=1, sparse_topology=True),
-                rooms.run_rounds(_df_dense_id,  rounds=_df_dense_rounds, challenge=_df_challenge),
-            )
 
-            # Build combined transcript for cross-synthesis
-            _sparse_room = rooms.rooms[_df_sparse_id]
-            _dense_room  = rooms.rooms[_df_dense_id]
-            _sparse_tx   = rooms._build_annotated_transcript(_sparse_room)
-            _dense_tx    = rooms._build_annotated_transcript(_dense_room)
-            _adversarial_block = (
-                "\nAfter completing the five sections, add:\n"
-                "### Minority reading\nThe strongest alternative conclusion a reasonable reader could "
-                "reach from the combined evidence.\n"
-                "### Decision bet\nThe single most critical unverified assumption both rooms share.\n"
-            ) if _df_adversarial else ""
-            _df_synth_prompt = (
-                f"You are a cross-room synthesizer. Two rooms ran the same prompt with the same participants "
-                f"but different topologies.\n\n"
-                f"**SPARSE ROOM** (`{_df_sparse_id}`) — independent sampling, no cross-talk:\n"
-                f"Participants answered without seeing each other. Positions are statistically independent.\n\n"
-                f"{_sparse_tx}\n\n"
-                f"---\n\n"
-                f"**DENSE ROOM** (`{_df_dense_id}`) — full debate topology, {_df_dense_rounds} round(s):\n"
-                f"Participants read each other's responses and could challenge, refine, or concede.\n\n"
-                f"{_dense_tx}\n\n"
-                f"---\n\n"
-                f"## Cross-Room Synthesis\n\n"
-                f"### 1. Double-confirmed claims\n"
-                f"Claims present in BOTH rooms — independently reached AND debate-tested. "
-                f"Highest epistemic weight. Distinguish grounded (cited) from asserted.\n\n"
-                f"### 2. Sparse-only insights\n"
-                f"Positions from the sparse room that debate pressure crowded out or drove to premature consensus. "
-                f"What did cross-talk lose?\n\n"
-                f"### 3. Dense-only refinements\n"
-                f"Claims sharpened or discovered through challenge that neither participant would have reached alone. "
-                f"What did debate add?\n\n"
-                f"### 4. Final integrated answer\n"
-                f"The strongest single answer drawing on all three categories.\n\n"
-                f"### 5. Open questions\n"
-                f"What remains unresolved across both rooms?"
-                f"{_adversarial_block}"
-            )
-            _df_backend = _df_judge.get("backend", "claude")
-            try:
-                if _df_backend == "claude":
-                    _df_reply = await rooms._run_claude_p(
-                        _df_synth_prompt,
-                        model=_df_judge.get("model"),
-                        effort=_df_judge.get("effort"),
-                    )
-                elif _df_backend == "codex":
-                    _df_reply = await codex_bridge.run_task(
-                        _df_synth_prompt,
-                        model=_df_judge.get("model"),
-                        effort=_df_judge.get("effort"),
-                    )
-                elif _df_backend == "local":
-                    _df_reply = await rooms.synthesize(
-                        _df_sparse_id, synthesizer=_df_judge,
-                    )
-                else:
-                    _df_reply = f"[error: unknown judge backend {_df_backend!r}]"
-            except Exception as _dfe:
-                _df_reply = f"[cross-synthesis error: {_dfe}]"
-            _threading.Thread(target=distill_event, args=("room_synth", _df_reply, {}), daemon=True).start()
-            result = (
-                f"[dual_fusion:{_df_base}]\n"
-                f"Sparse room: {_df_sparse_id} · Dense room: {_df_dense_id}\n\n"
-                f"## Cross-Room Synthesis by {_df_judge.get('name', _df_judge_raw)}\n\n"
-                f"{_df_reply}"
-            )
+            # Background by default: a multi-round dual_fusion runs for minutes and
+            # would otherwise drop when the client's MCP transport idles out, losing
+            # the synthesis. The detached task persists to <dense_id>.synthesis;
+            # retrieve via room_status / room_read. Pass background=false to block.
+            _df_background = arguments.get("background", True)
+            _bg_rooms[_df_dense_id] = {
+                "status": "running", "rounds_done": 0, "rounds_total": _df_dense_rounds,
+                "synthesis": None, "error": None,
+            }
+            if _df_background:
+                _df_task = asyncio.create_task(_run_dual_fusion_bg(
+                    _df_base, _df_sparse_id, _df_dense_id, _df_dense_rounds,
+                    _df_challenge, _df_adversarial, _df_judge, _df_judge_raw,
+                ))
+                _BG_TASKS.add(_df_task)
+                _df_task.add_done_callback(_BG_TASKS.discard)
+                result = (
+                    f"[dual_fusion:{_df_base}] started in background.\n"
+                    f"Sparse room: {_df_sparse_id} · Dense room: {_df_dense_id}\n"
+                    f"Dense rounds: {_df_dense_rounds}. Judge: {_df_judge.get('name', _df_judge_raw)}.\n\n"
+                    f"Poll: `room_status {_df_dense_id}` for progress; "
+                    f"`room_read {_df_dense_id}` when done for the cross-synthesis "
+                    f"(also saved to {_df_dense_id}.synthesis)."
+                )
+            else:
+                result = await _run_dual_fusion_bg(
+                    _df_base, _df_sparse_id, _df_dense_id, _df_dense_rounds,
+                    _df_challenge, _df_adversarial, _df_judge, _df_judge_raw,
+                )
         elif name == "conductor_fusion":
             _cf_workflow_raw = arguments.get("workflow", "[]")
             if isinstance(_cf_workflow_raw, str):
