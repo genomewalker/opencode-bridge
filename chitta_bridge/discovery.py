@@ -130,6 +130,9 @@ def _discover_codex_shorthands() -> "dict[str, str]":
                 if m2:
                     out["gpt" + m2.group(1).replace("-", ".")] = slug  # "gpt5.4mini" → "gpt5.4.mini" — acceptable alias
                     out["gpt" + m2.group(1).replace("-", "")] = slug   # "gpt54mini"
+                m3 = re.match(r".*-([a-z]{2,})$", slug)
+                if m3:
+                    out.setdefault(m3.group(1), slug)  # bare codename: sol, terra, luna
         else:
             # No cache — fall back to single alias set for default model
             out[default_model] = default_model
@@ -181,7 +184,7 @@ def _normalize_participant_shorthands(plist: list) -> list:
             if backend == "local":
                 # local:model:tag[:effort] — model may contain colons (e.g. gemma4:26b)
                 # effort is the last segment only if it matches a known effort keyword
-                _EFFORT_KEYS = {"low", "medium", "high", "xhigh", "max"}
+                _EFFORT_KEYS = {"low", "medium", "high", "xhigh", "max", "ultra"}
                 rest = parts[1:]
                 effort = rest[-1].lower() if len(rest) > 1 and rest[-1].lower() in _EFFORT_KEYS else None
                 model = ":".join(rest[:-1] if effort else rest)

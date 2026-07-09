@@ -1099,7 +1099,9 @@ Set via:
                 return f"Error: {output}"
             return output or "Review complete"
 
-    CODEX_EFFORTS = ("low", "medium", "high", "xhigh")
+    # ceiling: static list, not per-model; `ultra` exists only on sol/terra
+    # (luna tops out at max) — codex itself rejects/degrades an unsupported pair
+    CODEX_EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
 
     @staticmethod
     def _apply_codex_policy(model: Optional[str], effort: Optional[str]) -> tuple:

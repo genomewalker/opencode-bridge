@@ -22,7 +22,7 @@ STATE_DIRS = {
     "rooms": CONFIG_DIR / "rooms",
 }
 DEFAULT_GPU_URL_DIR = str(CONFIG_DIR / "endpoints")
-CODEX_EFFORTS = {"low", "medium", "high", "xhigh"}
+CODEX_EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra"}
 CODEX_SANDBOXES = {"read-only", "workspace-write", "danger-full-access"}
 CURRENT_SCHEMA_VERSION = 1
 

@@ -210,7 +210,7 @@ def _handle_list_models() -> list:
         lines.append(f"    aliases: {', '.join(aliases)}")
         lines.append(f"    shorthand examples: codex:{aliases[0]}, codex:{aliases[0]}:high")
 
-    lines.append("\n_Effort levels: low · medium · high · xhigh · max_")
+    lines.append("\n_Effort levels: low · medium · high · xhigh · max · ultra (ultra: codex sol/terra only)_")
     lines.append("_Specify as `backend:alias:effort`, e.g. `claude:opus:xhigh` or `codex:gpt5.5:high`_")
     return "\n".join(lines)
 
@@ -2677,7 +2677,7 @@ async def call_tool(name: str, arguments: dict):
             #   "claude" or "claude/model" → backend=claude,
             #   bare string → check existing sessions (local, codex) by ID,
             #   else → backend=claude
-            _EFFORT_VALUES = {"low", "medium", "high", "xhigh", "max"}
+            _EFFORT_VALUES = {"low", "medium", "high", "xhigh", "max", "ultra"}
             _CLAUDE_SHORTHANDS = _discover_claude_shorthands()
             _CODEX_SHORTHANDS  = _discover_codex_shorthands()
             normalized = []
