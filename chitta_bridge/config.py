@@ -40,7 +40,7 @@ DEFAULT_AGENT = "plan"
 DEFAULT_VARIANT = "medium"
 
 # Codex defaults
-DEFAULT_CODEX_MODEL = "gpt-5.3-codex"
+DEFAULT_CODEX_MODEL = "gpt-5.6-terra"
 DEFAULT_CODEX_SANDBOX = "danger-full-access"
 
 
