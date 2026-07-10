@@ -2744,26 +2744,32 @@ class RoomManager:
         # Verifier citation enforcement (TRINITY-style: ≥2 citations required per turn)
         _CIT_RETRY_KEY = f"{name}_cit"
         if room.roles.get(name) == "verifier" and not final.startswith("[error:"):
-            if self._score_citations(final) < 2:
+            # Retry up to twice, RE-SCORING each revision (the old code accepted the
+            # first non-empty revision unchecked, so an under-cited retry passed). If
+            # still under-threshold after the budget, mark [UNVERIFIED] — not only when
+            # retries are exhausted, but whenever the accepted response stays under-cited.
+            while (self._score_citations(final) < 2
+                   and room.retry_counts.get(_CIT_RETRY_KEY, 0) < 2):
                 _cit_retries = room.retry_counts.get(_CIT_RETRY_KEY, 0)
-                if _cit_retries < 2:
-                    room.retry_counts[_CIT_RETRY_KEY] = _cit_retries + 1
-                    _retry_prompt = (
-                        f"{user_msg}\n\n"
-                        f"[MODERATOR → {name}] Your Verifier response has insufficient citations "
-                        f"({self._score_citations(final)} found, ≥2 required). "
-                        f"Revise with at least 2 cited sources (URL, DOI, or file:line). "
-                        f"This is retry {_cit_retries + 1}/2."
-                    )
-                    try:
-                        _retry_reply = await self._send_to_backend(participant, _retry_prompt, system_prompt, working_dir=working_dir)
-                        _retry_final = self._extract_final_response(_retry_reply) or _retry_reply
-                        if _retry_final.strip() and not _retry_final.startswith("[error:"):
-                            final = _retry_final
-                    except Exception:
-                        pass
-                else:
-                    room.claim_ledger.append(f"[UNVERIFIED:{name}:r{round_num}] {final[:120]}")
+                room.retry_counts[_CIT_RETRY_KEY] = _cit_retries + 1
+                _retry_prompt = (
+                    f"{user_msg}\n\n"
+                    f"[MODERATOR → {name}] Your Verifier response has insufficient citations "
+                    f"({self._score_citations(final)} found, ≥2 required). "
+                    f"Revise with at least 2 cited sources (URL, DOI, or file:line). "
+                    f"This is retry {_cit_retries + 1}/2."
+                )
+                try:
+                    _retry_reply = await self._send_to_backend(participant, _retry_prompt, system_prompt, working_dir=working_dir)
+                    _retry_final = self._extract_final_response(_retry_reply) or _retry_reply
+                    if _retry_final.strip() and not _retry_final.startswith("[error:"):
+                        final = _retry_final
+                    else:
+                        break
+                except Exception:
+                    break
+            if self._score_citations(final) < 2:
+                room.claim_ledger.append(f"[UNVERIFIED:{name}:r{round_num}] {final[:120]}")
 
         # Three-state turn model:
         #   success       → committed with turn_key (normal path below)
