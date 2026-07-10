@@ -543,8 +543,11 @@ class RoomManager:
         room.messages.append({"name": "TOPIC", "content": topic, "ts": datetime.now().isoformat()})
         # Inject soul context if chittad is running (filter code symbols)
         if SoulClient.is_available():
+            # Scope to the room's derived project realm so a code-architecture room
+            # doesn't inject unrelated cross-project memories (a global recall on
+            # "tier2…" pulled metaDMG stats memories and derailed a participant).
             ctx = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: SoulClient.hybrid_recall(topic, limit=3)
+                None, lambda: SoulClient.hybrid_recall(topic, limit=3, realm=project or None)
             )
             if ctx and len(ctx.strip()) > 20:
                 code_markers = ["[code]", "[symbol]", "function ", "class ", "method "]
@@ -2367,12 +2370,16 @@ class RoomManager:
         if backend == "claude":
             full_prompt = f"{system_prompt}\n\n{message}" if system_prompt else message
             _usage: dict = {}
+            # Heavy xhigh/max turns over big files exceed the 300s default (Fable timed
+            # out reading a 3.4k-line file). Background shields duration, so scale by effort.
+            _p_timeout = {"max": 900, "xhigh": 600}.get((participant.get("effort") or "").lower(), 300)
             result = await self._run_claude_p(
                 full_prompt, files=files,
                 model=participant.get("model"),
                 effort=participant.get("effort"),
                 allowed_tools=participant.get("_allowed_tools"),
                 _usage_out=_usage,
+                timeout=_p_timeout,
             )
             if _usage:
                 participant["_last_usage"] = _usage
