@@ -702,7 +702,8 @@ class RoomManager:
 
     async def synthesize(self, room_id: str, synthesizer: Optional[dict] = None,
                          adversarial: bool = False, verify_citations: bool = False,
-                         minority_filter: bool = False, cross_attend: bool = False) -> str:
+                         minority_filter: bool = False, cross_attend: bool = False,
+                         timeout: int = 900) -> str:
         """Run a final synthesis pass over the full transcript — distills all responses into one answer.
 
         adversarial=True: produces both a majority reading and a strongest-minority reading,
@@ -824,7 +825,8 @@ class RoomManager:
 
         try:
             if backend == "claude":
-                reply = await self._run_claude_p(prompt, model=synth.get("model"))
+                reply = await self._run_claude_p(prompt, model=synth.get("model"),
+                                                 effort=synth.get("effort"), timeout=timeout)
             elif backend == "local":
                 base_url = synth.get("base_url") or synth.get("endpoint")
                 model = synth.get("model", "")
