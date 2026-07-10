@@ -77,42 +77,41 @@ class TestTagFor:
 # ---------------------------------------------------------------------------
 
 class TestDetectPlurality:
+    """Semantic (LLM-grouped) plurality; the classifier pass is mocked."""
     def setup_method(self):
         self.rm = RoomManager.__new__(RoomManager)
 
+    def _run(self, room):
+        return asyncio.run(self.rm._detect_plurality(room))
+
     def test_fewer_than_three_msgs_returns_all_as_majority(self):
+        # returns before the LLM call — no mock needed
         room = _make_room([_msg("Alice", "foo"), _msg("Bob", "bar")])
-        maj, min_, summ = self.rm._detect_plurality(room)
-        assert len(maj) == 2
-        assert min_ == []
-        assert summ == ""
+        maj, min_, summ = self._run(room)
+        assert len(maj) == 2 and min_ == [] and summ == ""
 
-    def test_divergent_messages_produce_minority(self):
-        # Alice and Bob say similar things; Carol says something completely different
-        similar = (
-            "The answer is gradient descent. It minimizes the loss function. "
-            "This is the standard approach. We should use it here."
-        )
-        different = (
-            "We should use evolutionary algorithms. They are robust to local minima. "
-            "Gradient descent fails on non-convex problems. Consider CMA-ES instead."
-        )
-        room = _make_room([
-            _msg("Alice", similar),
-            _msg("Bob", similar),
-            _msg("Carol", different),
-        ])
-        maj, min_, summ = self.rm._detect_plurality(room)
-        assert len(maj) == 2
-        assert len(min_) == 1
-        assert min_[0]["name"] == "Carol"
-        assert "Carol" not in summ or "Alice" in summ or "Bob" in summ
+    def test_semantic_grouping_maps_names(self):
+        room = _make_room([_msg("Alice", "use A"), _msg("Bob", "A is right"),
+                           _msg("Carol", "no, use B")])
+        self.rm._cheap_llm_call = AsyncMock(
+            return_value='{"majority": ["Alice", "Bob"], "minority": ["Carol"]}')
+        maj, min_, summ = self._run(room)
+        assert {m["name"] for m in maj} == {"Alice", "Bob"}
+        assert [m["name"] for m in min_] == ["Carol"]
+        assert "Carol" not in summ
 
-    def test_fully_converged_returns_empty_minority(self):
-        text = "The answer is clearly 42. This is well established. No dispute here."
-        room = _make_room([_msg("Alice", text), _msg("Bob", text), _msg("Carol", text)])
-        _, min_, _ = self.rm._detect_plurality(room)
+    def test_unanimous_returns_empty_minority(self):
+        room = _make_room([_msg("Alice", "42"), _msg("Bob", "42"), _msg("Carol", "42")])
+        self.rm._cheap_llm_call = AsyncMock(
+            return_value='{"majority": ["Alice", "Bob", "Carol"], "minority": []}')
+        _, min_, _ = self._run(room)
         assert min_ == []
+
+    def test_classifier_error_falls_back_safely(self):
+        room = _make_room([_msg("Alice", "x"), _msg("Bob", "y"), _msg("Carol", "z")])
+        self.rm._cheap_llm_call = AsyncMock(side_effect=RuntimeError("no daemon"))
+        maj, min_, summ = self._run(room)
+        assert len(maj) == 3 and min_ == [] and summ == ""  # never breaks a fusion
 
     def test_skips_system_and_poison_messages(self):
         room = _make_room([
@@ -121,8 +120,8 @@ class TestDetectPlurality:
             {"name": "Bob", "content": "different view", "ts": _ts(), "citation_score": 0,
              "poison": True},
         ])
-        maj, min_, _ = self.rm._detect_plurality(room)
-        # Only Alice is real (MODERATOR skipped, Bob is poison-skipped) → <3 → fallback
+        maj, min_, _ = self._run(room)
+        # Only Alice real (MODERATOR skipped, Bob poison) → <3 → fallback, no LLM call
         assert min_ == []
 
 
@@ -160,6 +159,14 @@ class TestSynthesizeNewParams:
             captured["prompt"] = prompt
             return "synthesis result"
 
+        # _detect_plurality is now an async LLM pass — mock it to split the real room
+        # (Alice+Bob majority, Carol minority) so the filter path is exercised.
+        by_name = {m["name"]: m for m in room.messages}
+        self.rm._detect_plurality = AsyncMock(return_value=(
+            [by_name["Alice"], by_name["Bob"]],
+            [by_name["Carol"]],
+            "[Alice] majority view",
+        ))
         with patch.object(self.rm, "_run_claude_p", side_effect=fake_claude_p):
             asyncio.run(self.rm.synthesize(room.id, minority_filter=True,
                                            synthesizer={"backend": "claude", "name": "Judge"}))

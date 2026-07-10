@@ -273,7 +273,7 @@ async def _run_fusion_bg(
                     _pname = _msg.get("name", "")
                     if _pname in {p["name"] for p in norm}:
                         _part_scores.setdefault(_pname, []).append(_msg.get("citation_score", 0))
-                _majority, _minority, _ = rooms._detect_plurality(_fuse_room)
+                _majority, _minority, _ = await rooms._detect_plurality(_fuse_room)
                 _minority_names = {m["name"] for m in _minority}
                 _n_rounds = rooms._committed_rounds(_fuse_room)
                 for _p in norm:

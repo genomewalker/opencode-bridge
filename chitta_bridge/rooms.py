@@ -730,7 +730,7 @@ class RoomManager:
         room = self.rooms[room_id]
 
         if minority_filter:
-            _, min_msgs, maj_summary = self._detect_plurality(room)
+            _, min_msgs, maj_summary = await self._detect_plurality(room)
             if min_msgs:
                 lines = [f"# Discussion Room: {room.id}", f"**Topic:** {room.topic}", "",
                          "## Majority position (summarized)", maj_summary, "",
@@ -2880,40 +2880,46 @@ class RoomManager:
     # Challenge round support
     # ------------------------------------------------------------------
 
-    def _detect_plurality(self, room: "DiscussionRoom") -> tuple[list[dict], list[dict], str]:
-        """Cluster participant messages by sentence-shingle Jaccard; return (majority_msgs, minority_msgs, majority_summary).
-        Falls back to (all_msgs, [], "") when N < 3 or all messages converge.
-        # ceiling: lexical shingles, not semantic; upgrade: embed responses
+    async def _detect_plurality(self, room: "DiscussionRoom") -> tuple[list[dict], list[dict], str]:
+        """Group participant messages by POSITION (semantic agreement), returning
+        (majority_msgs, minority_msgs, majority_summary). Uses a cheap LLM pass: the
+        old sentence-shingle Jaccard measured word-COPYING, which is sign-reversed —
+        parrots merged as the 'majority' and independent agreement in different words
+        was scattered into 'minority'. Lexical proxies (shingles, claim-keys) all share
+        that flaw; grouping by conclusion needs semantics. Falls back to (all, [], "")
+        on N<3, unanimity, or any classifier error, so a fusion never breaks on it.
         """
         _skip = {"TOPIC", "CONTEXT", "MODERATOR", "SUMMARY"}
         msgs = [m for m in room.messages if m["name"] not in _skip and not m.get("poison")]
         if len(msgs) < 3:
             return msgs, [], ""
-
-        def _shingles(text: str) -> set:
-            return {s.strip()[:40] for s in text.lower().split(".") if len(s.strip()) > 15}
-
-        shingle_sets = [_shingles(m["content"]) for m in msgs]
-        clusters: list[list[int]] = []
-        for i, si in enumerate(shingle_sets):
-            placed = False
-            for cluster in clusters:
-                rep = shingle_sets[cluster[0]]
-                u = len(si | rep)
-                if u and len(si & rep) / u >= 0.5:
-                    cluster.append(i)
-                    placed = True
-                    break
-            if not placed:
-                clusters.append([i])
-
-        majority_cluster = max(clusters, key=len)
-        majority_idx = set(majority_cluster)
-        majority_msgs = [msgs[i] for i in majority_cluster]
-        minority_msgs = [msgs[i] for i in range(len(msgs)) if i not in majority_idx]
-        majority_summary = "\n".join(
-            f"[{msgs[i]['name']}] {msgs[i]['content'][:200]}" for i in majority_cluster
+        # One latest message per participant — cluster positions, not turns.
+        latest: dict[str, dict] = {}
+        for m in msgs:
+            latest[m["name"]] = m
+        items = list(latest.values())
+        if len(items) < 3:
+            return msgs, [], ""
+        labeled = "\n\n".join(f"[{m['name']}]: {m['content'][:600]}" for m in items)
+        prompt = (
+            "Group these participant responses by their CONCLUSION/POSITION, ignoring "
+            "wording. List which participants hold the majority position and which hold "
+            "a minority one. Return ONLY JSON: "
+            '{"majority": ["name", ...], "minority": ["name", ...]}.\n\n' + labeled
         )
+        try:
+            import json as _json
+            reply = await self._cheap_llm_call(prompt, timeout=30)
+            data = _json.loads(re.search(r"\{.*\}", reply, re.S).group(0))
+            maj_names = {n for n in data.get("majority", []) if isinstance(n, str)}
+        except Exception:
+            return msgs, [], ""
+        all_names = {m["name"] for m in items}
+        if not maj_names or not (maj_names & all_names) or maj_names >= all_names:
+            return msgs, [], ""  # unusable or unanimous → no minority
+        majority_msgs = [m for m in items if m["name"] in maj_names]
+        minority_msgs = [m for m in items if m["name"] not in maj_names]
+        majority_summary = "\n".join(f"[{m['name']}] {m['content'][:200]}" for m in majority_msgs)
         return majority_msgs, minority_msgs, majority_summary
 
     async def _score_convergence(self, round_contents: list[str]) -> "float | None":
