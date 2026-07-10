@@ -973,24 +973,14 @@ Set via:
                 stderr_task.cancel()
             return f"Error: {e}"
 
-        reply_parts = []
-        for line in output.split("\n"):
-            if not line or line.startswith("WARNING:"):
-                continue
-            try:
-                event = json.loads(line)
-                if not session.codex_session_id and event.get("thread_id"):
-                    session.codex_session_id = event["thread_id"]
-                if event.get("type") == "item.completed":
-                    item = event.get("item", {})
-                    if item.get("type") == "agent_message":
-                        text = item.get("text", "")
-                        if text:
-                            reply_parts.append(text)
-            except json.JSONDecodeError:
-                continue
+        # Use the shared parser (strips the \x1e RS byte). The old inline copy did
+        # not, so on RS-framed output json.loads threw and the thread_id capture was
+        # skipped — sessions silently never resumed, starting a fresh thread per turn.
+        _parsed_reply, _thread_id = self._parse_codex_jsonl(output)
+        if _thread_id and not session.codex_session_id:
+            session.codex_session_id = _thread_id
 
-        reply = self._read_last_message(lastmsg, "\n".join(reply_parts))
+        reply = self._read_last_message(lastmsg, _parsed_reply)
         if reply:
             session.add_message("assistant", reply)
             session.save(self.sessions_dir / f"{sid}.json")
