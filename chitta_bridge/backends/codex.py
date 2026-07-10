@@ -1027,14 +1027,20 @@ Set via:
         sandbox: Optional[str] = None,
     ) -> str:
         """Run a one-off task without session management."""
-        if os.environ.get("CHITTA_CODEX_APP_SERVER") == "1":
-            reply = await self._run_task_app_server(
-                task, working_dir=working_dir, model=model,
-                effort=effort, sandbox=sandbox,
-            )
-            if reply is not None:
-                return reply
-            # else: app-server failed — fall through to the exec path below.
+        # App-server is ON by default (faster: ~17s vs ~120-270s, persistent
+        # process). Opt out with CHITTA_CODEX_APP_SERVER=0. Only attempt it when
+        # the standalone codex install is present, so hosts without it skip
+        # straight to exec with no spawn/timeout penalty.
+        if os.environ.get("CHITTA_CODEX_APP_SERVER", "1") != "0":
+            from .codex_app_server import standalone_codex
+            if standalone_codex(_llm_env()):
+                reply = await self._run_task_app_server(
+                    task, working_dir=working_dir, model=model,
+                    effort=effort, sandbox=sandbox,
+                )
+                if reply is not None:
+                    return reply
+                # else: app-server failed — fall through to the exec path below.
         args = self._build_exec_args(model, effort, sandbox=sandbox, full_auto=full_auto)
         lastmsg = self._new_last_message_file()
         args[1:1] = ["-o", lastmsg]  # after "exec", before the trailing "-"

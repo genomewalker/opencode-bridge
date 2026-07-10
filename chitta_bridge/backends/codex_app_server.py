@@ -56,6 +56,17 @@ class CodexAppServerError(RuntimeError):
     """Any app-server transport failure. The caller falls back to exec."""
 
 
+def standalone_codex(env: Optional[dict] = None) -> Optional[str]:
+    """Path to the STANDALONE codex binary that serves ``app-server --stdio``,
+    or None if it isn't installed. The npm launcher's app-server does not
+    self-serve, so without this the app-server path can't work — callers use
+    this to skip it FAST (no spawn/timeout) and go straight to exec.
+    """
+    home = (env or os.environ).get("CODEX_HOME") or os.path.expanduser("~/.codex")
+    sa = Path(home) / "packages" / "standalone" / "current" / "codex"
+    return str(sa) if sa.exists() else None
+
+
 # Server->client approval requests and the decision payload that accepts them.
 # Shapes verified against *ApprovalResponse.json in the 0.144.0 schema.
 _APPROVE_APPROVED = frozenset({"execCommandApproval", "applyPatchApproval"})
@@ -123,9 +134,7 @@ class CodexAppServer:
         configured bin if the standalone install isn't present (caller then
         falls back to exec).
         """
-        home = (self._env or os.environ).get("CODEX_HOME") or os.path.expanduser("~/.codex")
-        sa = Path(home) / "packages" / "standalone" / "current" / "codex"
-        return str(sa) if sa.exists() else self._bin
+        return standalone_codex(self._env) or self._bin
 
     async def _spawn(self) -> None:
         # Tear down any dead remnants first.
