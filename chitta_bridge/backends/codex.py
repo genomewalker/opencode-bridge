@@ -750,19 +750,26 @@ class CodexBridge:
         job.started = datetime.now().isoformat()
         job.save(self.jobs_dir / f"{job_id}.json")
 
-        model, effort = self._apply_codex_policy(job.model, job.effort)
-        args = ["exec"]
-        if job.resume_from:
-            args.extend(["resume", job.resume_from])
-        if model:
-            args.extend(["--model", model])
-        args.extend(["-c", f'model_reasoning_effort="{effort}"'])
-        if job.sandbox:
-            args.extend(["--sandbox", job.sandbox])
         lastmsg = self._new_last_message_file()
-        args.extend(["--full-auto", "--json", "-o", lastmsg, "-"])
-
         try:
+            # policy inside the try: a bad effort/fast-variant used to raise here,
+            # outside the finally, orphaning the job at status="running".
+            model, effort = self._apply_codex_policy(job.model, job.effort)
+            args = ["exec", "--skip-git-repo-check"]  # was missing → errored in non-git cwd
+            if job.resume_from:
+                args.extend(["resume", job.resume_from])
+            if model:
+                args.extend(["--model", model])
+            args.extend(["-c", f'model_reasoning_effort="{effort}"'])
+            # mirror _build_exec_args: danger-full-access → bypass; else sandbox+full-auto.
+            # (was --sandbox X and --full-auto together, never mapping danger-full-access.)
+            _sandbox = job.sandbox or self.config.codex_sandbox
+            if _sandbox == "danger-full-access":
+                args.append("--dangerously-bypass-approvals-and-sandbox")
+            else:
+                args.extend(["--sandbox", _sandbox, "--full-auto"])
+            args.extend(["--json", "-o", lastmsg, "-"])
+
             output, code = await self._run_codex_exec_stdin(
                 args, job.task, job.working_dir, timeout=1800, stall_timeout=120
             )
@@ -776,6 +783,12 @@ class CodexBridge:
             job.status = "cancelled"
             job.result = "(cancelled)"
             job.finished = datetime.now().isoformat()
+            self._read_last_message(lastmsg, "")  # unlink temp
+        except Exception as e:
+            job.status = "failed"
+            job.result = f"[rescue error: {e}]"
+            job.finished = datetime.now().isoformat()
+            self._read_last_message(lastmsg, "")  # unlink temp
         finally:
             job.save(self.jobs_dir / f"{job_id}.json")
             self._job_tasks.pop(job_id, None)
@@ -896,6 +909,7 @@ Set via:
                 cwd=session.working_dir,
                 start_new_session=True,
                 limit=2**24,
+                env=_llm_env(),  # was missing here — session path leaked the full env
             )
             proc.stdin.write(message.encode())
             await proc.stdin.drain()
@@ -1063,12 +1077,18 @@ Set via:
                 task += f"\n\nReview changes relative to base: {base}"
             if background:
                 return await self._launch_rescue(task, model=model, effort=effort, cwd=cwd, sandbox=sandbox)
-            output, code = await self._run_codex_exec_stdin(
-                self._build_exec_args(model, effort, sandbox=sandbox), task, cwd, timeout=600
-            )
+            _rev_args = self._build_exec_args(model, effort, sandbox=sandbox)
+            lastmsg = self._new_last_message_file()  # -o rescue was missing here
+            if _rev_args and _rev_args[-1] == "-":
+                _rev_args[-1:] = ["-o", lastmsg, "-"]
+            else:
+                _rev_args.extend(["-o", lastmsg])
+            output, code = await self._run_codex_exec_stdin(_rev_args, task, cwd, timeout=600)
             if code != 0:
+                self._read_last_message(lastmsg, "")  # unlink temp
                 return f"Error: {output}"
             reply, thread_id = self._parse_codex_jsonl(output)
+            reply = self._read_last_message(lastmsg, reply)
             result = reply or output or "Review complete"
             if thread_id:
                 result += f"\n\n(Codex session: {thread_id} — resume with: codex resume {thread_id})"
@@ -1177,7 +1197,10 @@ Set via:
         """Delegate a task to Codex. Supports background execution and session resume."""
         cwd = working_dir or os.getcwd()
         if not resume_from and not fresh:
-            recent = [j for j in self.jobs.values() if j.codex_session_id and j.status == "completed"]
+            # Only auto-resume a job from THIS working dir — was globally newest,
+            # so a run in repo A could silently resume a session from repo B.
+            recent = [j for j in self.jobs.values()
+                      if j.codex_session_id and j.status == "completed" and j.working_dir == cwd]
             if recent:
                 latest = max(recent, key=lambda j: j.finished or "")
                 resume_from = latest.codex_session_id
@@ -1188,10 +1211,17 @@ Set via:
         args = self._build_exec_args(model or self.config.codex_model, effort, sandbox=sandbox)
         if resume_from:
             args = ["exec", "resume", resume_from] + args[1:]
+        lastmsg = self._new_last_message_file()  # -o rescue was missing on this path
+        if args and args[-1] == "-":
+            args[-1:] = ["-o", lastmsg, "-"]
+        else:
+            args.extend(["-o", lastmsg])
         output, code = await self._run_codex_exec_stdin(args, task, cwd, timeout=600)
         if code != 0:
+            self._read_last_message(lastmsg, "")  # unlink temp
             return f"Error: {output}"
         reply, thread_id = self._parse_codex_jsonl(output)
+        reply = self._read_last_message(lastmsg, reply)
         result = reply or output or "No response received"
         if thread_id:
             result += f"\n\n(Codex session: {thread_id} — resume with: codex rescue --resume {thread_id})"
