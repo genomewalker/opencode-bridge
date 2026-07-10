@@ -541,13 +541,15 @@ class RoomManager:
                               participant_tools=participant_tools or [],
                               dag=dag or {})
         room.messages.append({"name": "TOPIC", "content": topic, "ts": datetime.now().isoformat()})
-        # Inject soul context if chittad is running (filter code symbols)
-        if SoulClient.is_available():
-            # Scope to the room's derived project realm so a code-architecture room
-            # doesn't inject unrelated cross-project memories (a global recall on
-            # "tier2…" pulled metaDMG stats memories and derailed a participant).
+        # Inject soul context only when a PROJECT realm is established (files /
+        # project_roots). A prompt-driven room with no project scope did a GLOBAL
+        # recall on the topic, which is mostly noise: it pulled a 1%-scored memory
+        # that derailed a whole fusion onto an unrelated subject. A fusion answers
+        # its prompt, not accumulated project memory — so with no scope, inject
+        # nothing. (Scoped-to-project recall is kept: it's on-topic and useful.)
+        if SoulClient.is_available() and project:
             ctx = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: SoulClient.hybrid_recall(topic, limit=3, realm=project or None)
+                None, lambda: SoulClient.hybrid_recall(topic, limit=3, realm=project)
             )
             if ctx and len(ctx.strip()) > 20:
                 code_markers = ["[code]", "[symbol]", "function ", "class ", "method "]
