@@ -1,9 +1,15 @@
 """Persistent Codex **app-server** transport (experimental, feature-flagged).
 
 This is a *prototype* second transport for the Codex backend. Instead of
-spawning ``codex exec`` per task (the default, in ``codex.py``), it owns a
-single long-lived ``codex app-server`` process and speaks its persistent
-JSON-RPC 2.0 protocol (newline-delimited, ``jsonrpc`` omitted on the wire).
+spawning ``codex exec`` per task (the default, in ``codex.py``), it drives the
+persistent Codex **daemon** and speaks its JSON-RPC 2.0 protocol.
+
+Transport (verified architecture): ``codex app-server`` is a **daemon + proxy**
+model, not a ``--stdio`` self-server. ``codex app-server daemon start`` runs a
+persistent daemon on a per-user unix socket (``/tmp/codex-ipc/ipc-<hash>.sock``);
+clients speak JSON-RPC over ``codex app-server proxy`` (stdio <-> that socket,
+handling its auth/permissions — a direct socket connect is EPERM). So this module
+runs ``daemon start`` (idempotent, bounded) then owns a ``proxy`` process.
 
 It is wired into ``CodexBridge.run_task`` behind ``CHITTA_CODEX_APP_SERVER=1``
 for exactly one path. Any failure here must fall back to the exec path — this
@@ -26,10 +32,13 @@ Protocol (verified against codex-cli 0.144.0 schema
   ``item/commandExecution/requestApproval`` / ``item/fileChange/requestApproval``
   want ``{"decision":"accept"}``. Auto-accepted here (full-auto).
 
-NOTE (empirical, this environment): ``codex app-server`` was observed to start
-but never emit a response to ``initialize`` (see module test / bridge report),
-so in practice ``initialize`` times out and the caller falls back to exec. The
-code below is written to the schema and will work if/when the server responds.
+NOTE (empirical, this environment — UNVERIFIED happy path): ``codex app-server
+daemon start`` hangs here (40s+, no socket) — same NFS / shared-``/tmp`` SQLite &
+socket locking the ``codex`` PATH wrapper exists to fight (``/tmp/codex-ipc`` even
+holds a stale cross-user socket). So the proxy has no live daemon to reach and the
+caller falls back to exec. The transport below matches the verified daemon+proxy
+architecture and should work on a host where ``daemon start`` completes, but the
+turn/notification handling has NOT been confirmed against a live daemon here.
 """
 
 from __future__ import annotations
@@ -104,12 +113,44 @@ class CodexAppServer:
                 return
             await self._spawn()
 
+    async def _ensure_daemon(self) -> None:
+        """Best-effort start of the local app-server daemon.
+
+        `codex app-server` is a daemon+proxy architecture, NOT a `--stdio`
+        self-server: `daemon start` runs a persistent daemon on a per-user unix
+        socket, and clients connect through `proxy` (which handles the socket's
+        auth/permissions). `start` is idempotent ("start if not already running").
+        Bounded so a hung start (known on NFS / shared-/tmp hosts, where the
+        daemon wedges on SQLite/socket locking) can't block the caller — on
+        timeout we kill it and let the proxy attempt fail into the exec fallback.
+        """
+        p = None
+        try:
+            p = await asyncio.create_subprocess_exec(
+                self._bin, "app-server", "daemon", "start",
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                env=self._env, start_new_session=True,
+            )
+            await asyncio.wait_for(p.communicate(), timeout=self._init_timeout)
+        except asyncio.TimeoutError:
+            if p is not None:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+        except OSError as e:
+            raise CodexAppServerError(f"failed to start app-server daemon: {e}") from e
+
     async def _spawn(self) -> None:
         # Tear down any dead remnants first.
         await self._teardown_locked()
+        await self._ensure_daemon()
         try:
+            # Transport is `app-server proxy` (stdio <-> daemon control socket),
+            # NOT `app-server --stdio` (which does not self-serve on this build).
             self._proc = await asyncio.create_subprocess_exec(
-                self._bin, "app-server",
+                self._bin, "app-server", "proxy",
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -118,7 +159,7 @@ class CodexAppServer:
                 limit=2 ** 24,
             )
         except OSError as e:
-            raise CodexAppServerError(f"failed to spawn app-server: {e}") from e
+            raise CodexAppServerError(f"failed to spawn app-server proxy: {e}") from e
 
         self._pending.clear()
         self._turns.clear()
