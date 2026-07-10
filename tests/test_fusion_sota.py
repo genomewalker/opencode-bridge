@@ -62,8 +62,14 @@ class TestTagFor:
         assert tag == " [asserted: no citations]"
 
     def test_participant_with_citations(self):
+        # "cited", not "grounded": the score counts citation-shaped tokens, unverified.
         tag = self.rm._tag_for({"name": "Alice", "content": "x", "citation_score": 3})
-        assert tag == " [grounded:3 citations]"
+        assert tag == " [cited:3]"
+
+    def test_summary_message_empty_tag(self):
+        # SUMMARY is system context, not a participant claim — must not be tagged
+        # [asserted], which would launder the grounded turns it compressed.
+        assert self.rm._tag_for({"name": "SUMMARY", "content": "x", "citation_score": 0}) == ""
 
 
 # ---------------------------------------------------------------------------

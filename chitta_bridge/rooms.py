@@ -618,13 +618,17 @@ class RoomManager:
             lines.append("")
         return "\n".join(lines)
 
-    _TRANSCRIPT_SYSTEM = {"TOPIC", "CONTEXT", "MODERATOR"}
+    # SUMMARY included: a compressed round is not a participant claim, so tagging it
+    # [asserted] laundered the grounded turns it replaced into an assertion.
+    _TRANSCRIPT_SYSTEM = {"TOPIC", "CONTEXT", "MODERATOR", "SUMMARY"}
 
     def _tag_for(self, msg: dict) -> str:
         if msg["name"] in self._TRANSCRIPT_SYSTEM:
             return ""
         score = msg.get("citation_score", 0)
-        return f" [grounded:{score} citations]" if score > 0 else " [asserted: no citations]"
+        # "cited", not "grounded": the count is citation-SHAPED tokens, not verified
+        # sources. Calling an unverified regex match "grounded" was the core overclaim.
+        return f" [cited:{score}]" if score > 0 else " [asserted: no citations]"
 
     def _build_annotated_transcript(self, room: "DiscussionRoom") -> str:
         """Transcript with per-message grounding tags (grounded:N citations / asserted)."""
@@ -756,8 +760,9 @@ class RoomManager:
         if adversarial:
             prompt = (
                 f"You are a neutral synthesizer reviewing a multi-agent discussion.\n"
-                f"Messages tagged [grounded:N citations] cite verifiable sources; "
-                f"[asserted: no citations] are claims without external evidence — weight accordingly.\n\n"
+                f"Messages tagged [cited:N] contain N citation-SHAPED references — NOT verified "
+                f"to exist or to support the claim; [asserted: no citations] have none. "
+                f"Weight accordingly, and do not treat [cited] as proof.\n\n"
                 f"{transcript}\n\n"
                 f"{cross_attend_block}"
                 f"## Adversarial Dual Synthesis Task\n"
@@ -794,8 +799,9 @@ class RoomManager:
             ) if _has_eval_block else ""
             prompt = (
                 f"You are a neutral synthesizer reviewing a multi-agent discussion.\n"
-                f"Messages tagged [grounded:N citations] cite verifiable sources; "
-                f"[asserted: no citations] are claims without external evidence — weight accordingly.\n\n"
+                f"Messages tagged [cited:N] contain N citation-SHAPED references — NOT verified "
+                f"to exist or to support the claim; [asserted: no citations] have none. "
+                f"Weight accordingly, and do not treat [cited] as proof.\n\n"
                 f"{transcript}\n\n"
                 f"{cross_attend_block}"
                 f"## Synthesis Task\n"
@@ -828,8 +834,11 @@ class RoomManager:
 
         try:
             if backend == "claude":
+                # verify_citations asks the judge to FETCH sources; that needs tools,
+                # which weren't passed before — so the instruction was a no-op.
                 reply = await self._run_claude_p(prompt, model=synth.get("model"),
-                                                 effort=synth.get("effort"), timeout=timeout)
+                                                 effort=synth.get("effort"), timeout=timeout,
+                                                 allowed_tools=["all"] if verify_citations else None)
             elif backend == "local":
                 base_url = synth.get("base_url") or synth.get("endpoint")
                 model = synth.get("model", "")
@@ -858,8 +867,9 @@ class RoomManager:
 
         room.messages.append({"name": f"⟳ {synth_name}", "content": reply, "ts": datetime.now().isoformat()})
         self._save_room(room_id)
-        # Store synthesis back to soul memory
-        if SoulClient.is_available():
+        # Store synthesis back to soul memory — but never memorize a failed synthesis
+        # as high-confidence wisdom (it would poison later rooms' recall).
+        if SoulClient.is_available() and not reply.startswith("[synthesis error"):
             participants = ", ".join(p["name"] for p in room.participants)
             # Extract key terms from topic for tags
             topic_words = re.sub(r"[^\w\s]", "", room.topic.lower()).split()
@@ -2751,7 +2761,7 @@ class RoomManager:
             final = "[error: empty response from backend]"
 
         # Verifier citation enforcement (TRINITY-style: ≥2 citations required per turn)
-        _CIT_RETRY_KEY = f"{name}_cit"
+        _CIT_RETRY_KEY = f"{name}_cit_r{round_num}"  # per-round: retry_counts is cumulative and never reset
         if room.roles.get(name) == "verifier" and not final.startswith("[error:"):
             # Retry up to twice, RE-SCORING each revision (the old code accepted the
             # first non-empty revision unchecked, so an under-cited retry passed). If
@@ -2977,20 +2987,10 @@ class RoomManager:
         r'unanswered|unaddressed)[^.!?\n]*[.!?])',
         re.MULTILINE,
     )
-    _CLAIM_TYPE_RE = re.compile(
-        r'\b(therefore|thus|implies?|suggests?|must be|is likely|conclude|demonstrates?|'
-        r'shows? that|we can infer|it follows)\b',
-        re.IGNORECASE,
-    )
-
     def _score_citations(self, text: str) -> int:
         """Count DISTINCT verifiable artifacts (URLs, arXiv refs, DOIs, inline citations).
         Distinct, not occurrences — else the same DOI written twice clears a ≥2 gate."""
         return len({m.group(0) for m in self._CITATION_RE.finditer(text)})
-
-    def _classify_claim(self, text: str) -> str:
-        """Minimal two-type tag: 'inference' if inferential language present, else 'observation'."""
-        return "inference" if self._CLAIM_TYPE_RE.search(text) else "observation"
 
     def _extract_open_questions(self, messages: list[dict]) -> list[dict]:
         """Extract open questions / unresolved confounds from messages."""
@@ -3350,7 +3350,12 @@ class RoomManager:
                 # and from low-effort one-liners (high haiku score, empty ledger).
                 if good_responses:
                     round_contents = [r.get("content", "") for r in good_responses]
-                    prior_keys = {c[:50].lower() for c in room.claim_ledger}
+                    # Exclude [UNVERIFIED] records: they are verification FAILURES.
+                    # Feeding them into prior_keys made a failure grow the ledger and
+                    # push bool(prior_claim_keys) true — the failure signal drove
+                    # convergence with its sign inverted.
+                    prior_keys = {c[:50].lower() for c in room.claim_ledger
+                                  if not c.startswith("[UNVERIFIED")}
                     converged, new_claims = self._round_converged(round_contents, prior_keys)
                     room.claim_ledger.extend(new_claims)
                     if adaptive_stop or stop_early:
