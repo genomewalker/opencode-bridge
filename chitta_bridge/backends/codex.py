@@ -1027,6 +1027,14 @@ Set via:
         sandbox: Optional[str] = None,
     ) -> str:
         """Run a one-off task without session management."""
+        if os.environ.get("CHITTA_CODEX_APP_SERVER") == "1":
+            reply = await self._run_task_app_server(
+                task, working_dir=working_dir, model=model,
+                effort=effort, sandbox=sandbox,
+            )
+            if reply is not None:
+                return reply
+            # else: app-server failed — fall through to the exec path below.
         args = self._build_exec_args(model, effort, sandbox=sandbox, full_auto=full_auto)
         lastmsg = self._new_last_message_file()
         args[1:1] = ["-o", lastmsg]  # after "exec", before the trailing "-"
@@ -1042,6 +1050,48 @@ Set via:
         if thread_id:
             result += f"\n\n(Codex session: {thread_id} — resume with: codex resume {thread_id})"
         return result
+
+    async def _run_task_app_server(
+        self,
+        task: str,
+        working_dir: Optional[str] = None,
+        model: Optional[str] = None,
+        effort: Optional[str] = None,
+        sandbox: Optional[str] = None,
+    ) -> Optional[str]:
+        """Experimental: run one task via the persistent Codex app-server.
+
+        Returns the reply text on success, or ``None`` on ANY failure so the
+        caller falls back to the exec path. Gated by ``CHITTA_CODEX_APP_SERVER``.
+        """
+        if not CODEX_BIN:
+            return None
+        try:
+            from .codex_app_server import CodexAppServerError, get_singleton
+
+            model, effort = self._apply_codex_policy(model, effort)
+            effective_sandbox = sandbox or self.config.codex_sandbox
+            cwd = working_dir or os.getcwd()
+            server = await get_singleton(str(CODEX_BIN), _llm_env())
+            try:
+                return await server.run_once(
+                    text=task,
+                    cwd=cwd,
+                    model=model,
+                    effort=effort,
+                    sandbox=effective_sandbox,
+                    approval_policy="never",
+                )
+            except CodexAppServerError as e:
+                import sys as _sys
+                print(f"[codex app-server] falling back to exec: {e}",
+                      file=_sys.stderr)
+                return None
+        except Exception as e:  # never let the experimental path break run_task
+            import sys as _sys
+            print(f"[codex app-server] unexpected error, falling back to exec: {e}",
+                  file=_sys.stderr)
+            return None
 
     async def review_code(
         self,
