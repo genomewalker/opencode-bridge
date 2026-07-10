@@ -240,6 +240,73 @@ async def _run_dual_fusion_bg(
             _bg_rooms[dense_id]["error"] = str(_e)
         return f"[dual_fusion error: {_e}]"
 
+
+async def _run_fusion_bg(
+    room_id: str, rounds: int, judge: dict, adversarial: bool,
+    minority_filter: bool, cross_attend: bool, adaptive: dict,
+    norm: list, topic: str,
+) -> str:
+    """Run fusion rounds + synthesis. Keyed to the room id so room_status/room_read
+    retrieve it unchanged; persists to <room_id>.synthesis so a dropped MCP
+    transport never loses the result. Never raises. Returns the assembled result.
+    """
+    try:
+        await rooms.run_rounds(
+            room_id=room_id, rounds=rounds, sparse_topology=True,
+            adaptive_stop=adaptive.get("adaptive_stop", False),
+            adaptive_threshold=adaptive.get("adaptive_threshold", 0.85),
+            adaptive_k=adaptive.get("adaptive_k", 2),
+        )
+        if room_id in _bg_rooms:
+            _bg_rooms[room_id]["rounds_done"] = rounds
+            _bg_rooms[room_id]["status"] = "synthesizing"
+        synthesis = await rooms.synthesize(
+            room_id=room_id, synthesizer=judge, adversarial=adversarial,
+            minority_filter=minority_filter, cross_attend=cross_attend,
+        )
+        _threading.Thread(target=distill_event, args=("room_synth", synthesis, {}), daemon=True).start()
+        if SoulClient.is_available():
+            _fuse_room = rooms.rooms.get(room_id)
+            if _fuse_room:
+                _part_scores: dict[str, list[float]] = {}
+                for _msg in _fuse_room.messages:
+                    _pname = _msg.get("name", "")
+                    if _pname in {p["name"] for p in norm}:
+                        _part_scores.setdefault(_pname, []).append(_msg.get("citation_score", 0))
+                _majority, _minority, _ = rooms._detect_plurality(_fuse_room)
+                _minority_names = {m["name"] for m in _minority}
+                _n_rounds = rooms._committed_rounds(_fuse_room)
+                for _p in norm:
+                    _pn = _p["name"]
+                    _avg_cit = sum(_part_scores.get(_pn, [0])) / max(1, len(_part_scores.get(_pn, [1])))
+                    _mem_content = (
+                        f"[routing-memory] topic:{topic[:60]} "
+                        f"participant:{_pn} model:{_p.get('model','?')} "
+                        f"backend:{_p.get('backend','?')} "
+                        f"citation_score:{_avg_cit:.2f} "
+                        f"was_minority:{_pn in _minority_names} "
+                        f"round_count:{_n_rounds}"
+                    )
+                    await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda c=_mem_content: SoulClient.remember(
+                            c, "signal", "routing-memory,fusion,bridge"),
+                    )
+        result = f"[fusion:{room_id}]\n{synthesis}"
+        try:
+            (rooms.rooms_dir / f"{room_id}.synthesis").write_text(result)
+        except OSError:
+            pass
+        if room_id in _bg_rooms:
+            _bg_rooms[room_id]["status"] = "done"
+            _bg_rooms[room_id]["synthesis"] = result
+        return result
+    except Exception as _e:
+        if room_id in _bg_rooms:
+            _bg_rooms[room_id]["status"] = "error"
+            _bg_rooms[room_id]["error"] = str(_e)
+        return f"[fusion error: {_e}]"
+
 # ── Registry-backed tool handlers ───────────────────────────────────────────
 # Single source of truth for schema + handler. list_tools() iterates REGISTRY;
 # call_tool() fast-paths through REGISTRY before the legacy if/elif fallback.
@@ -710,6 +777,17 @@ async def list_tools():
                     "adaptive_k": {
                         "type": "integer",
                         "description": "Consecutive rounds above threshold before adaptive_stop triggers (default: 2).",
+                    },
+                    "background": {
+                        "type": "boolean",
+                        "description": (
+                            "Run detached and return immediately with a room id; poll room_status "
+                            "and read room_read(room_id) when done (synthesis also saved to "
+                            "<room_id>.synthesis). Defaults to true for long runs (deep mode, "
+                            "rounds>=2, or files attached) that would otherwise hit the client's "
+                            "~10-min MCP idle timeout; quick single-round runs return inline. "
+                            "Pass explicitly to override."
+                        ),
                     },
                     "min_quality": {
                         "type": "boolean",
@@ -2362,49 +2440,41 @@ async def call_tool(name: str, arguments: dict):
                         _fuse_preamble = "\n\n".join(_fuse_preamble_parts)
             await rooms.create(room_id=_fuse_room_id, topic=_fuse_topic, participants=_fuse_norm,
                                participant_tools=["all"], preamble=_fuse_preamble)
-            await rooms.run_rounds(
-                room_id=_fuse_room_id, rounds=_fuse_rounds, sparse_topology=True,
-                adaptive_stop=bool(arguments.get("adaptive_stop")),
-                adaptive_threshold=float(arguments.get("adaptive_threshold", 0.85)),
-                adaptive_k=int(arguments.get("adaptive_k", 2)),
-            )
-            result = await rooms.synthesize(
-                room_id=_fuse_room_id, synthesizer=_fuse_judge, adversarial=_fuse_adversarial,
-                minority_filter=bool(arguments.get("minority_filter")),
-                cross_attend=bool(arguments.get("cross_attend")),
-            )
-            _threading.Thread(target=distill_event, args=("room_synth", result, {}), daemon=True).start()
-            # Soul routing memory: persist per-participant citation scores for future recall.
-            if SoulClient.is_available():
-                _fuse_room = rooms.rooms.get(_fuse_room_id)
-                if _fuse_room:
-                    _part_scores: dict[str, list[float]] = {}
-                    for _msg in _fuse_room.messages:
-                        _pname = _msg.get("name", "")
-                        if _pname in {p["name"] for p in _fuse_norm}:
-                            _cs = _msg.get("citation_score", 0)
-                            _part_scores.setdefault(_pname, []).append(_cs)
-                    _majority, _minority, _ = rooms._detect_plurality(_fuse_room)
-                    _minority_names = {m["name"] for m in _minority}
-                    _n_rounds = rooms._committed_rounds(_fuse_room)
-                    for _p in _fuse_norm:
-                        _pn = _p["name"]
-                        _avg_cit = sum(_part_scores.get(_pn, [0])) / max(1, len(_part_scores.get(_pn, [1])))
-                        _mem_content = (
-                            f"[routing-memory] topic:{_fuse_topic[:60]} "
-                            f"participant:{_pn} model:{_p.get('model','?')} "
-                            f"backend:{_p.get('backend','?')} "
-                            f"citation_score:{_avg_cit:.2f} "
-                            f"was_minority:{_pn in _minority_names} "
-                            f"round_count:{_n_rounds}"
-                        )
-                        await asyncio.get_event_loop().run_in_executor(
-                            None,
-                            lambda c=_mem_content: SoulClient.remember(
-                                c, "signal", "routing-memory,fusion,bridge",
-                            ),
-                        )
-            result = f"[fusion:{_fuse_room_id}]\n{result}"
+            _fuse_adaptive = {
+                "adaptive_stop": bool(arguments.get("adaptive_stop")),
+                "adaptive_threshold": float(arguments.get("adaptive_threshold", 0.85)),
+                "adaptive_k": int(arguments.get("adaptive_k", 2)),
+            }
+            # Background when the run is long enough to risk the client's ~10-min MCP
+            # idle timeout: deep mode, multi-round, or file-grounded. Quick single-round
+            # runs stay inline (return the answer directly). Explicit background wins.
+            _fuse_long = _fuse_mode == "deep" or _fuse_rounds >= 2 or bool(_file_paths)
+            _fuse_background = arguments.get("background", _fuse_long)
+            _bg_rooms[_fuse_room_id] = {
+                "status": "running", "rounds_done": 0, "rounds_total": _fuse_rounds,
+                "synthesis": None, "error": None,
+            }
+            if _fuse_background:
+                _fuse_task = asyncio.create_task(_run_fusion_bg(
+                    _fuse_room_id, _fuse_rounds, _fuse_judge, _fuse_adversarial,
+                    bool(arguments.get("minority_filter")), bool(arguments.get("cross_attend")),
+                    _fuse_adaptive, _fuse_norm, _fuse_topic,
+                ))
+                _BG_TASKS.add(_fuse_task)
+                _fuse_task.add_done_callback(_BG_TASKS.discard)
+                result = (
+                    f"[fusion:{_fuse_room_id}] started in background "
+                    f"({_fuse_rounds} round(s), judge {_fuse_judge.get('name', _fuse_judge_raw)}).\n\n"
+                    f"Poll: `room_status {_fuse_room_id}` for progress; "
+                    f"`room_read {_fuse_room_id}` when done for the synthesis "
+                    f"(also saved to {_fuse_room_id}.synthesis)."
+                )
+            else:
+                result = await _run_fusion_bg(
+                    _fuse_room_id, _fuse_rounds, _fuse_judge, _fuse_adversarial,
+                    bool(arguments.get("minority_filter")), bool(arguments.get("cross_attend")),
+                    _fuse_adaptive, _fuse_norm, _fuse_topic,
+                )
         elif name == "dual_fusion":
             _df_prompt    = arguments["prompt"]
             _df_topic     = arguments.get("topic") or _df_prompt[:120]

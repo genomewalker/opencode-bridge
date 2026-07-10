@@ -2969,8 +2969,9 @@ class RoomManager:
     )
 
     def _score_citations(self, text: str) -> int:
-        """Count verifiable artifacts (URLs, arXiv refs, DOIs, inline citations) in text."""
-        return len(self._CITATION_RE.findall(text))
+        """Count DISTINCT verifiable artifacts (URLs, arXiv refs, DOIs, inline citations).
+        Distinct, not occurrences — else the same DOI written twice clears a ≥2 gate."""
+        return len({m.group(0) for m in self._CITATION_RE.finditer(text)})
 
     def _classify_claim(self, text: str) -> str:
         """Minimal two-type tag: 'inference' if inferential language present, else 'observation'."""
@@ -3092,7 +3093,10 @@ class RoomManager:
         # Ledger stable + no disagreement — converged, but require at least some citations
         # (guards against empty/no-op responses being mistaken for consensus)
         has_citations = any(self._score_citations(c) > 0 for c in round_contents)
-        converged = has_citations or bool(prior_claim_keys)  # ok if ledger was already populated
+        # Require citations in the converging round AND a populated ledger. Was `or`,
+        # which made the citation gate dead from round 2 on (prior_claim_keys is always
+        # non-empty once the ledger fills) — a round of uncited one-liners "converged".
+        converged = has_citations and bool(prior_claim_keys)
         return converged, []
     async def run_rounds(self, room_id: str, rounds: int = 2,
                           challenge: bool = False, blind_first_round: bool = False,
