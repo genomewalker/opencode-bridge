@@ -4,12 +4,16 @@ This is a *prototype* second transport for the Codex backend. Instead of
 spawning ``codex exec`` per task (the default, in ``codex.py``), it drives the
 persistent Codex **daemon** and speaks its JSON-RPC 2.0 protocol.
 
-Transport (verified architecture): ``codex app-server`` is a **daemon + proxy**
-model, not a ``--stdio`` self-server. ``codex app-server daemon start`` runs a
-persistent daemon on a per-user unix socket (``/tmp/codex-ipc/ipc-<hash>.sock``);
-clients speak JSON-RPC over ``codex app-server proxy`` (stdio <-> that socket,
-handling its auth/permissions — a direct socket connect is EPERM). So this module
-runs ``daemon start`` (idempotent, bounded) then owns a ``proxy`` process.
+Transport (verified end-to-end): spawn the **standalone** codex binary
+(``$CODEX_HOME/packages/standalone/current/codex``) as ``app-server --stdio`` and
+speak **newline-delimited** JSON-RPC on its stdio. Confirmed:
+``initialize`` -> ``initialized`` -> ``thread/start`` -> ``turn/start`` ->
+``item/agentMessage/delta`` / ``item/completed`` -> ``turn/completed`` returns the
+reply. Two prerequisites that were the real blockers: (1) the **standalone**
+install must exist (the npm launcher's app-server does not self-serve), and (2) the
+codex state DB must be healthy (a malformed DB triggers an interactive "Press Enter"
+recovery that hangs a non-interactive server). The ``daemon``/``proxy`` subcommands
+are a separate managed-daemon path and are NOT used here.
 
 It is wired into ``CodexBridge.run_task`` behind ``CHITTA_CODEX_APP_SERVER=1``
 for exactly one path. Any failure here must fall back to the exec path — this
@@ -32,13 +36,10 @@ Protocol (verified against codex-cli 0.144.0 schema
   ``item/commandExecution/requestApproval`` / ``item/fileChange/requestApproval``
   want ``{"decision":"accept"}``. Auto-accepted here (full-auto).
 
-NOTE (empirical, this environment — UNVERIFIED happy path): ``codex app-server
-daemon start`` hangs here (40s+, no socket) — same NFS / shared-``/tmp`` SQLite &
-socket locking the ``codex`` PATH wrapper exists to fight (``/tmp/codex-ipc`` even
-holds a stale cross-user socket). So the proxy has no live daemon to reach and the
-caller falls back to exec. The transport below matches the verified daemon+proxy
-architecture and should work on a host where ``daemon start`` completes, but the
-turn/notification handling has NOT been confirmed against a live daemon here.
+VERIFIED end-to-end through ``run_task`` (flag on): returns the reply via the
+app-server in ~17s vs ~120-270s for exec on this box — the persistent process
+avoids per-turn startup. Still off by default (``CHITTA_CODEX_APP_SERVER``) and
+falls back to exec on any failure (missing standalone install, unhealthy DB, etc.).
 """
 
 from __future__ import annotations
@@ -113,44 +114,30 @@ class CodexAppServer:
                 return
             await self._spawn()
 
-    async def _ensure_daemon(self) -> None:
-        """Best-effort start of the local app-server daemon.
+    def _server_bin(self) -> str:
+        """Path to the binary that actually serves ``app-server --stdio``.
 
-        `codex app-server` is a daemon+proxy architecture, NOT a `--stdio`
-        self-server: `daemon start` runs a persistent daemon on a per-user unix
-        socket, and clients connect through `proxy` (which handles the socket's
-        auth/permissions). `start` is idempotent ("start if not already running").
-        Bounded so a hung start (known on NFS / shared-/tmp hosts, where the
-        daemon wedges on SQLite/socket locking) can't block the caller — on
-        timeout we kill it and let the proxy attempt fail into the exec fallback.
+        Must be the STANDALONE codex binary — the npm launcher's ``app-server``
+        does not self-serve (it delegates to the standalone install). Prefer
+        ``$CODEX_HOME/packages/standalone/current/codex``; fall back to the
+        configured bin if the standalone install isn't present (caller then
+        falls back to exec).
         """
-        p = None
-        try:
-            p = await asyncio.create_subprocess_exec(
-                self._bin, "app-server", "daemon", "start",
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                env=self._env, start_new_session=True,
-            )
-            await asyncio.wait_for(p.communicate(), timeout=self._init_timeout)
-        except asyncio.TimeoutError:
-            if p is not None:
-                try:
-                    p.kill()
-                except Exception:
-                    pass
-        except OSError as e:
-            raise CodexAppServerError(f"failed to start app-server daemon: {e}") from e
+        home = (self._env or os.environ).get("CODEX_HOME") or os.path.expanduser("~/.codex")
+        sa = Path(home) / "packages" / "standalone" / "current" / "codex"
+        return str(sa) if sa.exists() else self._bin
 
     async def _spawn(self) -> None:
         # Tear down any dead remnants first.
         await self._teardown_locked()
-        await self._ensure_daemon()
         try:
-            # Transport is `app-server proxy` (stdio <-> daemon control socket),
-            # NOT `app-server --stdio` (which does not self-serve on this build).
+            # `app-server --stdio` on the standalone binary: newline-delimited
+            # JSON-RPC on stdio, verified end-to-end (initialize -> thread/start
+            # -> turn/start -> turn/completed). Requires the standalone install
+            # and a healthy state DB; on either problem the spawn/initialize
+            # fails and the caller falls back to exec.
             self._proc = await asyncio.create_subprocess_exec(
-                self._bin, "app-server", "proxy",
+                self._server_bin(), "app-server", "--stdio",
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -159,7 +146,7 @@ class CodexAppServer:
                 limit=2 ** 24,
             )
         except OSError as e:
-            raise CodexAppServerError(f"failed to spawn app-server proxy: {e}") from e
+            raise CodexAppServerError(f"failed to spawn app-server: {e}") from e
 
         self._pending.clear()
         self._turns.clear()
