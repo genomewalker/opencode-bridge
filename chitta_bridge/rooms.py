@@ -869,7 +869,7 @@ class RoomManager:
         self._save_room(room_id)
         # Store synthesis back to soul memory — but never memorize a failed synthesis
         # as high-confidence wisdom (it would poison later rooms' recall).
-        if SoulClient.is_available() and not reply.startswith("[synthesis error"):
+        if SoulClient.is_available() and not reply.startswith(("[error", "[synthesis error")):
             participants = ", ".join(p["name"] for p in room.participants)
             # Extract key terms from topic for tags
             topic_words = re.sub(r"[^\w\s]", "", room.topic.lower()).split()
