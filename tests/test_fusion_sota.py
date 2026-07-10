@@ -365,3 +365,30 @@ class TestSelfMoaAndMinQuality:
             {"name": "GPT", "model": "gpt-o3", "backend": "codex"},
         ]
         assert self._weak_proposers(panel) == []
+
+
+class TestDisagreeStance:
+    """_DISAGREE_RE keys on stance, not bare connectives."""
+    def test_connective_agreement_is_not_disagreement(self):
+        # bare "however"/"but" must no longer flag agreement as dissent
+        assert not RoomManager._DISAGREE_RE.search("However, I fully agree with that.")
+        assert not RoomManager._DISAGREE_RE.search("Good point, but also worth noting.")
+
+    def test_real_disagreement_still_detected(self):
+        for s in ("I disagree with that claim.",
+                  "That is incorrect.",
+                  "The measurement contradicts the hypothesis.",
+                  "This reasoning is flawed."):
+            assert RoomManager._DISAGREE_RE.search(s), s
+
+
+class TestResolutionTierScoping:
+    """resolution_tier is scoped to the question, not the whole message."""
+    def test_question_without_own_citation_is_unresolvable(self):
+        rm = RoomManager.__new__(RoomManager)
+        msg = {"name": "A", "content": (
+            "We cite https://ex.io/a for the method. "
+            "The effect of temperature on the reaction rate remains unresolved.")}
+        qs = rm._extract_open_questions([msg])
+        # question itself has no citation → unresolvable, despite the URL earlier in the turn
+        assert qs and qs[0]["resolution_tier"] == "unresolvable"

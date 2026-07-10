@@ -2975,9 +2975,13 @@ class RoomManager:
         r'|\bmem:\w{6,}\b',                        # mem:abc123 shorthand
         re.IGNORECASE,
     )
+    # Stance words, not bare connectives: "however"/"but"/"actually," matched
+    # "However, I fully agree" as dissent (blocking convergence) while a calm
+    # refutation went undetected. Keyed on opposition/negation instead.
     _DISAGREE_RE = re.compile(
-        r'\b(disagree|challenge|push.?back|however|but\b|incorrect|wrong|counter|refute|'
-        r'not convinced|push back|I\'d argue|I would argue|on the contrary|actually,)\b',
+        r'\b(disagree\w*|challeng\w*|push.?back|incorrect|wrong|counter\w*|refut\w*|'
+        r'disput\w*|contradict\w*|mistaken|flaw\w*|not convinced|I\'d argue|'
+        r'I would argue|on the contrary|the opposite|rather than)',
         re.IGNORECASE,
     )
 
@@ -2999,17 +3003,18 @@ class RoomManager:
         for msg in messages:
             if msg["name"] in ("TOPIC", "CONTEXT", "MODERATOR"):
                 continue
-            citations = self._CITATION_RE.findall(msg.get("content", ""))
-            tier = "external" if citations else "unresolvable"
             for m in self._OPEN_Q_RE.finditer(msg.get("content", "")):
                 q = m.group(1).strip()
                 key = q[:60].lower()
                 if key not in seen and len(q) > 20:
                     seen.add(key)
+                    # Scope the citation check to the question itself, not the whole
+                    # message — else a question inherits "external" from an unrelated
+                    # cited sentence elsewhere in the same turn.
                     questions.append({
                         "question": q,
                         "introduced_by": msg["name"],
-                        "resolution_tier": tier,
+                        "resolution_tier": "external" if self._CITATION_RE.search(q) else "unresolvable",
                         "closed_by": None,
                         "close_mechanism": None,
                     })
