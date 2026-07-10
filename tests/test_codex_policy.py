@@ -17,12 +17,12 @@ class TestEffortDefault:
         _, effort = CodexBridge._apply_codex_policy("gpt-5.4", "")
         assert effort == "high"
 
-    @pytest.mark.parametrize("e", ["low", "medium", "high", "xhigh"])
+    @pytest.mark.parametrize("e", ["low", "medium", "high", "xhigh", "max", "ultra"])
     def test_valid_efforts_pass_through(self, e):
         _, effort = CodexBridge._apply_codex_policy("gpt-5.4", e)
         assert effort == e
 
-    @pytest.mark.parametrize("e", ["xxhigh", "HIGH", "ultra", "max"])
+    @pytest.mark.parametrize("e", ["xxhigh", "HIGH", "turbo"])
     def test_invalid_efforts_rejected(self, e):
         with pytest.raises(ValueError, match="Invalid Codex effort"):
             CodexBridge._apply_codex_policy("gpt-5.4", e)
