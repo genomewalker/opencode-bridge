@@ -201,10 +201,15 @@ async def _run_dual_fusion_bg(
             f"{_adversarial_block}"
         )
         _backend = judge.get("backend", "claude")
+        # A max-effort adversarial cross-synthesis over two full transcripts is slow;
+        # the default 300s _run_claude_p cap times it out. Background already shields
+        # duration, so give the judge room to finish (this failure lost a real run).
+        _judge_timeout = 900
         try:
             if _backend == "claude":
                 _reply = await rooms._run_claude_p(
-                    _synth_prompt, model=judge.get("model"), effort=judge.get("effort"))
+                    _synth_prompt, model=judge.get("model"), effort=judge.get("effort"),
+                    timeout=_judge_timeout)
             elif _backend == "codex":
                 _reply = await codex_bridge.run_task(
                     _synth_prompt, model=judge.get("model"), effort=judge.get("effort"))
