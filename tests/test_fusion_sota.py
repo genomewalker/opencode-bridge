@@ -374,6 +374,30 @@ class TestSelfMoaAndMinQuality:
         assert self._weak_proposers(panel) == []
 
 
+class TestInteractionTaxNote:
+    """Advisory fires only for a heterogeneous panel in dense/debate topology."""
+    _hetero = [{"backend": "claude"}, {"backend": "codex"}]
+    _homo = [{"backend": "claude"}, {"backend": "claude"}]
+
+    def test_fires_hetero_dense_multiround(self):
+        note = RoomManager._interaction_tax_note(self._hetero, sparse_topology=False,
+                                                 rounds=2, challenge=False)
+        assert note and "interaction-tax" in note and "claude" in note and "codex" in note
+
+    def test_fires_hetero_challenge(self):
+        assert RoomManager._interaction_tax_note(self._hetero, False, 1, challenge=True)
+
+    def test_silent_when_sparse(self):
+        assert RoomManager._interaction_tax_note(self._hetero, sparse_topology=True,
+                                                 rounds=3, challenge=True) is None
+
+    def test_silent_when_homogeneous(self):
+        assert RoomManager._interaction_tax_note(self._homo, False, 3, challenge=True) is None
+
+    def test_silent_single_round_no_challenge(self):
+        assert RoomManager._interaction_tax_note(self._hetero, False, 1, challenge=False) is None
+
+
 class TestDisagreeStance:
     """_DISAGREE_RE keys on stance, not bare connectives."""
     def test_connective_agreement_is_not_disagreement(self):

@@ -3089,6 +3089,26 @@ class RoomManager:
             "warning": warning,
         }
 
+    @staticmethod
+    def _interaction_tax_note(participants: list[dict], sparse_topology: bool,
+                              rounds: int, challenge: bool) -> Optional[str]:
+        """Advisory when a heterogeneous panel runs dense/debate rounds: cross-family
+        diversity collapses within ~1 round and synthesis tends to copy the best
+        proposal (SummerAnn/interaction-tax). Sparse (MoA) topology preserves coverage,
+        so it's exempt. Returns the note text, or None when the tax doesn't apply.
+        """
+        if sparse_topology or (rounds < 2 and not challenge):
+            return None
+        families = {(p.get("backend") or p.get("type") or "claude") for p in participants}
+        if len(families) < 2:
+            return None
+        return (
+            f"[interaction-tax] Heterogeneous panel ({', '.join(sorted(families))}) "
+            "in dense/debate topology: cross-family diversity tends to collapse within "
+            "~1 round and synthesis often copies the best proposal. For coverage, prefer "
+            "sparse_topology=true (independent sampling / MoA)."
+        )
+
     def _round_converged(self, round_contents: list[str],
                           prior_claim_keys: set[str]) -> tuple[bool, list[str]]:
         """Ledger-delta convergence: converged when no disagreement AND no new claims.
@@ -3170,6 +3190,13 @@ class RoomManager:
                     )
 
             room.challenge_mode = challenge
+
+            _tax = self._interaction_tax_note(room.participants, sparse_topology, rounds, challenge)
+            if _tax and not any(m.get("name") == "MODERATOR" and "[interaction-tax]" in m.get("content", "")
+                                for m in room.messages):
+                room.messages.append({"name": "MODERATOR", "content": _tax,
+                                      "ts": datetime.now().isoformat()})
+
             # Track new messages by identity — compression deletes/inserts
             # mid-list, so a positional slice would return the wrong tail.
             _pre_run_ids = {id(m) for m in room.messages}
