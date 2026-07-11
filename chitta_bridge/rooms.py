@@ -57,6 +57,7 @@ class DiscussionRoom:
     id: str
     topic: str
     participants: list  # [{name, backend, session_id, soul?}]
+    question: str = ""             # full task/prompt the panel answers; topic is only a short label. Falls back to topic when empty.
     messages: list = field(default_factory=list)  # [{name, content, ts}]
     created: str = field(default_factory=lambda: datetime.now().isoformat())
     turn_counts: dict = field(default_factory=dict)  # {name: int} derived from committed turn_keys
@@ -490,6 +491,7 @@ class RoomManager:
         )
 
     async def create(self, room_id: str, topic: str, participants: list[dict],
+                     question: str = "",
                      files: Optional[list[str]] = None,
                      roles: Optional[dict] = None,
                      clean: bool = False,
@@ -532,7 +534,7 @@ class RoomManager:
             project_roots = resolved_roots
         else:
             project, project_roots = _derive_project(expanded)
-        room = DiscussionRoom(id=room_id, topic=topic, participants=participants, files=expanded,
+        room = DiscussionRoom(id=room_id, topic=topic, question=question or "", participants=participants, files=expanded,
                               project=project, project_roots=project_roots,
                               roles=roles or {}, clean=clean, verbatim_rounds=verbatim_rounds,
                               preamble=preamble or "",
@@ -1115,7 +1117,7 @@ class RoomManager:
             if blind else ""
         )
         user_parts = [
-            f"**Topic:** {room.topic}",
+            f"**Task:** {room.question or room.topic}",
             "",
             "## Discussion so far",
             (transcript + blind_note) if transcript else f"(No messages yet — you are first to respond.{blind_note})",

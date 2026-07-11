@@ -2438,7 +2438,8 @@ async def call_tool(name: str, arguments: dict):
                             f"[MODERATOR] Participant order optimised by soul routing memory "
                             f"({len(_scores)} prior runs). Top model: {_fuse_norm[0].get('model','?')}.")
                         _fuse_preamble = "\n\n".join(_fuse_preamble_parts)
-            await rooms.create(room_id=_fuse_room_id, topic=_fuse_topic, participants=_fuse_norm,
+            await rooms.create(room_id=_fuse_room_id, topic=_fuse_topic, question=_fuse_prompt,
+                               participants=_fuse_norm,
                                participant_tools=["all"], preamble=_fuse_preamble)
             _fuse_adaptive = {
                 "adaptive_stop": bool(arguments.get("adaptive_stop")),
@@ -2515,9 +2516,9 @@ async def call_tool(name: str, arguments: dict):
             # Deep-copy per room — _participant_respond mutates dicts in-place
             # (session_id, _room_id, _allowed_tools) and the same list must not bleed
             # between the sparse and dense runs.
-            await rooms.create(room_id=_df_sparse_id, topic=_df_topic,
+            await rooms.create(room_id=_df_sparse_id, topic=_df_topic, question=_df_prompt,
                                participants=_copy.deepcopy(_df_norm), participant_tools=["all"], preamble=_df_preamble)
-            await rooms.create(room_id=_df_dense_id,  topic=_df_topic,
+            await rooms.create(room_id=_df_dense_id,  topic=_df_topic, question=_df_prompt,
                                participants=_copy.deepcopy(_df_norm), participant_tools=["all"], preamble=_df_preamble)
 
             # Background by default: a multi-round dual_fusion runs for minutes and
