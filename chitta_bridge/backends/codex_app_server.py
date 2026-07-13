@@ -48,12 +48,53 @@ import asyncio
 import contextlib
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any, Optional
 
 
 class CodexAppServerError(RuntimeError):
     """Any app-server transport failure. The caller falls back to exec."""
+
+
+def _codex_pids() -> list:
+    """PIDs of live codex processes (by exe basename, not cmdline — a cmdline
+    match also matches the matcher)."""
+    pids = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            if os.path.basename(os.readlink(entry / "exe")) == "codex":
+                pids.append(int(entry.name))
+        except OSError:
+            continue
+    return pids
+
+
+def clear_stale_shm(env: Optional[dict] = None) -> list:
+    """Drop leftover SQLite ``-shm`` files in CODEX_HOME when no codex is alive.
+
+    A killed codex (node hop, SIGKILL) leaves its ``-shm`` behind. On an NFS home
+    the stale file makes every later open fail with SQLITE_PROTOCOL ("locking
+    protocol"), so the app-server dies during ``initialize`` — and because that
+    death is itself unclean it leaves a fresh stale ``-shm``, which makes the
+    breakage permanent until someone clears it by hand.
+
+    Only ``-shm`` is removed: it is a pure lock/index cache SQLite rebuilds from
+    the ``-wal``. The ``-wal`` holds committed data and is never touched.
+    """
+    if _codex_pids():
+        return []
+    home = Path((env or os.environ).get("CODEX_HOME") or os.path.expanduser("~/.codex"))
+    cleared = []
+    for shm in home.glob("*.sqlite-shm"):
+        try:
+            shm.unlink()
+            cleared.append(shm.name)
+        except OSError:
+            continue
+    return cleared
 
 
 def standalone_codex(env: Optional[dict] = None) -> Optional[str]:
@@ -139,6 +180,10 @@ class CodexAppServer:
     async def _spawn(self) -> None:
         # Tear down any dead remnants first.
         await self._teardown_locked()
+        cleared = clear_stale_shm(self._env)
+        if cleared:
+            print(f"[codex app-server] cleared stale sqlite locks: {', '.join(cleared)}",
+                  file=sys.stderr, flush=True)
         try:
             # `app-server --stdio` on the standalone binary: newline-delimited
             # JSON-RPC on stdio, verified end-to-end (initialize -> thread/start

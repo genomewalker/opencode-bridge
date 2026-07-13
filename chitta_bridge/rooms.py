@@ -634,9 +634,18 @@ class RoomManager:
         # sources. Calling an unverified regex match "grounded" was the core overclaim.
         return f" [cited:{score}]" if score > 0 else " [asserted: no citations]"
 
+    @staticmethod
+    def _question_block(room: "DiscussionRoom") -> list:
+        """The prompt the panel actually answered. Without it the judge only sees
+        the topic label and synthesizes against the wrong question."""
+        if not room.question or room.question.strip() == room.topic.strip():
+            return []
+        return ["## Question the participants were asked", room.question, ""]
+
     def _build_annotated_transcript(self, room: "DiscussionRoom") -> str:
         """Transcript with per-message grounding tags (grounded:N citations / asserted)."""
         lines = [f"# Discussion Room: {room.id}", f"**Topic:** {room.topic}", ""]
+        lines += self._question_block(room)
         for msg in room.messages:
             ts = msg["ts"][11:19]
             lines.append(f"**[{ts}] {msg['name']}:**{self._tag_for(msg)}")
@@ -736,9 +745,10 @@ class RoomManager:
         if minority_filter:
             _, min_msgs, maj_summary = await self._detect_plurality(room)
             if min_msgs:
-                lines = [f"# Discussion Room: {room.id}", f"**Topic:** {room.topic}", "",
-                         "## Majority position (summarized)", maj_summary, "",
-                         "## Dissenting traces (full)", ""]
+                lines = [f"# Discussion Room: {room.id}", f"**Topic:** {room.topic}", ""]
+                lines += self._question_block(room)
+                lines += ["## Majority position (summarized)", maj_summary, "",
+                          "## Dissenting traces (full)", ""]
                 for msg in min_msgs:
                     ts = msg["ts"][11:19]
                     lines.append(f"**[{ts}] {msg['name']}:**{self._tag_for(msg)}")
