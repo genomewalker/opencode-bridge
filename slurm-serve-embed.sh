@@ -12,6 +12,8 @@ GRES="${SLURM_GRES:-gpu:a100:1}"
 TIME="${SLURM_TIME:-02:00:00}"   # on-demand backstop; embed-server idle-exits well before this
 LOG_DIR="${CHITTA_BRIDGE_LOG_DIR:-$HOME/.chitta-bridge/logs}"
 URL_DIR="${CHITTA_BRIDGE_URL_DIR:-$HOME/.chitta-bridge/endpoints}"
+# ceiling: bare `python3` on the compute nodes is conda-base PyPy 3.9; breaks if bioinfo moves.
+PYTHON="${EMBED_PYTHON:-/maps/projects/fernandezguerra/apps/opt/conda/envs/bioinfo/bin/python3.12}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -45,11 +47,13 @@ NODE=\$(hostname)
 URL=\"http://\${NODE}:${PORT}\"
 # Never leave a stale/dead URL visible while (re)starting — consumers fall back to GGUF.
 rm -f '${URL_DIR}/embed-server.url'
-# Node python3 has drifted before (missing fastapi); ensure web deps without touching torch.
-python3 -c 'import fastapi, uvicorn, pydantic' 2>/dev/null || \
-    python3 -m pip install --user -q fastapi uvicorn pydantic
+# Pinned interpreter, not bare python3: the latter is conda-base PyPy 3.9 on the compute
+# nodes, and pip then source-builds pydantic-core, which PyO3 rejects below 3.11.
+'${PYTHON}' -c 'import fastapi, uvicorn, pydantic, sentence_transformers, torch' || {
+    echo \"missing deps in ${PYTHON}\"; exit 1
+}
 echo \"\$(date): starting embed server on \$URL\"
-EMBED_PORT=${PORT} python3 '${SCRIPT_DIR}/embed-server.py' &
+EMBED_PORT=${PORT} '${PYTHON}' '${SCRIPT_DIR}/embed-server.py' &
 SRV=\$!
 # Publish the URL ONLY after the server answers — a crash never poisons the endpoint file.
 for i in \$(seq 1 120); do
