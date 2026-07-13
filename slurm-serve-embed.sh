@@ -47,6 +47,9 @@ NODE=\$(hostname)
 URL=\"http://\${NODE}:${PORT}\"
 # Never leave a stale/dead URL visible while (re)starting — consumers fall back to GGUF.
 rm -f '${URL_DIR}/embed-server.url'
+# Same on the way out: slurm SIGTERMs at the time limit, and a surviving URL file would
+# point consumers at a dead server for as long as it sits there.
+trap \"rm -f '${URL_DIR}/embed-server.url'\" EXIT
 # Pinned interpreter, not bare python3: the latter is conda-base PyPy 3.9 on the compute
 # nodes, and pip then source-builds pydantic-core, which PyO3 rejects below 3.11.
 '${PYTHON}' -c 'import fastapi, uvicorn, pydantic, sentence_transformers, torch' || {
