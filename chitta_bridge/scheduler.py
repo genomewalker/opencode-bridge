@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import random
+import socket
 import sqlite3
 import time
 import uuid
@@ -41,11 +42,39 @@ log = logging.getLogger("chitta.scheduler")
 
 SCHEDULER_DB    = Path.home() / ".chitta-bridge" / "scheduler.db"
 SCHEDULER_LOCK  = Path.home() / ".chitta-bridge" / "scheduler.lock"
+SCHEDULER_OWNER = Path.home() / ".chitta-bridge" / "scheduler.owner"
 JOBS_YAML       = Path.home() / ".chitta-bridge" / "jobs.yaml"
 RUNS_DIR        = Path.home() / ".chitta-bridge" / "job-runs"
 WORKER_SLOTS    = 3   # max concurrent subprocesses (HPC login-node constraint)
 MAX_CHAIN_DEPTH = 5
 MAX_AUTO_DISABLE_FAILURES = 5
+
+
+def _claim_owner() -> None:
+    """Record who won the scheduler lock, for whoever loses the race next.
+
+    A sidecar rather than the lock file itself: filelock opens the lock O_TRUNC
+    *before* it tries the flock, so a losing acquire blanks whatever the winner
+    wrote there. That is why the lock file is always 0 bytes.
+    """
+    try:
+        SCHEDULER_OWNER.write_text(
+            f"{socket.gethostname()} pid={os.getpid()} "
+            f"since={datetime.now().isoformat(timespec='seconds')}\n")
+    except OSError:
+        pass
+
+
+def _lock_holder() -> str:
+    """Last instance to win the lock. Advisory — the flock stays authoritative."""
+    try:
+        owner = SCHEDULER_OWNER.read_text().strip()
+    except OSError:
+        owner = ""
+    if not owner:
+        return ("an instance that left no owner file — an NFS holder on another "
+                "node is invisible to the local /proc/locks")
+    return owner
 RELOAD_INTERVAL = 5.0   # seconds between jobs.yaml polls
 SLURM_POLL_INTERVAL = 30.0
 
@@ -598,13 +627,18 @@ class SchedulerService:
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     async def start(self) -> None:
-        # Single-instance guard
+        # Single-instance guard. The lock lives in $HOME, which is NFS, so this is
+        # deliberately cluster-wide: two bridges on two nodes would double-fire every
+        # job. Losing it is therefore normal, not an error — but the loser has to be
+        # able to name the winner, so stamp the file. A remote holder never shows up
+        # in the local /proc/locks, and an unstamped lock leaves no other trace.
         self._lock_file = FileLock(str(SCHEDULER_LOCK), timeout=0)
         try:
             self._lock_file.acquire()
         except Timeout:
-            log.warning("scheduler: another instance holds the lock — scheduler disabled")
+            log.warning("scheduler: disabled — lock held by %s", _lock_holder())
             return
+        _claim_owner()
 
         self._active = True
         # Load configs before recovery — _recover_stale_runs reads self._configs
