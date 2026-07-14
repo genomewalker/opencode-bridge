@@ -5031,7 +5031,13 @@ async def _run_http_mode(mcp_port: int = 7681, dashboard_port: int = 7680) -> No
 
     # Write port file so other tools can discover us (token included for auth).
     # 0600 from creation — it carries the bearer token.
-    port_file = Path.home() / ".chitta-bridge" / "http.ports"
+    #
+    # Host-scoped, because $HOME is NFS and every node shares it: one http.ports
+    # is last-writer-wins, so a bridge on another node silently overwrites this
+    # one's pid and points any reader at a machine it isn't running on. We bind
+    # 127.0.0.1, so discovery is only ever meaningful per host anyway.
+    port_file = (Path.home() / ".chitta-bridge" /
+                 f"http.ports.{socket.gethostname().split('.')[0]}")
     _write_private(
         port_file,
         f"mcp={mcp_port}\ndashboard={dashboard_port}\npid={os.getpid()}\ntoken={_token}\n",
