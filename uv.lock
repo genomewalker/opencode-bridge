@@ -460,19 +460,16 @@ wheels = [
 
 [[package]]
 name = "chitta-bridge"
-version = "0.28.2"
+version = "0.30.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
-    { name = "camoufox", extra = ["geoip"] },
     { name = "cloudscraper" },
     { name = "croniter" },
-    { name = "curl-cffi" },
     { name = "filelock" },
     { name = "mcp" },
     { name = "odfpy" },
     { name = "pdfplumber" },
-    { name = "playwright" },
     { name = "pydantic" },
     { name = "pypdf" },
     { name = "pytz" },
@@ -482,6 +479,11 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+browser = [
+    { name = "camoufox", extra = ["geoip"] },
+    { name = "curl-cffi" },
+    { name = "playwright" },
+]
 dev = [
     { name = "pytest" },
     { name = "ruff" },
@@ -490,15 +492,15 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.9" },
-    { name = "camoufox", extras = ["geoip"], specifier = ">=0.4.11" },
+    { name = "camoufox", extras = ["geoip"], marker = "extra == 'browser'", specifier = ">=0.4.11" },
     { name = "cloudscraper", specifier = ">=1.2.71" },
     { name = "croniter", specifier = ">=2.0" },
-    { name = "curl-cffi", specifier = ">=0.15.0" },
+    { name = "curl-cffi", marker = "extra == 'browser'", specifier = ">=0.15.0" },
     { name = "filelock", specifier = ">=3.12" },
     { name = "mcp", specifier = ">=1.0.0" },
     { name = "odfpy", specifier = ">=1.4.1" },
     { name = "pdfplumber", specifier = ">=0.11.9" },
-    { name = "playwright", specifier = "==1.49.0" },
+    { name = "playwright", marker = "extra == 'browser'", specifier = "==1.49.0" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pypdf", specifier = ">=6.11.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
@@ -508,7 +510,7 @@ requires-dist = [
     { name = "simpleeval", specifier = ">=0.9.13" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["browser", "dev"]
 
 [[package]]
 name = "click"
