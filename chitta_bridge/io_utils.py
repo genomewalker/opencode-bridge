@@ -353,9 +353,16 @@ def _llm_env() -> dict:
 
     Scrubs unrelated secrets (AWS, GitHub, Slack tokens, ...) but keeps
     model-provider keys the CLIs need to authenticate.
+
+    Sets ``CC_SOUL_HEADLESS`` so the cc-soul hooks skip the context they inject
+    for an interactive human (soul recall, code-intel nudges, dedup denials).
+    A one-shot participant reads those as instructions and goes exploring: with
+    hooks live, sol ran 93 tool calls on a room prompt and never finished; with
+    them quiet, 36 and done. Passive hooks (history, memory capture) still run.
     """
     out = _scrub_env(os.environ)
     for k, v in os.environ.items():
         if k not in out and _LLM_KEEP_RE.search(k.upper()):
             out[k] = v
+    out["CC_SOUL_HEADLESS"] = "1"
     return out

@@ -53,6 +53,15 @@ from pathlib import Path
 from typing import Any, Optional
 
 
+# A turn is judged by silence, not by elapsed time. Traced on a real xhigh room
+# prompt: the server never went 10s without emitting *some* event, yet went 505s
+# without agent text and ran past 15 minutes. So idle is generous and the total
+# is only a backstop.
+IDLE_TIMEOUT = 240.0   # no event of any kind for this long => wedged
+MAX_TURN = 3600.0      # absolute ceiling, however lively it looks
+ACK_TIMEOUT = 60.0     # turn/start ack; the reply itself arrives via notifications
+
+
 class CodexAppServerError(RuntimeError):
     """Any app-server transport failure. The caller falls back to exec."""
 
@@ -343,9 +352,29 @@ class CodexAppServer:
                     fut.set_result(msg.get("result"))
             return
 
-        # Notification.
+        # Notification. Any of them is proof the turn is alive — see _touch.
         if method is not None:
-            self._on_notification(method, msg.get("params") or {})
+            params = msg.get("params") or {}
+            self._touch(params.get("threadId"))
+            self._on_notification(method, params)
+
+    def _touch(self, thread_id: Optional[str]) -> None:
+        """Mark a turn as alive. ANY notification counts, not just agent text.
+
+        A reasoning turn emits item/*, hook/* and thread/tokenUsage/updated for
+        minutes without a single agentMessage delta: measured 505s of agent-text
+        silence while never going more than ~9s without some event. Watching only
+        agent text therefore kills healthy turns.
+
+        Events that carry no threadId (rate limits, mcp startup) still prove the
+        server is working, so they refresh every turn in flight.
+        """
+        now = asyncio.get_event_loop().time()
+        if thread_id is not None and thread_id in self._turns:
+            self._turns[thread_id].last_event = now
+            return
+        for ts in self._turns.values():
+            ts.last_event = now
 
     def _on_notification(self, method: str, params: dict) -> None:
         if method == "item/agentMessage/delta":
@@ -399,10 +428,20 @@ class CodexAppServer:
         thread_id: str,
         text: str,
         effort: Optional[str] = None,
-        timeout: float = 300.0,
+        idle_timeout: float = IDLE_TIMEOUT,
+        max_total: float = MAX_TURN,
     ) -> str:
+        """Run one turn, giving up only when the server goes *quiet*.
+
+        The old flat wall-clock cap killed turns that were streaming fine: at
+        xhigh a turn can reason and run tools for 15+ minutes, so a 300s cap cut
+        it off mid-answer and the caller silently downgraded to the slow exec
+        path. We now fail on idleness (no event at all for ``idle_timeout``),
+        with ``max_total`` only as a backstop against a turn that never ends.
+        """
         if not self._alive():
             raise CodexAppServerError("app-server not running")
+        loop = asyncio.get_event_loop()
         ts = _TurnState()
         self._turns[thread_id] = ts
         try:
@@ -413,11 +452,25 @@ class CodexAppServer:
             if effort:
                 params["effort"] = effort
             # turn/start returns an ack; the reply arrives via notifications.
-            await self._request("turn/start", params, timeout=timeout)
-            await asyncio.wait_for(ts.done, timeout=timeout)
-        except asyncio.TimeoutError as e:
-            raise CodexAppServerError(
-                f"turn did not complete within {timeout}s") from e
+            await self._request("turn/start", params, timeout=ACK_TIMEOUT)
+            deadline = loop.time() + max_total
+            while True:
+                now = loop.time()
+                if now >= deadline:
+                    raise CodexAppServerError(
+                        f"turn still running after {max_total}s; giving up")
+                idle_left = ts.last_event + idle_timeout - now
+                if idle_left <= 0:
+                    raise CodexAppServerError(
+                        f"app-server sent no event for {idle_timeout}s")
+                try:
+                    # shield: a wait_for timeout must not cancel the turn itself.
+                    await asyncio.wait_for(
+                        asyncio.shield(ts.done),
+                        timeout=min(idle_left, deadline - now))
+                    break
+                except asyncio.TimeoutError:
+                    continue
         finally:
             self._turns.pop(thread_id, None)
         reply = ts.final_message or "".join(ts.deltas)
@@ -433,23 +486,26 @@ class CodexAppServer:
         effort: Optional[str] = None,
         sandbox: str = "danger-full-access",
         approval_policy: str = "never",
-        timeout: float = 300.0,
+        idle_timeout: float = IDLE_TIMEOUT,
+        max_total: float = MAX_TURN,
     ) -> str:
         """Convenience: fresh thread + one turn -> reply text."""
         thread_id = await self.start_thread(
             model=model, cwd=cwd, sandbox=sandbox,
-            approval_policy=approval_policy, timeout=min(timeout, 60.0))
+            approval_policy=approval_policy)
         return await self.run_turn(
-            thread_id, text, effort=effort, timeout=timeout)
+            thread_id, text, effort=effort,
+            idle_timeout=idle_timeout, max_total=max_total)
 
 
 class _TurnState:
-    __slots__ = ("deltas", "final_message", "done")
+    __slots__ = ("deltas", "final_message", "done", "last_event")
 
     def __init__(self) -> None:
         self.deltas: list[str] = []
         self.final_message: str = ""
         self.done: asyncio.Future = asyncio.get_event_loop().create_future()
+        self.last_event: float = asyncio.get_event_loop().time()
 
 
 # ---------------------------------------------------------------------------

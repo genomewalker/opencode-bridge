@@ -199,6 +199,9 @@ def _llm_env() -> dict:
     for k, v in os.environ.items():
         if k not in out and _LLM_KEEP_RE.search(k.upper()):
             out[k] = v
+    # See io_utils._llm_env: quiets the cc-soul hooks that inject context meant
+    # for an interactive human. A one-shot participant obeys them and wanders.
+    out["CC_SOUL_HEADLESS"] = "1"
     return out
 
 
