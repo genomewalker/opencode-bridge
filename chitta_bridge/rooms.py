@@ -31,6 +31,7 @@ from chitta_bridge.soul import SoulClient
 from chitta_bridge.backends.codex import CodexBridge
 from chitta_bridge.backends.local import GpuNodeDiscovery, LocalModelBridge
 from chitta_bridge.orchestrator import AgentSoul
+from chitta_bridge.watchdog import ProgressWatch
 from chitta_bridge.prompts import _expand_paths, _embed_files_in_prompt
 from chitta_bridge.cost import _append_room_cost, _append_room_audit
 from chitta_bridge.code_intel import _code_intel
@@ -2548,6 +2549,7 @@ class RoomManager:
             loop = asyncio.get_event_loop()
             result_text: Optional[str] = None
             last_event = loop.time()
+            watch = ProgressWatch(last_event)
 
             async def _read_result() -> None:
                 nonlocal result_text, last_event
@@ -2561,6 +2563,9 @@ class RoomManager:
                         data = json.loads(line.decode(errors="replace"))
                     except json.JSONDecodeError:
                         continue
+                    # Liveness above, progress here: hook chatter refreshes the
+                    # former but must never refresh the latter.
+                    watch.feed_claude(data, loop.time())
                     if data.get("type") == "result":
                         if data.get("is_error"):
                             result_text = f"[error: {data.get('result', 'claude error')}]"
@@ -2581,10 +2586,15 @@ class RoomManager:
                 if idle_left <= 0:
                     reader.cancel()
                     return f"[error: claude -p sent no output for {idle_timeout}s]"
+                stuck = watch.verdict(now)
+                if stuck:
+                    reader.cancel()
+                    return f"[error: claude -p is not progressing: {stuck}]"
                 try:
                     # shield: a wait_for timeout must not cancel the read itself.
                     await asyncio.wait_for(asyncio.shield(reader),
-                                           timeout=min(idle_left, deadline - now))
+                                           timeout=min(idle_left, deadline - now,
+                                                       watch.left(now)))
                     break
                 except asyncio.TimeoutError:
                     continue

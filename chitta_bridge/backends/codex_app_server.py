@@ -52,6 +52,8 @@ import sys
 from pathlib import Path
 from typing import Any, Optional
 
+from ..watchdog import ProgressWatch
+
 
 # A turn is judged by silence, not by elapsed time. Traced on a real xhigh room
 # prompt: the server never went 10s without emitting *some* event, yet went 505s
@@ -60,6 +62,10 @@ from typing import Any, Optional
 IDLE_TIMEOUT = 240.0   # no event of any kind for this long => wedged
 MAX_TURN = 3600.0      # absolute ceiling, however lively it looks
 ACK_TIMEOUT = 60.0     # turn/start ack; the reply itself arrives via notifications
+
+# Idleness only catches a turn that goes quiet. A turn that retries, thrashes or
+# polls forever stays noisy while getting nowhere, and the 3600s ceiling is the
+# only thing that ever stopped it. See watchdog.ProgressWatch.
 
 
 class CodexAppServerError(RuntimeError):
@@ -353,9 +359,15 @@ class CodexAppServer:
             return
 
         # Notification. Any of them is proof the turn is alive — see _touch.
+        # Liveness (_touch) and progress (watch) are deliberately separate: every
+        # notification refreshes the former, only a few advance the latter.
         if method is not None:
             params = msg.get("params") or {}
             self._touch(params.get("threadId"))
+            ts = self._turns.get(params.get("threadId"))
+            if ts is not None:
+                ts.watch.feed_codex(method, params,
+                                    asyncio.get_event_loop().time())
             self._on_notification(method, params)
 
     def _touch(self, thread_id: Optional[str]) -> None:
@@ -463,11 +475,15 @@ class CodexAppServer:
                 if idle_left <= 0:
                     raise CodexAppServerError(
                         f"app-server sent no event for {idle_timeout}s")
+                stuck = ts.watch.verdict(now)
+                if stuck:
+                    raise CodexAppServerError(f"turn is not progressing: {stuck}")
                 try:
                     # shield: a wait_for timeout must not cancel the turn itself.
                     await asyncio.wait_for(
                         asyncio.shield(ts.done),
-                        timeout=min(idle_left, deadline - now))
+                        timeout=min(idle_left, deadline - now,
+                                    ts.watch.left(now)))
                     break
                 except asyncio.TimeoutError:
                     continue
@@ -499,13 +515,14 @@ class CodexAppServer:
 
 
 class _TurnState:
-    __slots__ = ("deltas", "final_message", "done", "last_event")
+    __slots__ = ("deltas", "final_message", "done", "last_event", "watch")
 
     def __init__(self) -> None:
         self.deltas: list[str] = []
         self.final_message: str = ""
         self.done: asyncio.Future = asyncio.get_event_loop().create_future()
         self.last_event: float = asyncio.get_event_loop().time()
+        self.watch = ProgressWatch(asyncio.get_event_loop().time())
 
 
 # ---------------------------------------------------------------------------
