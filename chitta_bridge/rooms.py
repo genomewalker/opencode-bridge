@@ -255,6 +255,13 @@ _ACTOR_TOOLS = frozenset({
 
 _ULTRACODE_KEYWORDS = re.compile(r"\bultracode\b", re.IGNORECASE)
 
+# Same rule as the codex app-server (see backends/codex_app_server.py): a turn is
+# judged by silence, not by elapsed time. --output-format stream-json emits an
+# event line per hook / thinking step / message, so a working turn is never quiet
+# for long, while a wedged one is quiet immediately. The total is only a backstop.
+CLAUDE_IDLE_TIMEOUT = 240.0   # no line of any kind for this long => wedged
+CLAUDE_MAX_TURN = 3600.0      # absolute ceiling, however lively it looks
+
 
 class RoomManager:
     """Manage discussion rooms and run async multi-agent conversations."""
@@ -2394,16 +2401,12 @@ class RoomManager:
         if backend == "claude":
             full_prompt = f"{system_prompt}\n\n{message}" if system_prompt else message
             _usage: dict = {}
-            # Heavy xhigh/max turns over big files exceed the 300s default (Fable timed
-            # out reading a 3.4k-line file). Background shields duration, so scale by effort.
-            _p_timeout = {"max": 900, "xhigh": 600}.get((participant.get("effort") or "").lower(), 300)
             result = await self._run_claude_p(
                 full_prompt, files=files,
                 model=participant.get("model"),
                 effort=participant.get("effort"),
                 allowed_tools=participant.get("_allowed_tools"),
                 _usage_out=_usage,
-                timeout=_p_timeout,
             )
             if _usage:
                 participant["_last_usage"] = _usage
@@ -2489,17 +2492,24 @@ class RoomManager:
 
         else:
             return f"[error: unknown backend {backend!r}]"
-    async def _run_claude_p(self, prompt: str, timeout: int = 300,
+    async def _run_claude_p(self, prompt: str, timeout: float = CLAUDE_MAX_TURN,
+                             idle_timeout: float = CLAUDE_IDLE_TIMEOUT,
                              files: Optional[list[str]] = None,
                              model: Optional[str] = None,
                              effort: Optional[str] = None,
                              allowed_tools: Optional[list] = None,
                              _usage_out: Optional[dict] = None) -> str:
-        """Run `claude -p --output-format json` and return the response text.
+        """Run `claude -p --output-format stream-json` and return the response text.
 
         The native claude binary hangs after outputting its result (never closes
         stdout), so communicate() deadlocks. Instead we stream stdout line-by-line,
         parse the JSON result object, then kill the process.
+
+        stream-json rather than json because json prints nothing at all until the
+        turn ends: there is no liveness signal, so the only thing you can time out
+        on is total elapsed, which kills healthy long turns. stream-json emits a
+        line per hook / thinking step / message, which is what `idle_timeout`
+        watches. `timeout` stays as the absolute backstop.
         """
         if not _cfg.CLAUDE_BIN:
             _cfg.CLAUDE_BIN = shutil.which("claude")
@@ -2508,7 +2518,8 @@ class RoomManager:
         proc = None
         try:
             full_prompt = _embed_files_in_prompt(prompt, files or [])
-            cmd = [_cfg.CLAUDE_BIN, "-p", "--output-format", "json"]
+            # -p + stream-json requires --verbose; without it the CLI refuses to start.
+            cmd = [_cfg.CLAUDE_BIN, "-p", "--output-format", "stream-json", "--verbose"]
             if model:
                 cmd.extend(["--model", model])
             if effort:
@@ -2534,13 +2545,18 @@ class RoomManager:
             await proc.stdin.drain()
             proc.stdin.close()
 
+            loop = asyncio.get_event_loop()
             result_text: Optional[str] = None
+            last_event = loop.time()
+
             async def _read_result() -> None:
-                nonlocal result_text
+                nonlocal result_text, last_event
                 while True:
                     line = await proc.stdout.readline()
                     if not line:
                         break
+                    # Any line is proof of life, not just the ones we can parse.
+                    last_event = loop.time()
                     try:
                         data = json.loads(line.decode(errors="replace"))
                     except json.JSONDecodeError:
@@ -2554,10 +2570,24 @@ class RoomManager:
                             _usage_out.update(data["usage"])
                         return
 
-            try:
-                await asyncio.wait_for(_read_result(), timeout=timeout)
-            except asyncio.TimeoutError:
-                return f"[error: claude -p timed out after {timeout}s]"
+            reader = asyncio.ensure_future(_read_result())
+            deadline = loop.time() + timeout
+            while True:
+                now = loop.time()
+                if now >= deadline:
+                    reader.cancel()
+                    return f"[error: claude -p still running after {timeout}s]"
+                idle_left = last_event + idle_timeout - now
+                if idle_left <= 0:
+                    reader.cancel()
+                    return f"[error: claude -p sent no output for {idle_timeout}s]"
+                try:
+                    # shield: a wait_for timeout must not cancel the read itself.
+                    await asyncio.wait_for(asyncio.shield(reader),
+                                           timeout=min(idle_left, deadline - now))
+                    break
+                except asyncio.TimeoutError:
+                    continue
 
             if result_text is not None:
                 return result_text
