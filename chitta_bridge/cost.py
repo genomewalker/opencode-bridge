@@ -8,6 +8,9 @@ from typing import Optional
 __all__ = ["_estimate_cost_usd", "_append_room_cost", "_append_room_audit"]
 
 _MODEL_RATES: dict[str, tuple[float, float]] = {
+    # ceiling: opus-5 rates unverified — mirrors the opus-4.x row so the ledger
+    # is non-zero; upgrade: replace with published rates when confirmed.
+    "claude-opus-5":      (15.0, 75.0),
     "claude-opus-4-8":    (15.0, 75.0),
     "claude-opus-4-7":    (15.0, 75.0),
     "claude-sonnet-5":    (3.0,  15.0),

@@ -42,10 +42,12 @@ def _discover_claude_shorthands() -> "dict[str, str]":
     if _CLAUDE_MODEL_CACHE is not None:
         return _CLAUDE_MODEL_CACHE
     _FALLBACK: "dict[str, str]" = {
-        "opus":     "claude-opus-4-8",
+        "opus":     "claude-opus-5",
+        "opus-5":   "claude-opus-5",
         "opus-4.8": "claude-opus-4-8",
         "opus-4-8": "claude-opus-4-8",
-        "sonnet":   "claude-sonnet-4-6",
+        "sonnet":   "claude-sonnet-5",
+        "sonnet-5": "claude-sonnet-5",
         "haiku":    "claude-haiku-4-5-20251001",
         "fable":    "claude-fable-5",
         "fable5":   "claude-fable-5",

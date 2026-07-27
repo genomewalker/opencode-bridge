@@ -1314,11 +1314,11 @@ async def list_tools():
                             '"soul":{"system_prompt":"...","realm":"...","tools":["recall","web_search"],'
                             '"max_tool_turns":3,"challenge_bias":0.5,"max_rounds":0}}]. '
                             'backend defaults to "claude" if omitted. '
-                            'effort: codex=low/medium/high/xhigh; claude=low/medium/xhigh/max '
-                            '(NOTE: high is NOT valid for claude-opus-4-7 — use xhigh instead). '
+                            'effort: codex=low/medium/high/xhigh; claude=low/medium/high/xhigh/max '
+                            '(NOTE: high is NOT valid on claude-opus-4-7 — use xhigh there; it is valid on opus-5). '
                             'quarantine: "reader" = read-only tools only (web/search/recall), cannot write/run; '
                             '"actor" = action tools only, validates reader findings before acting. '
-                            'Shorthand strings: "codex:gpt-5.5:high", "claude:claude-opus-4-7:xhigh".'
+                            'Shorthand strings: "codex:gpt-5.5:high", "claude:opus:xhigh".'
                         )
                     },
                     "files": {
@@ -3193,8 +3193,8 @@ async def call_tool(name: str, arguments: dict):
                             claude_models["sonnet"] = mid
                         elif "haiku" in mid and "haiku" not in claude_models:
                             claude_models["haiku"] = mid
-            opus = claude_models.get("opus", "claude-opus-4-8")
-            sonnet = claude_models.get("sonnet", "claude-sonnet-4-6")
+            opus = claude_models.get("opus", "claude-opus-5")
+            sonnet = claude_models.get("sonnet", "claude-sonnet-5")
             # Codex: use current configured model
             codex_model = codex_bridge.config.codex_model if codex_bridge else DEFAULT_CODEX_MODEL
             if task_type == "fast":

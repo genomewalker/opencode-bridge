@@ -26,7 +26,7 @@ from chitta_bridge.models import (
 )
 import chitta_bridge.config as _cfg
 from chitta_bridge.io_utils import _sanitize_session_id
-from chitta_bridge.discovery import _infer_backend
+from chitta_bridge.discovery import _infer_backend, _discover_claude_shorthands
 from chitta_bridge.soul import SoulClient
 from chitta_bridge.backends.codex import CodexBridge
 from chitta_bridge.backends.local import GpuNodeDiscovery, LocalModelBridge
@@ -849,7 +849,8 @@ class RoomManager:
             else:
                 inferred = "claude"
             synth = {"name": "Synthesizer", "backend": inferred,
-                     "model": "claude-opus-4-8" if inferred == "claude" else None}
+                     "model": _discover_claude_shorthands().get("opus", "claude-opus-5")
+                              if inferred == "claude" else None}
         synth_name = synth.get("name", "Synthesizer")
         backend = synth.get("backend", "claude")
         sid = synth.get("session_id")
