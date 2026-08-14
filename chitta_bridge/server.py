@@ -1375,6 +1375,10 @@ async def list_tools():
                     "project": {
                         "type": "string",
                         "description": "Optional short project slug for the memory realm. Derived from project_roots/files if omitted."
+                    },
+                    "timeout": {
+                        "type": ["integer", "string"],
+                        "description": "Per-participant backend-call wall-clock cap in seconds (0 = backend defaults: claude 3600s, codex 300s exec / app-server MAX_TURN). Raise for long xhigh/multi-tool turns; the room persists it and every run_round call inherits it. Independent of the MCP client's own idle timeout."
                     }
                 },
                 "required": ["room_id", "topic", "participants"]
@@ -1404,7 +1408,8 @@ async def list_tools():
                     "sparse_topology": {"type": "boolean", "description": "If true, ALL rounds are blind — participants never see each other's responses, only topic/context/moderator. Preserves statistical independence across all rounds; the synthesizer is the only node that sees the full transcript. Stronger than blind_first_round. (default: false)"},
                     "stop_early": {"type": "boolean", "description": "If true, stop before exhausting all rounds when the latest round shows no disagreement language and at least one cited response — i.e. the discussion has converged on evidence. (default: false)"},
                     "prompt": {"type": "string", "description": "Discussion prompt to inject as a MODERATOR message before running rounds"},
-                    "files": {"type": "array", "items": {"type": "string"}, "description": "File paths to attach to the room for this run"}
+                    "files": {"type": "array", "items": {"type": "string"}, "description": "File paths to attach to the room for this run"},
+                    "timeout": {"type": ["integer", "string"], "description": "Override the room's per-participant backend-call timeout (seconds) for this and later runs; 0 = backend defaults. Persists on the room."}
                 },
                 "required": ["room_id"]
             }
@@ -2923,6 +2928,7 @@ async def call_tool(name: str, arguments: dict):
                     preambles=(json.loads(arguments["preambles"]) if isinstance(arguments.get("preambles"), str) else arguments.get("preambles") or {}),
                     visibility=(json.loads(arguments["visibility"]) if isinstance(arguments.get("visibility"), str) else arguments.get("visibility") or {}),
                     participant_tools=arguments.get("participant_tools") or [],
+                    timeout=int(arguments.get("timeout", 0) or 0),
                     project=arguments.get("project", ""),
                     project_roots=arguments.get("project_roots"),
                 )
@@ -2970,6 +2976,10 @@ async def call_tool(name: str, arguments: dict):
             if rid not in rooms.rooms:
                 rooms._try_load_room(rid)
             prompt = arguments.get("prompt")
+            # Per-room timeout override — persists on the room for this and later runs.
+            if arguments.get("timeout") is not None and rid in rooms.rooms:
+                rooms.rooms[rid].timeout = int(arguments.get("timeout") or 0)
+                rooms._save_room(rid)
             # Ultracode detection — elevate effort + rounds when keyword present
             ultracode_mode = bool(prompt and _ULTRACODE_KEYWORDS.search(prompt))
             if ultracode_mode and rid in rooms.rooms:

@@ -657,6 +657,12 @@ class CodexBridge:
                     _sync_kill_group(proc)
                     await proc.wait()
                     stderr_task.cancel()
+                    # read_timeout = min(stall_timeout, remaining): when `remaining`
+                    # was the binding cap we hit the total-timeout budget, not a
+                    # stall. Only a full stall_timeout wait (with budget to spare)
+                    # is a genuine stall. Report whichever actually fired.
+                    if first_line or remaining <= stall_timeout:
+                        return f"Timed out after {timeout}s", 1
                     return f"Model stalled — no output for {stall_timeout}s", 1
                 except ValueError:
                     # JSONL event exceeded the pipe limit; readline reset the
@@ -1028,8 +1034,13 @@ Set via:
         full_auto: bool = True,
         effort: Optional[str] = None,
         sandbox: Optional[str] = None,
+        timeout: Optional[int] = None,
     ) -> str:
-        """Run a one-off task without session management."""
+        """Run a one-off task without session management.
+
+        timeout (>0) overrides the wall-clock backstop for both the app-server
+        (run_turn max_total) and the exec fallback; None keeps their defaults.
+        """
         # App-server is ON by default (faster: ~17s vs ~120-270s, persistent
         # process). Opt out with CHITTA_CODEX_APP_SERVER=0. Only attempt it when
         # the standalone codex install is present, so hosts without it skip
@@ -1039,7 +1050,7 @@ Set via:
             if standalone_codex(_llm_env()):
                 reply = await self._run_task_app_server(
                     task, working_dir=working_dir, model=model,
-                    effort=effort, sandbox=sandbox,
+                    effort=effort, sandbox=sandbox, timeout=timeout,
                 )
                 if reply is not None:
                     return reply
@@ -1048,7 +1059,8 @@ Set via:
         lastmsg = self._new_last_message_file()
         args[1:1] = ["-o", lastmsg]  # after "exec", before the trailing "-"
         cwd = working_dir or os.getcwd()
-        output, code = await self._run_codex_exec_stdin(args, task, cwd)
+        output, code = await self._run_codex_exec_stdin(
+            args, task, cwd, **({"timeout": int(timeout)} if timeout else {}))
         self._cleanup_stale_arg0_dirs()
         if code != 0:
             self._read_last_message(lastmsg, "")  # unlink temp
@@ -1067,6 +1079,7 @@ Set via:
         model: Optional[str] = None,
         effort: Optional[str] = None,
         sandbox: Optional[str] = None,
+        timeout: Optional[int] = None,
     ) -> Optional[str]:
         """Experimental: run one task via the persistent Codex app-server.
 
@@ -1090,6 +1103,7 @@ Set via:
                     effort=effort,
                     sandbox=effective_sandbox,
                     approval_policy="never",
+                    **({"max_total": float(timeout)} if timeout else {}),
                 )
             except CodexAppServerError as e:
                 import sys as _sys

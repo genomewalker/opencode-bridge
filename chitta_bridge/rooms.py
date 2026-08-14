@@ -79,6 +79,7 @@ class DiscussionRoom:
     visibility: dict = field(default_factory=dict)  # {round: {name: "all"|"none"|[names]}} — Conductor-style per-step access matrix
     participant_tools: list = field(default_factory=list)  # tools each participant may call; ["all"] = skip-permissions
     dag: dict = field(default_factory=dict)  # {node_name: [dep_names]} — DAG scheduling; empty = parallel gather
+    timeout: int = 0             # per-participant backend-call wall-clock cap (s); 0 = backend defaults (claude 3600, codex 300/app-server MAX_TURN)
     schema_version: int = PERSISTED_SCHEMA_VERSION
 
     def save(self, path: Path):
@@ -509,6 +510,7 @@ class RoomManager:
                      visibility: Optional[dict] = None,
                      participant_tools: Optional[list] = None,
                      dag: Optional[dict] = None,
+                     timeout: int = 0,
                      project: str = "",
                      project_roots: Optional[list[str]] = None) -> str:
         _sanitize_session_id(room_id)
@@ -549,7 +551,7 @@ class RoomManager:
                               preambles=preambles or {},
                               visibility=visibility or {},
                               participant_tools=participant_tools or [],
-                              dag=dag or {})
+                              dag=dag or {}, timeout=int(timeout or 0))
         room.messages.append({"name": "TOPIC", "content": topic, "ts": datetime.now().isoformat()})
         # Inject soul context only when a PROJECT realm is established (files /
         # project_roots). A prompt-driven room with no project scope did a GLOBAL
@@ -2389,8 +2391,13 @@ class RoomManager:
                                 system_prompt: Optional[str] = None,
                                 tools: Optional[list] = None,
                                 files: Optional[list[str]] = None,
-                                working_dir: Optional[str] = None) -> str:
-        """Send a message to a participant's backend, returning the raw reply."""
+                                working_dir: Optional[str] = None,
+                                timeout: int = 0) -> str:
+        """Send a message to a participant's backend, returning the raw reply.
+
+        timeout (>0) is the per-call wall-clock backstop in seconds, carried from
+        the room's `timeout` field; 0 keeps each backend's own default.
+        """
         name = participant["name"]
         backend = participant.get("backend") or participant.get("type")
         if not backend:
@@ -2409,6 +2416,7 @@ class RoomManager:
                 effort=participant.get("effort"),
                 allowed_tools=participant.get("_allowed_tools"),
                 _usage_out=_usage,
+                **({"timeout": float(timeout)} if timeout else {}),
             )
             if _usage:
                 participant["_last_usage"] = _usage
@@ -2482,6 +2490,7 @@ class RoomManager:
                     working_dir=working_dir,
                     model=participant.get("model"),
                     effort=participant.get("effort"),
+                    timeout=int(timeout) if timeout else None,
                 )
             # Codex CLI reports no token usage — estimate from characters so
             # room_cost doesn't silently omit codex spend.
@@ -2770,9 +2779,9 @@ class RoomManager:
         for turn in range(max_tool_turns + 1):
             try:
                 if turn == 0:
-                    reply = await self._send_to_backend(participant, user_msg, system_prompt, files=room_files, working_dir=working_dir)
+                    reply = await self._send_to_backend(participant, user_msg, system_prompt, files=room_files, working_dir=working_dir, timeout=room.timeout)
                 else:
-                    reply = await self._send_to_backend(participant, user_msg, system_prompt, working_dir=working_dir)
+                    reply = await self._send_to_backend(participant, user_msg, system_prompt, working_dir=working_dir, timeout=room.timeout)
             except Exception as e:
                 reply = f"[error: {e}]"
                 break
@@ -2834,7 +2843,7 @@ class RoomManager:
                     f"This is retry {_cit_retries + 1}/2."
                 )
                 try:
-                    _retry_reply = await self._send_to_backend(participant, _retry_prompt, system_prompt, working_dir=working_dir)
+                    _retry_reply = await self._send_to_backend(participant, _retry_prompt, system_prompt, working_dir=working_dir, timeout=room.timeout)
                     _retry_final = self._extract_final_response(_retry_reply) or _retry_reply
                     if _retry_final.strip() and not _retry_final.startswith("[error:"):
                         final = _retry_final
